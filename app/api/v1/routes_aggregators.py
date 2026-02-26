@@ -40,6 +40,7 @@ class AggregatorDashboardData(BaseModel):
     stats: Dict[str, int]
     pending_requests: List[BookingDashboardOut]
     active_trips: List[BookingDashboardOut]
+    completed_requests: List[BookingDashboardOut]
 
 class DriverAssignIn(BaseModel):
     booking_id: str
@@ -107,19 +108,23 @@ def get_aggregator_dashboard(
     query = db.query(CabBooking).filter(CabBooking.port.ilike(f"%{port}%"))
     
     # Stats
-    pending_count = query.filter(CabBooking.status.in_([BookingStatus.PENDING, BookingStatus.CONFIRMED])).count()
-    active_count = query.filter(CabBooking.status == BookingStatus.DRIVER_ASSIGNED).count()
+    pending_count = query.filter(CabBooking.status == BookingStatus.PENDING).count()
+    active_count = query.filter(CabBooking.status.in_([BookingStatus.DRIVER_ASSIGNED, BookingStatus.CONFIRMED])).count() 
     in_progress_count = query.filter(CabBooking.status == BookingStatus.IN_PROGRESS).count()
     
-    today = date.today()
+    # Completed today (UTC)
+    now = datetime.utcnow()
+    today_start = datetime(now.year, now.month, now.day)
+    
     completed_today = query.filter(
         CabBooking.status == BookingStatus.COMPLETED,
-        func.date(CabBooking.updated_at) == today
+        CabBooking.completed_at >= today_start
     ).count()
 
     # Lists
-    pending_bookings = query.filter(CabBooking.status.in_([BookingStatus.PENDING, BookingStatus.CONFIRMED])).order_by(CabBooking.created_at.desc()).all()
-    active_bookings = query.filter(CabBooking.status.in_([BookingStatus.DRIVER_ASSIGNED, BookingStatus.IN_PROGRESS])).order_by(CabBooking.created_at.desc()).all()
+    pending_bookings = query.filter(CabBooking.status == BookingStatus.PENDING).order_by(CabBooking.created_at.desc()).limit(20).all()
+    active_bookings = query.filter(CabBooking.status.in_([BookingStatus.DRIVER_ASSIGNED, BookingStatus.CONFIRMED, BookingStatus.IN_PROGRESS])).order_by(CabBooking.created_at.desc()).all()
+    completed_bookings = query.filter(CabBooking.status == BookingStatus.COMPLETED).order_by(CabBooking.updated_at.desc()).limit(50).all()
 
     def transform(b: CabBooking):
         return BookingDashboardOut(
@@ -149,7 +154,8 @@ def get_aggregator_dashboard(
             "today_completed_trips": completed_today
         },
         pending_requests=[transform(b) for b in pending_bookings],
-        active_trips=[transform(b) for b in active_bookings]
+        active_trips=[transform(b) for b in active_bookings],
+        completed_requests=[transform(b) for b in completed_bookings]
     )
 
 @router.post("/dashboard/assign-driver")

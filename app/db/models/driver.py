@@ -21,6 +21,10 @@ class Driver(Base):
     rating = Column(Float, default=5.0)
     profile_image = Column(String(512), nullable=True)
     status = Column(String(32), server_default="Available")  # Available, Busy, Offline
+    
+    hashed_password = Column(String(255), nullable=True) # Will be set by aggregator initially
+    must_change_password = Column(DateTime(timezone=True), nullable=True, server_default=None) # Or boolean, user asked for update option
+    is_temp_password = Column(Integer, server_default="1") # 1 if needs change
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

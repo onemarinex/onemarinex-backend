@@ -67,6 +67,9 @@ class CabBooking(Base):
     aggregator_name = Column(String, nullable=True) # e.g. Ola, Uber, etc.
     agent_number = Column(String, default="+91 9876543251")
     otp = Column(String(10), nullable=True)
+    arrived_at = Column(DateTime(timezone=True), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
     
     # Status
     status = Column(SQLEnum(BookingStatus), default=BookingStatus.PENDING, nullable=False)

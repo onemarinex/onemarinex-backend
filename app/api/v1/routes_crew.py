@@ -256,9 +256,8 @@ def book_cab(
     
     print(f"DEBUG: Receiving booking with price: {body.estimated_price}")
     
-    # Generate 4-digit OTP
-    import random
-    otp = f"{random.randint(0, 9999):04d}"
+    # Use the crew member's fixed lifetime OTP
+    otp = profile.ride_otp or "1234"
     
     from app.db.models.cab_booking import VehicleType, BookingStatus
     new_booking = CabBooking(

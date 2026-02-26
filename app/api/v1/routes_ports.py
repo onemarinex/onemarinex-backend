@@ -19,4 +19,5 @@ class PortOut(BaseModel):
 @router.get("/", response_model=List[PortOut])
 def get_ports(db: Session = Depends(get_db)):
     """Retrieve all active ports."""
-    return db.query(Port).filter(Port.is_active == True).order_by(Port.name).all()
+    from sqlalchemy import or_
+    return db.query(Port).filter(or_(Port.is_active == True, Port.is_active.is_(None))).order_by(Port.name).all()
