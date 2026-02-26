@@ -26,6 +26,7 @@ class CabBooking(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     booking_id = Column(String, unique=True, index=True, nullable=False)  # CAB-XXXXXXXX
+    port = Column(String(255), nullable=True, index=True) # The port location (e.g. Vizag, Mumbai)
     
     # Crew relationship
     crew_id = Column(Integer, ForeignKey("crew_profiles.id"), nullable=False)
@@ -54,11 +55,18 @@ class CabBooking(Base):
     # Scheduling
     scheduled_time = Column(DateTime, nullable=True)
     
-    # OTP and driver details
-    otp = Column(String(4), nullable=False)  # 4-digit OTP
+    # Driver and Aggregator details
+    driver_id = Column(Integer, ForeignKey("drivers.id"), nullable=True)
+    aggregator_id = Column(Integer, ForeignKey("aggregator_profiles.id"), nullable=True)
+    
+    assigned_driver = relationship("Driver", back_populates="cab_bookings")
+    
     driver_name = Column(String, nullable=True)
     driver_phone = Column(String, nullable=True)
+    driver_plate = Column(String, nullable=True) # e.g. MH 01 AG 1282
+    aggregator_name = Column(String, nullable=True) # e.g. Ola, Uber, etc.
     agent_number = Column(String, default="+91 9876543251")
+    otp = Column(String(10), nullable=True)
     
     # Status
     status = Column(SQLEnum(BookingStatus), default=BookingStatus.PENDING, nullable=False)

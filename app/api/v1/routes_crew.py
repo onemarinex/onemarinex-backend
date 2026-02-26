@@ -64,6 +64,7 @@ class CabBookingCreateIn(BaseModel):
     estimated_price: float
     distance_km: float
     num_passengers: int = 1
+    port: Optional[str] = None
     crew_member_ids: Optional[List[str]] = None  # List of HeyPorts IDs
     scheduled_time: Optional[datetime] = None
 
@@ -274,6 +275,7 @@ def book_cab(
         estimated_price=body.estimated_price,
         distance_km=body.distance_km,
         num_passengers=body.num_passengers,
+        port=body.port or profile.current_port,
         crew_member_ids=body.crew_member_ids,
         scheduled_time=body.scheduled_time,
         otp=otp,

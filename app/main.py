@@ -8,12 +8,16 @@ from app.core.config import settings
 from app.db.session import engine
 from app.db.base import Base
 
-from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants
+from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants, routes_incidents, routes_ports, routes_drivers
 
 from app.api.v1.routes_vendor import router as vendor_router
 from app.api.v1.routes_rfqs import router as rfq_router
 from app.api.v1 import routes_quotes 
 from app.api.v1 import routes_orders 
+from app.api.v1 import routes_vessels
+from app.api.v1 import routes_trips
+from app.api.v1 import routes_agents
+from app.api.v1 import routes_aggregators
 
 app = FastAPI(title=settings.APP_NAME)
 
@@ -53,7 +57,13 @@ app.include_router(routes_crew.router,     prefix="/api/v1/crew",         tags=[
 app.include_router(routes_pubs.router,     prefix="/api/v1/pubs",         tags=["pubs"])
 app.include_router(routes_hotels.router,   prefix="/api/v1/hotels",       tags=["hotels"])
 app.include_router(routes_restaurants.router, prefix="/api/v1/restaurants",   tags=["restaurants"])
-
+app.include_router(routes_vessels.router,     prefix="/api/v1/vessels",       tags=["vessels"])
+app.include_router(routes_trips.router,       prefix="/api/v1/trips",         tags=["trips"])
+app.include_router(routes_incidents.router, prefix="/api/v1/incidents", tags=["incidents"])
+app.include_router(routes_agents.router, prefix="/api/v1/agents", tags=["agents"])
+app.include_router(routes_aggregators.router, prefix="/api/v1/aggregators", tags=["aggregators"])
+app.include_router(routes_ports.router, prefix="/api/v1/ports", tags=["ports"])
+app.include_router(routes_drivers.router, prefix="/api/v1/drivers", tags=["drivers"])
 
 
 # --- Health checks & root ---

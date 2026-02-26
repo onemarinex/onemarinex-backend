@@ -17,16 +17,27 @@ router = APIRouter()
 # It also makes the Swagger docs show a lock icon.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
+class AgentProfileOut(BaseModel):
+    id: int
+    agency_name: str
+    location: str
+    agent_identifier: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
 class UserOut(BaseModel):
     id: int
     name: Optional[str] = None
     email: EmailStr
     role: str
+    mobile_number: Optional[str] = None
+    agent_profile: Optional[AgentProfileOut] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
     class Config:
-        from_attributes = True  # SQLAlchemy -> Pydantic (pydantic v2)
+        from_attributes = True
 
 def get_current_user(
     db: Session = Depends(get_db),

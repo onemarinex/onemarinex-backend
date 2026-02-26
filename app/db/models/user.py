@@ -51,5 +51,23 @@ class User(Base):
         passive_deletes=True,
     )
 
+    # One user -> one agent profile
+    agent_profile = relationship(
+        "AgentProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    # One user -> one aggregator profile
+    aggregator_profile = relationship(
+        "AggregatorProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
     def __repr__(self) -> str:  # pragma: no cover
         return f"<User id={self.id} email={self.email!r} role={self.role!r}>"
