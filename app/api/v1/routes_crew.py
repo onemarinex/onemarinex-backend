@@ -48,6 +48,8 @@ class ShorePassOut(BaseModel):
     in_time: Optional[datetime]
     expires_at: Optional[datetime]
     is_verified: bool
+    status: str
+    rejection_reason: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -200,7 +202,8 @@ def generate_shorepass(
         out_time=datetime.utcnow(),
         in_time=datetime.utcnow() + timedelta(days=7),
         expires_at=datetime.utcnow() + timedelta(days=7),
-        is_verified=True # Auto-verify for now as per design
+        is_verified=False,
+        status="pending"
     )
     
     db.add(new_pass)

@@ -16,6 +16,7 @@ from app.api.v1.routes_auth import get_current_user
 from app.db.models.user import User
 from pydantic import BaseModel, EmailStr
 from typing import List, Dict, Any
+from app.api.v1.routes_crew import ShorePassOut
 
 router = APIRouter()
 
@@ -76,6 +77,9 @@ class DashboardData(BaseModel):
     stats: DashboardStats
     active_vessels: List[DashboardVessel]
     live_trips: List[DashboardTrip]
+
+class ShorePassActionIn(BaseModel):
+    rejection_reason: Optional[str] = None
 
 # --- Routes ---
 
@@ -225,3 +229,74 @@ def get_dashboard_data(
             for t in live_trips_data
         ]
     )
+
+@router.get("/shore-pass-requests", response_model=List[ShorePassOut])
+def get_shore_pass_requests(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "agent":
+        raise HTTPException(status_code=403, detail="Only agents can access shore pass requests")
+    
+    agent_profile = current_user.agent_profile
+    if not agent_profile or not agent_profile.assigned_port:
+        return []
+
+    requests = db.query(ShorePass).filter(
+        ShorePass.port_name == agent_profile.assigned_port
+    ).order_by(ShorePass.created_at.desc()).all()
+    
+    return requests
+
+@router.post("/shore-pass-requests/{request_id}/approve", response_model=ShorePassOut)
+def approve_shore_pass(
+    request_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "agent":
+        raise HTTPException(status_code=403, detail="Only agents can approve shore passes")
+    
+    shore_pass = db.query(ShorePass).filter(ShorePass.id == request_id).first()
+    if not shore_pass:
+        raise HTTPException(status_code=404, detail="Shore pass request not found")
+    
+    shore_pass.status = "approved"
+    shore_pass.is_verified = True
+    shore_pass.approved_by_id = current_user.id
+    
+    try:
+        db.commit()
+        db.refresh(shore_pass)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    return shore_pass
+
+@router.post("/shore-pass-requests/{request_id}/reject", response_model=ShorePassOut)
+def reject_shore_pass(
+    request_id: int,
+    body: ShorePassActionIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "agent":
+        raise HTTPException(status_code=403, detail="Only agents can reject shore passes")
+    
+    shore_pass = db.query(ShorePass).filter(ShorePass.id == request_id).first()
+    if not shore_pass:
+        raise HTTPException(status_code=404, detail="Shore pass request not found")
+    
+    shore_pass.status = "rejected"
+    shore_pass.rejection_reason = body.rejection_reason
+    shore_pass.approved_by_id = current_user.id
+    
+    try:
+        db.commit()
+        db.refresh(shore_pass)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    return shore_pass

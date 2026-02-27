@@ -12,6 +12,8 @@ from app.db.models.aggregator_profile import AggregatorProfile
 from app.services.auth import get_password_hash, create_access_token
 from app.core.config import settings
 from app.api.v1.routes_auth import AuthOut
+import random
+import string
 
 router = APIRouter()
 
@@ -118,11 +120,16 @@ def register_agent(body: AgentRegistrationIn, db: Session = Depends(get_db)):
     db.flush()
 
     # 2. Create Agent Profile
+    agent_id = body.agent_identifier
+    if not agent_id:
+        rand_part = ''.join(random.choices(string.digits, k=4))
+        agent_id = f"AGT-{random.randint(10000, 99999)}-{rand_part}"
+
     agent_profile = AgentProfile(
         user_id=user.id,
         agency_name=body.agency_name,
         location=body.location,
-        agent_identifier=body.agent_identifier
+        agent_identifier=agent_id
     )
     db.add(agent_profile)
     
@@ -162,11 +169,16 @@ def register_aggregator(body: AggregatorRegistrationIn, db: Session = Depends(ge
     db.flush()
 
     # 2. Create Aggregator Profile
+    agg_id = body.aggregator_identifier
+    if not agg_id:
+        rand_part = ''.join(random.choices(string.digits, k=4))
+        agg_id = f"AGG-{random.randint(10000, 99999)}-{rand_part}"
+
     aggregator_profile = AggregatorProfile(
         user_id=user.id,
         company_name=body.company_name,
         operating_port=body.operating_port,
-        aggregator_identifier=body.aggregator_identifier
+        aggregator_identifier=agg_id
     )
     db.add(aggregator_profile)
     

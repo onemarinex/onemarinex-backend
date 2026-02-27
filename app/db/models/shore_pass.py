@@ -18,6 +18,9 @@ class ShorePass(Base):
     expires_at = Column(DateTime(timezone=True), nullable=True)
     
     is_verified = Column(Boolean, default=False)
+    status = Column(String(32), server_default="pending") # pending, approved, rejected
+    rejection_reason = Column(String(255), nullable=True)
+    approved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
