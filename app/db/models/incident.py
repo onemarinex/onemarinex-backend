@@ -19,7 +19,8 @@ class Incident(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     incident_id = Column(String(64), unique=True, index=True) # e.g. INC-001
-    aggregator_id = Column(Integer, ForeignKey("aggregator_profiles.id", ondelete="CASCADE"), nullable=False)
+    aggregator_id = Column(Integer, ForeignKey("aggregator_profiles.id", ondelete="CASCADE"), nullable=True)
+    port_name = Column(String(128), nullable=True) # Port where incident occurred
     
     type = Column(SQLEnum(IncidentType), nullable=False)
     title = Column(String(255), nullable=False)

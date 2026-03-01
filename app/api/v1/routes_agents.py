@@ -58,6 +58,8 @@ class DashboardStats(BaseModel):
     todays_trips: int
     trips_in_progress: int
     open_incidents: int
+    investigating_incidents: int
+    closed_incidents: int
 
 class DashboardVessel(BaseModel):
     id: int
@@ -196,9 +198,20 @@ def get_dashboard_data(
         CabBooking.status.in_([BookingStatus.IN_PROGRESS, BookingStatus.DRIVER_ASSIGNED])
     ).limit(5).all()
     
-    # Open Incidents
-    open_incidents = db.query(Incident).filter(
-        Incident.status.in_([IncidentStatus.ACTIVE, IncidentStatus.INVESTIGATING])
+    # Open and Closed Incidents for this agent's port
+    agent_profile = current_user.agent_profile
+    port_incidents_query = db.query(Incident).filter(Incident.port_name == agent_profile.assigned_port if agent_profile else None)
+    
+    open_incidents = port_incidents_query.filter(
+        Incident.status == IncidentStatus.ACTIVE
+    ).count()
+
+    investigating_incidents = port_incidents_query.filter(
+        Incident.status == IncidentStatus.INVESTIGATING
+    ).count()
+
+    closed_incidents = port_incidents_query.filter(
+        Incident.status == IncidentStatus.RESOLVED
     ).count()
 
     stats = DashboardStats(
@@ -208,7 +221,9 @@ def get_dashboard_data(
         active_trips=crew_in_shore, # Using crew_in_shore as 'active trips' for now as per UI logic
         todays_trips=todays_trips_count,
         trips_in_progress=trips_in_progress_count,
-        open_incidents=open_incidents
+        open_incidents=open_incidents,
+        investigating_incidents=investigating_incidents,
+        closed_incidents=closed_incidents
     )
 
     return DashboardData(
