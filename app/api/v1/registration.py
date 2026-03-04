@@ -10,8 +10,9 @@ from app.db.models.crew_profile import CrewProfile
 from app.db.models.agent_profile import AgentProfile
 from app.db.models.aggregator_profile import AggregatorProfile
 from app.services.auth import get_password_hash, create_access_token
-from app.core.config import settings
+from app.services.crew_service import generate_hpid
 from app.api.v1.routes_auth import AuthOut
+from app.core.config import settings
 import random
 import string
 
@@ -83,6 +84,10 @@ def register_crew(body: CrewRegistrationIn, db: Session = Depends(get_db)):
         date_of_birth=body.date_of_birth
     )
     db.add(crew_profile)
+    db.flush() # Get crew_profile.id
+
+    # 3. Generate HPID using Passport Number
+    crew_profile.hpid = generate_hpid(body.passport_number, body.nationality, "port_general")
     
     try:
         db.commit()

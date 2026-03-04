@@ -34,6 +34,7 @@ class DriverResponse(DriverBase):
     rating: float
     total_rides: int = 0
     today_rides: int = 0
+    is_reset_requested: int = 0
 
     class Config:
         from_attributes = True
@@ -381,9 +382,30 @@ async def delete_driver(
     db.delete(driver)
     db.commit()
     return {"message": "Driver deleted"}
+
+class ResetRequestIn(BaseModel):
+    email: str
+
+@router.post("/request-reset")
+async def request_password_reset(body: ResetRequestIn, db: Session = Depends(get_db)):
+    driver = db.query(Driver).filter(Driver.email == body.email).first()
+    if not driver:
+        # For security, we might not want to disclose if email exists, 
+        # but the user asks to "keep a forgout password option near login" 
+        # and "this request should go to the aggregator".
+        raise HTTPException(status_code=404, detail="Driver with this email not found")
+    
+    driver.is_reset_requested = 1
+    db.commit()
+    return {"message": "Reset request sent to your aggregator"}
+
+class ResetPasswordIn(BaseModel):
+    new_password: Optional[str] = None
+
 @router.post("/{driver_id}/reset-password")
 async def reset_driver_password(
     driver_id: int,
+    body: Optional[ResetPasswordIn] = None,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
@@ -396,9 +418,12 @@ async def reset_driver_password(
         raise HTTPException(status_code=404, detail="Driver not found")
     
     from app.services.auth import get_password_hash
-    # Set a default password that they must change
-    default_password = "driver123"
-    driver.hashed_password = get_password_hash(default_password)
+    
+    reset_password = body.new_password if body and body.new_password else "driver123"
+    driver.hashed_password = get_password_hash(reset_password)
     driver.is_temp_password = 1
+    driver.is_reset_requested = 0
     db.commit()
-    return {"message": f"Password reset to '{default_password}'", "temp_password": default_password}
+    
+    msg = f"Password updated to '{reset_password}'" if body and body.new_password else f"Password reset to '{reset_password}'"
+    return {"message": msg, "temp_password": reset_password}

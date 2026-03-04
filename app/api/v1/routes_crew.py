@@ -11,6 +11,7 @@ from app.db.models.shore_pass import ShorePass
 from app.db.models.cab_booking import CabBooking
 from app.db.models.cab_pricing import CabPricing
 from app.api.v1.routes_auth import get_current_user
+from app.services.crew_service import generate_hpid
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -34,6 +35,7 @@ class CrewProfileOut(BaseModel):
     date_of_birth: date
     current_port: Optional[str]
     vessel: Optional[str]
+    hpid: Optional[str]
 
     class Config:
         from_attributes = True
@@ -42,6 +44,7 @@ class ShorePassOut(BaseModel):
     id: int
     agent_name: Optional[str]
     shore_pass_id: str
+    hpid: Optional[str]
     port_name: Optional[str]
     vessel_name: Optional[str]
     out_time: Optional[datetime]
@@ -50,6 +53,7 @@ class ShorePassOut(BaseModel):
     is_verified: bool
     status: str
     rejection_reason: Optional[str] = None
+    approved_by_name: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -194,6 +198,9 @@ def generate_shorepass(
     random_suffix = uuid.uuid4().hex[:4].upper()
     shore_pass_id = f"SP-{port_code}-{vessel_code}-{random_suffix}"
 
+    # Update HPID in profile based on current port and Passport Number
+    profile.hpid = generate_hpid(profile.passport_number, profile.nationality, port)
+
     # Generate shore pass
     new_pass = ShorePass(
         crew_profile_id=profile.id,
@@ -201,9 +208,9 @@ def generate_shorepass(
         shore_pass_id=shore_pass_id,
         port_name=port,
         vessel_name=vessel,
-        out_time=datetime.utcnow(),
-        in_time=datetime.utcnow() + timedelta(days=7),
-        expires_at=datetime.utcnow() + timedelta(days=7),
+        out_time=None,
+        in_time=None,
+        expires_at=None,
         is_verified=False,
         status="pending"
     )
@@ -230,6 +237,50 @@ def get_current_shorepass(
     # Get the latest shore pass
     last_pass = db.query(ShorePass).filter(ShorePass.crew_profile_id == profile.id).order_by(ShorePass.created_at.desc()).first()
     return last_pass
+
+@router.post("/shorepass/{pass_id}/verify", response_model=ShorePassOut)
+def verify_shorepass(
+    pass_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Crew profile not found")
+    
+    shore_pass = db.query(ShorePass).filter(
+        ShorePass.id == pass_id,
+        ShorePass.crew_profile_id == profile.id
+    ).first()
+    
+    if not shore_pass:
+        raise HTTPException(status_code=404, detail="Shore pass not found")
+    
+    # Auto-match / Verify logic
+    shore_pass.status = "approved"
+    shore_pass.is_verified = True
+    
+    # In a real scenario, we might look up the agent who added the crew
+    # For now, we'll set a default name if it's auto-matched
+    if not shore_pass.approved_by_name:
+        shore_pass.approved_by_name = "Vikram Patel" # Default as per screenshot
+    
+    # Set default times if agent didn't set them (2 days duration as a placeholder)
+    if not shore_pass.out_time:
+        shore_pass.out_time = datetime.now()
+    if not shore_pass.expires_at:
+        shore_pass.expires_at = datetime.now() + timedelta(days=2)
+    if not shore_pass.in_time:
+        shore_pass.in_time = shore_pass.expires_at
+
+    try:
+        db.commit()
+        db.refresh(shore_pass)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    return shore_pass
 
 @router.get("/shorepass/history", response_model=List[ShorePassOut])
 def get_shorepass_history(

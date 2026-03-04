@@ -25,6 +25,8 @@ from app.db.models import pub             # noqa: F401
 from app.db.models import restaurant      # noqa: F401
 from app.db.models import hotels          # noqa: F401
 from app.db.models import incident        # noqa: F401
-from app.db.models.order import Order
-from app.db.models.order_event import OrderEvent 
-from app.db.models.port import Port # noqa: F401
+from app.db.models import password_reset  # noqa: F401
+from app.db.models.order import Order     # noqa: F401
+from app.db.models.order_event import OrderEvent  # noqa: F401
+from app.db.models.port import Port       # noqa: F401
+from app.db.models.port_rule import PortRule # noqa: F401

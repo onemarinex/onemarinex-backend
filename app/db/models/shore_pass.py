@@ -21,12 +21,17 @@ class ShorePass(Base):
     status = Column(String(32), server_default="pending") # pending, approved, rejected
     rejection_reason = Column(String(255), nullable=True)
     approved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_by_name = Column(String(120), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     # --- relationships ---
-    crew_profile = relationship("CrewProfile")
+    crew_profile = relationship("CrewProfile", back_populates="cab_bookings" if "cab_bookings" in locals() else None) # backref is handled in crew_profile.py
+
+    @property
+    def hpid(self):
+        return self.crew_profile.hpid if self.crew_profile else None
 
     def __repr__(self) -> str:
         return f"<ShorePass id={self.id} serial={self.shore_pass_id}>"

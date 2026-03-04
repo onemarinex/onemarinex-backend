@@ -9,8 +9,10 @@ from app.db.models.vessel_crew import VesselCrew
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.cab_booking import CabBooking
 from app.db.models.shore_pass import ShorePass
-from app.api.v1.routes_users import get_current_user
 from app.db.models.user import User
+from app.api.v1.routes_auth import get_current_user
+from app.services.crew_service import generate_hpid
+import uuid
 
 router = APIRouter()
 
@@ -20,8 +22,7 @@ class CrewMemberIn(BaseModel):
     name: str
     rank: str
     nationality: Optional[str] = None
-    hp_id: Optional[str] = None
-    expiry_date: Optional[datetime] = None
+    passport_number: str
     status: Optional[str] = "Pending"
 
 class CrewMemberOut(BaseModel):
@@ -171,16 +172,47 @@ def add_crew_member(vessel_id: int, body: CrewMemberIn, current_user: User = Dep
     if not vessel:
         raise HTTPException(status_code=404, detail="Vessel not found")
     
+    agent_profile = current_user.agent_profile
+    port = agent_profile.assigned_port if agent_profile else None
+    
+    # Generate HPID based on Passport, Nationality, and Port
+    generated_hpid = generate_hpid(body.passport_number, body.nationality, port)
+    
     crew = VesselCrew(
         vessel_id=vessel.id,
         name=body.name,
         rank=body.rank,
         nationality=body.nationality,
-        hp_id=body.hp_id,
-        expiry_date=body.expiry_date,
+        hp_id=generated_hpid,
         status=body.status
     )
     db.add(crew)
+    
+    # Check if a matching CrewProfile exists to automatically generate a ShorePass
+    profile = db.query(CrewProfile).filter(CrewProfile.hpid == generated_hpid).first()
+    if profile:
+        # Create ShorePass automatically
+        port_code = (port or "GEN").replace("port_", "")[:3].upper()
+        vessel_code = vessel.name.replace(" ", "")[:3].upper()
+        random_suffix = uuid.uuid4().hex[:4].upper()
+        shore_pass_id = f"SP-{port_code}-{vessel_code}-{random_suffix}"
+        
+        # Derive agent name
+        port_display = (port or "General").replace("port_", "").replace("_", " ").title()
+        agent_name = f"{port_display} Port Authority"
+        
+        new_pass = ShorePass(
+            crew_profile_id=profile.id,
+            agent_name=agent_name,
+            shore_pass_id=shore_pass_id,
+            port_name=port,
+            vessel_name=vessel.name,
+            is_verified=False,
+            status="pending"
+        )
+        db.add(new_pass)
+        print(f"DEBUG: Automated ShorePass created for {body.name} (HPID: {generated_hpid})")
+
     db.commit()
     db.refresh(crew)
     return crew

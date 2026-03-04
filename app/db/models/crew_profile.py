@@ -12,6 +12,7 @@ class CrewProfile(Base):
     rank = Column(String(64), nullable=False)
     nationality = Column(String(2), nullable=False)  # ISO Alpha-2
     passport_number = Column(String(64), nullable=False)
+    hpid = Column(String(64), nullable=True, unique=True)
     date_of_birth = Column(Date, nullable=False)
     
     # Professional details

@@ -25,6 +25,7 @@ class Driver(Base):
     hashed_password = Column(String(255), nullable=True) # Will be set by aggregator initially
     must_change_password = Column(DateTime(timezone=True), nullable=True, server_default=None) # Or boolean, user asked for update option
     is_temp_password = Column(Integer, server_default="1") # 1 if needs change
+    is_reset_requested = Column(Integer, server_default="0") # 1 if driver requested reset
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
