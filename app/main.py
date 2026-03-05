@@ -8,7 +8,7 @@ from app.core.config import settings
 from app.db.session import engine
 from app.db.base import Base
 
-from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants, routes_incidents, routes_ports, routes_drivers
+from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants, routes_incidents, routes_ports, routes_drivers, routes_early_access
 
 from app.api.v1.routes_vendor import router as vendor_router
 from app.api.v1.routes_rfqs import router as rfq_router
@@ -46,6 +46,7 @@ def on_startup():
 # --- Routes ---
 app.include_router(routes_auth.router,    prefix="/api/v1/auth",    tags=["authentication"])
 app.include_router(routes_contact.router, prefix="/api/v1/contact", tags=["contact"])
+app.include_router(routes_early_access.router, prefix="/api/v1/early-access", tags=["early-access"])
 app.include_router(routes_files.router,   prefix="/api/v1/files",   tags=["files"])
 app.include_router(routes_users.router,   prefix="/api/v1/users",   tags=["users"])
 app.include_router(vendor_router,         prefix="/api/v1",         tags=["vendor"])
