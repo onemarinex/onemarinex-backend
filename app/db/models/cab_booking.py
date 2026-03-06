@@ -10,6 +10,7 @@ class BookingStatus(str, enum.Enum):
     PENDING = "pending"
     CONFIRMED = "confirmed"
     DRIVER_ASSIGNED = "driver_assigned"
+    ARRIVED = "arrived"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     CANCELLED = "cancelled"

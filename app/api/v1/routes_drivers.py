@@ -266,6 +266,7 @@ async def driver_arrived(
         raise HTTPException(status_code=404, detail="Ride not found")
         
     ride.arrived_at = datetime.utcnow()
+    ride.status = BookingStatus.ARRIVED
     db.commit()
     return {"message": "Arrival recorded"}
 

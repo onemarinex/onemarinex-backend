@@ -1,7 +1,8 @@
-# app/main.py
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.openapi.models import OAuthFlows as OAuthFlowsModel
+from fastapi.openapi.utils import get_openapi
 import os
 
 from app.core.config import settings
@@ -19,7 +20,48 @@ from app.api.v1 import routes_trips
 from app.api.v1 import routes_agents
 from app.api.v1 import routes_aggregators
 
-app = FastAPI(title=settings.APP_NAME)
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    openapi_schema["components"]["securitySchemes"] = {
+        "Bearer": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+        }
+    }
+    # Apply security globally to all endpoints (optional, but good for docs)
+    openapi_schema["security"] = [{"Bearer": []}]
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app = FastAPI(
+    title="OneMarinex API",
+    description="""
+OneMarinex Backend API providing digitized port services, crew management, 
+and sustainability tracking. Connects mariners, port agents, and aggregators.
+
+### Core Features:
+* **Authentication**: JWT-based security for all roles.
+* **Crew Services**: Shore pass management and booking.
+* **Port Operations**: Real-time monitoring and compliance.
+* **Stakeholder Portal**: Specialized access for Agents and Aggregators.
+""",
+    version="1.0.0",
+    contact={
+        "name": "OneMarinex Support",
+        "email": "support@onemarinex.io",
+    },
+    swagger_ui_parameters={"defaultModelsExpandDepth": -1}
+)
+
+app.openapi = custom_openapi
 
 # --- CORS config ---
 origins = [
