@@ -143,3 +143,51 @@ def notify_me_port(
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
     return entry
+
+
+class FacilityScanIn(BaseModel):
+    scanned_data: str
+
+class FacilityScanOut(BaseModel):
+    id: int
+    user_id: Optional[int]
+    port_code: str
+    scanned_data: str
+    created_at: str
+
+    class Config:
+        from_attributes = True
+
+@router.post("/{port_code}/facility-scan", response_model=FacilityScanOut)
+def record_facility_scan(
+    port_code: str,
+    body: FacilityScanIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Record a facility QR scan for a crew member.
+    """
+    from app.db.models.facility_scan import FacilityScan
+    
+    scan = FacilityScan(
+        user_id=current_user.id,
+        port_code=port_code.lower(),
+        scanned_data=body.scanned_data
+    )
+    db.add(scan)
+    try:
+        db.commit()
+        db.refresh(scan)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    
+    # Format created_at to string for response model
+    return {
+        "id": scan.id,
+        "user_id": scan.user_id,
+        "port_code": scan.port_code,
+        "scanned_data": scan.scanned_data,
+        "created_at": scan.created_at.isoformat() if scan.created_at else ""
+    }

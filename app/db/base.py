@@ -33,3 +33,4 @@ from app.db.models.port_rule import PortRule # noqa: F401
 from app.db.models import contact_message # noqa: F401
 from app.db.models import early_access      # noqa: F401
 from app.db.models import port_service_request  # noqa: F401
+from app.db.models.facility_scan import FacilityScan # noqa: F401
