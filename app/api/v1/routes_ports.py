@@ -1,15 +1,29 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 from app.db.session import get_db
 from app.db.models.user import User
 from app.db.models.port import Port
 from app.db.models.port_rule import PortRule
+from app.db.models.port_service_request import PortServiceRequest
 from app.api.v1.routes_auth import get_current_user
 
 router = APIRouter()
+
+class ServiceRequestIn(BaseModel):
+    email: Optional[str] = None
+
+class ServiceRequestOut(BaseModel):
+    id: int
+    port_code: str
+    email: Optional[str]
+    request_type: str
+
+    class Config:
+        from_attributes = True
+
 
 class RuleItem(BaseModel):
     title: str
@@ -77,3 +91,55 @@ def update_port_rules(
         raise HTTPException(status_code=500, detail=str(e))
     
     return port_rules
+
+
+@router.post("/{port_code}/service-request", response_model=ServiceRequestOut)
+def request_port_service(
+    port_code: str,
+    body: ServiceRequestIn,
+    db: Session = Depends(get_db)
+):
+    """
+    Submit a 'Request Heyport Service' for a port that is not yet active.
+    No authentication required — open to all crew.
+    """
+    entry = PortServiceRequest(
+        port_code=port_code.lower(),
+        email=body.email or None,
+        request_type="service_request"
+    )
+    db.add(entry)
+    try:
+        db.commit()
+        db.refresh(entry)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    return entry
+
+
+@router.post("/{port_code}/notify-me", response_model=ServiceRequestOut)
+def notify_me_port(
+    port_code: str,
+    body: ServiceRequestIn,
+    db: Session = Depends(get_db)
+):
+    """
+    Subscribe to launch notification for a port.
+    No authentication required — open to all crew.
+    """
+    if not body.email:
+        raise HTTPException(status_code=422, detail="Email is required for notifications.")
+    entry = PortServiceRequest(
+        port_code=port_code.lower(),
+        email=body.email,
+        request_type="notify_me"
+    )
+    db.add(entry)
+    try:
+        db.commit()
+        db.refresh(entry)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    return entry
