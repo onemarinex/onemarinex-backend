@@ -36,6 +36,7 @@ class CrewProfileOut(BaseModel):
     current_port: Optional[str]
     vessel: Optional[str]
     hpid: Optional[str]
+    sos_email: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -160,6 +161,31 @@ def get_crew_profile(
     if not profile:
         raise HTTPException(status_code=404, detail="Crew profile not found")
     return profile
+
+class SOSConfigIn(BaseModel):
+    sos_email: str
+
+@router.post("/sos-config", response_model=dict)
+def update_sos_config(
+    body: SOSConfigIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "crew":
+        raise HTTPException(status_code=403, detail="Only crew can update SOS config")
+    
+    profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Crew profile not found")
+        
+    profile.sos_email = body.sos_email
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    return {"message": "SOS config updated successfully", "sos_email": profile.sos_email}
 
 class GenerateShorePassIn(BaseModel):
     port_name: Optional[str] = None
@@ -417,8 +443,6 @@ def get_cab_estimates(
             per_km_rate=p.per_km_rate
         ))
     return estimates
-
-    return {"message": "Booking cancelled successfully", "booking_id": booking_id}
 
 @router.get("/cab/bookings/{booking_id}", response_model=CabBookingDetailsOut)
 def get_booking_details(
