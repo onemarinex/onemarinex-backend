@@ -28,6 +28,7 @@ class ProfileUpdateIn(BaseModel):
 
 class CrewProfileOut(BaseModel):
     id: int
+    user_id: int
     full_name: str
     rank: str
     nationality: str
