@@ -31,12 +31,13 @@ class IncidentBase(BaseModel):
     port_name: Optional[str] = None
 
 class IncidentCreate(IncidentBase):
-    pass
+    aggregator_id: Optional[int] = None
 
 class IncidentResponse(IncidentBase):
     id: int
     incident_id: str
     status: IncidentStatus
+    aggregator_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
     notes: List[IncidentNoteResponse] = []
@@ -142,6 +143,7 @@ async def create_incident(
             reporter_name=current_user.name,
             reporter_role=crew.rank if crew else "Crew",
             reporter_id=crew.passport_number if crew else None,
+            port_name=crew.current_port if crew else None,
             type=IncidentType.CREW
         )
     else:
@@ -151,6 +153,32 @@ async def create_incident(
     db.commit()
     db.refresh(incident)
     return incident
+
+@router.get("/crew/recipients", response_model=List[dict])
+async def get_incident_recipients(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    if current_user.role != "crew":
+        raise HTTPException(status_code=403, detail="Only crew can fetch recipients")
+    
+    from app.db.models.crew_profile import CrewProfile
+    from app.db.models.aggregator_profile import AggregatorProfile
+    
+    crew = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+    if not crew or not crew.current_port:
+        return [{"id": 0, "name": "General Support"}]
+    
+    aggregators = db.query(AggregatorProfile).filter(AggregatorProfile.operating_port == crew.current_port).all()
+    
+    recipients = [{"id": 0, "name": "General Support"}]
+    for agg in aggregators:
+        recipients.append({
+            "id": agg.id,
+            "name": agg.company_name
+        })
+    
+    return recipients
 
 @router.get("/{id}", response_model=IncidentResponse)
 async def get_incident(

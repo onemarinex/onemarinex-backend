@@ -24,6 +24,11 @@ class ProfileUpdateIn(BaseModel):
     date_of_birth: Optional[date] = None
     current_port: Optional[str] = None
     vessel: Optional[str] = None
+    data_sharing: Optional[bool] = None
+    share_visits: Optional[bool] = None
+    safety_tracking: Optional[bool] = None
+    communication: Optional[bool] = None
+    notifications: Optional[bool] = None
 
 
 class CrewProfileOut(BaseModel):
@@ -38,6 +43,11 @@ class CrewProfileOut(BaseModel):
     vessel: Optional[str]
     hpid: Optional[str]
     sos_email: Optional[str] = None
+    data_sharing: bool
+    share_visits: bool
+    safety_tracking: bool
+    communication: bool
+    notifications: bool
 
     class Config:
         from_attributes = True

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, ForeignKey, DateTime, func
+from sqlalchemy import Column, Integer, String, Date, ForeignKey, DateTime, func, Boolean
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -20,6 +20,13 @@ class CrewProfile(Base):
     vessel = Column(String(128), nullable=True)
     ride_otp = Column(String(4), nullable=True) # Lifetime OTP for ride starts
     sos_email = Column(String(255), nullable=True) # SOS Configration ship's email
+    
+    # Privacy & Notification settings
+    data_sharing = Column(Boolean, default=True)
+    share_visits = Column(Boolean, default=True)
+    safety_tracking = Column(Boolean, default=True)
+    communication = Column(Boolean, default=True)
+    notifications = Column(Boolean, default=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
