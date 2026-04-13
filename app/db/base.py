@@ -24,6 +24,7 @@ from app.db.models import file_asset      # noqa: F401
 from app.db.models import pub             # noqa: F401
 from app.db.models import restaurant      # noqa: F401
 from app.db.models import hotels          # noqa: F401
+from app.db.models import sightseeing     # noqa: F401
 from app.db.models import incident        # noqa: F401
 from app.db.models import password_reset  # noqa: F401
 from app.db.models.order import Order     # noqa: F401
@@ -35,3 +36,4 @@ from app.db.models import early_access      # noqa: F401
 from app.db.models import port_service_request  # noqa: F401
 from app.db.models.facility_scan import FacilityScan # noqa: F401
 from app.db.models.chat import ChatMessage # noqa: F401
+from app.db.models.venue_review import VenueReview # noqa: F401

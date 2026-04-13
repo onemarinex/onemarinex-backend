@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -8,6 +8,7 @@ class Pub(Base):
     __tablename__ = "pubs"
 
     id = Column(Integer, primary_key=True, index=True)
+    port_id = Column(Integer, ForeignKey("ports.id"), nullable=True) # Linked to a port
     name = Column(String, nullable=False)
     location_name = Column(String, nullable=False)
     distance_from_port = Column(Float, nullable=False)
@@ -25,3 +26,6 @@ class Pub(Base):
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Relationship
+    port = relationship("Port")

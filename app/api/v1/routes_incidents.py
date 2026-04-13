@@ -99,6 +99,9 @@ async def get_incidents(
             raise HTTPException(status_code=403, detail="Not an aggregator")
         return db.query(Incident).filter(Incident.aggregator_id == aggregator.id).all()
     
+    elif current_user.role == "superadmin":
+        return db.query(Incident).all()
+    
     elif current_user.role == "agent":
         from app.db.models.agent_profile import AgentProfile
         agent = db.query(AgentProfile).filter(AgentProfile.user_id == current_user.id).first()
@@ -194,6 +197,8 @@ async def get_incident(
         if not aggregator:
              raise HTTPException(status_code=403, detail="Not authorized")
         incident = query.filter(Incident.aggregator_id == aggregator.id).first()
+    elif current_user.role == "superadmin":
+        incident = query.first()
     elif current_user.role == "agent":
         from app.db.models.agent_profile import AgentProfile
         agent = db.query(AgentProfile).filter(AgentProfile.user_id == current_user.id).first()

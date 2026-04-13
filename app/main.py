@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.db.session import engine
 from app.db.base import Base
 
-from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants, routes_incidents, routes_ports, routes_drivers, routes_early_access, routes_chat
+from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants, routes_incidents, routes_ports, routes_drivers, routes_early_access, routes_chat, routes_superadmin, routes_reviews, routes_sightseeing
 
 from app.api.v1.routes_vendor import router as vendor_router
 from app.api.v1.routes_rfqs import router as rfq_router
@@ -99,6 +99,7 @@ app.include_router(registration.router,   prefix="/api/v1/registration", tags=["
 app.include_router(routes_crew.router,     prefix="/api/v1/crew",         tags=["crew"])
 app.include_router(routes_pubs.router,     prefix="/api/v1/pubs",         tags=["pubs"])
 app.include_router(routes_hotels.router,   prefix="/api/v1/hotels",       tags=["hotels"])
+app.include_router(routes_sightseeing.router, prefix="/api/v1/sightseeing", tags=["sightseeing"])
 app.include_router(routes_restaurants.router, prefix="/api/v1/restaurants",   tags=["restaurants"])
 app.include_router(routes_vessels.router,     prefix="/api/v1/vessels",       tags=["vessels"])
 app.include_router(routes_trips.router,       prefix="/api/v1/trips",         tags=["trips"])
@@ -108,6 +109,8 @@ app.include_router(routes_aggregators.router, prefix="/api/v1/aggregators", tags
 app.include_router(routes_ports.router, prefix="/api/v1/ports", tags=["ports"])
 app.include_router(routes_drivers.router, prefix="/api/v1/drivers", tags=["drivers"])
 app.include_router(routes_chat.router, prefix="/api/v1/chat", tags=["chat"])
+app.include_router(routes_superadmin.router, prefix="/api/v1/superadmin", tags=["superadmin"])
+app.include_router(routes_reviews.router, prefix="/api/v1/reviews", tags=["reviews"])
 
 
 # --- Health checks & root ---
