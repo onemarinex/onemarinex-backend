@@ -127,6 +127,10 @@ async def create_incident(
         if not aggregator:
             raise HTTPException(status_code=403, detail="Not an aggregator")
         
+        # Remove fields that we will set explicitly
+        for field in ["aggregator_id"]:
+            incident_data.pop(field, None)
+
         incident = Incident(
             **incident_data,
             aggregator_id=aggregator.id,
@@ -137,7 +141,7 @@ async def create_incident(
         crew = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
         
         # Remove fields that we will set explicitly to avoid "multiple values for keyword argument"
-        for field in ["reporter_name", "reporter_role", "reporter_id", "type"]:
+        for field in ["reporter_name", "reporter_role", "reporter_id", "type", "port_name"]:
             incident_data.pop(field, None)
 
         incident = Incident(

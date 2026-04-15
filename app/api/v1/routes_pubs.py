@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import os
+import qrcode
+import io
+from fastapi import APIRouter, Depends, HTTPException, status, Response
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
@@ -10,6 +13,21 @@ from app.api.v1.routes_auth import get_current_user
 from app.db.models.user import User
 
 router = APIRouter()
+
+FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173")
+QR_DIR = "uploads/qrcodes"
+os.makedirs(QR_DIR, exist_ok=True)
+
+
+def generate_qr_png(data: str) -> bytes:
+    qr = qrcode.QRCode(version=1, box_size=10, border=4)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
 
 class PubBase(BaseModel):
     name: str
@@ -115,3 +133,23 @@ def seed_pubs(
     
     db.commit()
     return {"message": "Pubs seeded successfully"}
+
+
+# Generate QR code for a pub
+@router.get("/{id}/qr")
+def get_pub_qr(id: int, db: Session = Depends(get_db)):
+    pub = db.query(Pub).filter(Pub.id == id).first()
+    if not pub:
+        raise HTTPException(status_code=404, detail="Pub not found")
+
+    cache_path = f"{QR_DIR}/pub_{id}.png"
+    if os.path.exists(cache_path):
+        with open(cache_path, "rb") as f:
+            png_bytes = f.read()
+    else:
+        url = f"{FRONTEND_BASE_URL}/review?type=pub&id={id}"
+        png_bytes = generate_qr_png(url)
+        with open(cache_path, "wb") as f:
+            f.write(png_bytes)
+
+    return Response(content=png_bytes, media_type="image/png")
