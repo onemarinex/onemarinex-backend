@@ -27,11 +27,14 @@ def generate_qr_png(data: str) -> bytes:
 
 @router.get("/")
 def get_restaurants(
+    port_id: Optional[int] = None,
     max_dist: Optional[float] = None,
     max_price: Optional[float] = None,
     db: Session = Depends(get_db)
 ):
     query = db.query(Restaurant)
+    if port_id is not None:
+        query = query.filter(Restaurant.port_id == port_id)
     if max_dist is not None:
         query = query.filter(Restaurant.distance_from_port <= max_dist)
     if max_price is not None:

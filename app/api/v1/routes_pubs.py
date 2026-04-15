@@ -52,10 +52,14 @@ class PubOut(PubBase):
 
 @router.get("/", response_model=List[PubOut])
 def get_pubs(
+    port_id: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    pubs = db.query(Pub).all()
+    query = db.query(Pub)
+    if port_id:
+        query = query.filter(Pub.port_id == port_id)
+    pubs = query.all()
     return pubs
 
 @router.get("/{pub_id}", response_model=PubOut)

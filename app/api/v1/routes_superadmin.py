@@ -55,6 +55,7 @@ class HotelCreate(VendorBase):
     location: str
     distance_from_port: float
     price_per_night: float
+    address: Optional[str] = None
 
 class PubCreate(VendorBase):
     location_name: str
@@ -63,6 +64,7 @@ class PubCreate(VendorBase):
     timings: str
     service_type: str
     popular_for: Optional[List[str]] = None
+    address: Optional[str] = None
 
 class SightseeingCreate(VendorBase):
     location_name: str
@@ -132,7 +134,33 @@ def list_restaurants(port_id: Optional[int] = None, db: Session = Depends(get_db
 @router.post("/restaurants")
 def create_restaurant(body: RestaurantCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
-    db_obj = Restaurant(**body.model_dump())
+    data = body.model_dump()
+    
+    # Check if port exists to avoid 500 on FK violation
+    if data.get("port_id"):
+        port = db.query(Port).filter(Port.id == data["port_id"]).first()
+        if not port:
+            raise HTTPException(status_code=400, detail=f"Port with ID {data['port_id']} does not exist")
+
+    # Ensure we only pass fields that exist in the Restaurant model
+    db_obj = Restaurant(
+        name=data["name"],
+        port_id=data.get("port_id"),
+        location_name=data["location_name"],
+        distance_from_port=data["distance_from_port"],
+        rating=data["rating"],
+        price_per_person=data["price_per_person"],
+        timings=data["timings"],
+        service_type=data["service_type"],
+        popular_for=data.get("popular_for"),
+        phone=data.get("phone"),
+        lat=data["lat"],
+        lng=data["lng"],
+        image_url=data.get("image_url"),
+        menu_images=data.get("menu_images"),
+        description=data.get("description"),
+        address=data.get("address")
+    )
     db.add(db_obj)
     db.commit()
     db.refresh(db_obj)
@@ -149,7 +177,27 @@ def list_hotels(port_id: Optional[int] = None, db: Session = Depends(get_db), cu
 @router.post("/hotels")
 def create_hotel(body: HotelCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
-    db_obj = Hotel(**body.model_dump())
+    data = body.model_dump()
+
+    if data.get("port_id"):
+        port = db.query(Port).filter(Port.id == data["port_id"]).first()
+        if not port:
+            raise HTTPException(status_code=400, detail=f"Port with ID {data['port_id']} does not exist")
+
+    db_obj = Hotel(
+        name=data["name"],
+        port_id=data.get("port_id"),
+        location=data["location"],
+        distance_from_port=data["distance_from_port"],
+        rating=data["rating"],
+        price_per_night=data["price_per_night"],
+        phone=data.get("phone"),
+        lat=data["lat"],
+        lng=data["lng"],
+        image_url=data.get("image_url"),
+        description=data.get("description"),
+        address=data.get("address")
+    )
     db.add(db_obj)
     db.commit()
     db.refresh(db_obj)
@@ -166,7 +214,30 @@ def list_pubs(port_id: Optional[int] = None, db: Session = Depends(get_db), curr
 @router.post("/pubs")
 def create_pub(body: PubCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
-    db_obj = Pub(**body.model_dump())
+    data = body.model_dump()
+
+    if data.get("port_id"):
+        port = db.query(Port).filter(Port.id == data["port_id"]).first()
+        if not port:
+            raise HTTPException(status_code=400, detail=f"Port with ID {data['port_id']} does not exist")
+
+    db_obj = Pub(
+        name=data["name"],
+        port_id=data.get("port_id"),
+        location_name=data["location_name"],
+        distance_from_port=data["distance_from_port"],
+        rating=data["rating"],
+        price_per_person=data["price_per_person"],
+        timings=data.get("timings"),
+        service_type=data.get("service_type"),
+        popular_for=data.get("popular_for"),
+        phone=data.get("phone"),
+        lat=data["lat"],
+        lng=data["lng"],
+        image_url=data.get("image_url"),
+        description=data.get("description"),
+        address=data.get("address")
+    )
     db.add(db_obj)
     db.commit()
     db.refresh(db_obj)
@@ -183,7 +254,28 @@ def list_sightseeing(port_id: Optional[int] = None, db: Session = Depends(get_db
 @router.post("/sightseeing")
 def create_sightseeing(body: SightseeingCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
-    db_obj = Sightseeing(**body.model_dump())
+    data = body.model_dump()
+
+    if data.get("port_id"):
+        port = db.query(Port).filter(Port.id == data["port_id"]).first()
+        if not port:
+            raise HTTPException(status_code=400, detail=f"Port with ID {data['port_id']} does not exist")
+
+    db_obj = Sightseeing(
+        name=data["name"],
+        port_id=data.get("port_id"),
+        location_name=data["location_name"],
+        distance_from_port=data["distance_from_port"],
+        rating=data["rating"],
+        price_per_person=data["price_per_person"],
+        timings=data.get("timings"),
+        phone=data.get("phone"),
+        lat=data["lat"],
+        lng=data["lng"],
+        image_url=data.get("image_url"),
+        description=data.get("description"),
+        address=data.get("address")
+    )
     db.add(db_obj)
     db.commit()
     db.refresh(db_obj)

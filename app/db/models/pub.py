@@ -22,6 +22,7 @@ class Pub(Base):
     lng = Column(Float, nullable=False)
     image_url = Column(String, nullable=True)
     description = Column(String, nullable=True)
+    address = Column(String, nullable=True)
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

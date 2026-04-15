@@ -28,12 +28,15 @@ def generate_qr_png(data: str) -> bytes:
 # Get all hotels
 @router.get("/")
 def get_hotels(
+    port_id: Optional[int] = None,
     max_dist: Optional[float] = None,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
     db: Session = Depends(get_db)
 ):
     query = db.query(Hotel)
+    if port_id is not None:
+        query = query.filter(Hotel.port_id == port_id)
     if max_dist is not None:
         query = query.filter(Hotel.distance_from_port <= max_dist)
     if min_price is not None:
@@ -47,6 +50,7 @@ def get_hotels(
 # Get hotels based on filters
 @router.get("/filters")
 def get_hotels_by_filters(
+    port_id: Optional[int] = None,
     max_dist: Optional[float] = None,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
@@ -54,6 +58,8 @@ def get_hotels_by_filters(
     db: Session = Depends(get_db)
 ):
     query = db.query(Hotel)
+    if port_id is not None:
+        query = query.filter(Hotel.port_id == port_id)
     if max_dist is not None:
         query = query.filter(Hotel.distance_from_port <= max_dist)
     if min_price is not None:
