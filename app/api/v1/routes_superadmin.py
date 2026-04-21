@@ -303,10 +303,15 @@ def track_drivers(db: Session = Depends(get_db), current_user: User = Depends(ge
     return db.query(Driver).all()
 
 @router.get("/tracking/aggregators")
-def track_aggregators(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def track_aggregators(port_id: Optional[int] = None,db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     from sqlalchemy.orm import joinedload
-    return db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user)).all()
+    query = db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port))
+    if port_id:
+        query = query.filter(AggregatorProfile.operating_port_id == port_id)
+    return query.all()
+        
+    # return db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port)).all()
 
 @router.get("/tracking/incidents")
 def track_incidents(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

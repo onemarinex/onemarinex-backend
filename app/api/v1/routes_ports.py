@@ -51,7 +51,8 @@ class PortOut(BaseModel):
 @router.get("/", response_model=List[PortOut])
 def get_ports(db: Session = Depends(get_db)):
     """Get list of active ports"""
-    return db.query(Port).filter(Port.is_active == True).all()
+    ports = db.query(Port).filter(Port.is_active == True).all()
+    return ports
 
 @router.get("/{port_name}/rules", response_model=PortRulesOut)
 def get_port_rules(port_name: str, db: Session = Depends(get_db)):

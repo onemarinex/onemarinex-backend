@@ -1,5 +1,5 @@
 from datetime import timedelta, date
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
@@ -52,8 +52,23 @@ class AggregatorRegistrationIn(BaseModel):
     
     # Profile fields
     company_name: str
-    operating_port: str
+    operating_port_id: int
     aggregator_identifier: Optional[str] = None
+
+class FleetItem(BaseModel):
+    type: str
+    count: int
+    cost_per_km: float
+    
+class AggregatorUpdate(BaseModel):
+    company_name: Optional[str]
+    contact_person: Optional[str]
+    operating_port_id: Optional[int]
+    gst_number: Optional[str]
+    status: Optional[str]
+
+    fleet: Optional[List[FleetItem]]
+    documents: Optional[List[str]]    
 
 @router.post("/crew", response_model=AuthOut, status_code=status.HTTP_201_CREATED)
 def register_crew(body: CrewRegistrationIn, db: Session = Depends(get_db)):
@@ -182,8 +197,9 @@ def register_aggregator(body: AggregatorRegistrationIn, db: Session = Depends(ge
     aggregator_profile = AggregatorProfile(
         user_id=user.id,
         company_name=body.company_name,
-        operating_port=body.operating_port,
-        aggregator_identifier=agg_id
+        operating_port_id=body.operating_port_id,
+        aggregator_identifier=agg_id,
+        contact_person = body.full_name
     )
     db.add(aggregator_profile)
     
@@ -202,3 +218,27 @@ def register_aggregator(body: AggregatorRegistrationIn, db: Session = Depends(ge
     )
     
     return AuthOut(access_token=token, role=user.role)
+
+@router.put("/aggregator/{agg_id}")
+def update_aggregator(
+    agg_id: int,
+    payload: AggregatorUpdate,
+    db: Session = Depends(get_db)
+):
+    aggregator = db.query(AggregatorProfile).filter(AggregatorProfile.id == agg_id).first()
+
+    if not aggregator:
+        raise HTTPException(status_code=404, detail="Aggregator not found")
+
+    update_data = payload.dict(exclude_unset=True)
+
+    for key, value in update_data.items():
+        setattr(aggregator, key, value)
+
+    db.commit()
+    db.refresh(aggregator)
+
+    return {
+        "message": "Aggregator updated successfully",
+        "data": aggregator
+    }
