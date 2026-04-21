@@ -83,7 +83,7 @@ def get_aggregator_profile(
         "mobile_number": current_user.mobile_number,
         "company_name": agg_profile.company_name,
         "contact_person": agg_profile.contact_person,
-        "operating_port": agg_profile.operating_port,
+        "operating_port": agg_profile.operating_port.name,
         "gst_number": agg_profile.gst_number,
         "status": agg_profile.status,
         "profile_image": agg_profile.profile_image,
