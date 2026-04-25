@@ -124,11 +124,14 @@ def get_dashboard_stats(
 # --- CMS Endpoints ---
 
 @router.get("/restaurants")
-def list_restaurants(port_id: Optional[int] = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_restaurants(port_id: Optional[int] = None,  search: Optional[str] = None,
+db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     query = db.query(Restaurant)
     if port_id:
         query = query.filter(Restaurant.port_id == port_id)
+    if search is not None:
+        query = query.filter(Restaurant.name.ilike(f"%{search}%"))    
     return query.all()
 
 @router.post("/restaurants")
@@ -167,11 +170,13 @@ def create_restaurant(body: RestaurantCreate, db: Session = Depends(get_db), cur
     return db_obj
 
 @router.get("/hotels")
-def list_hotels(port_id: Optional[int] = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_hotels(port_id: Optional[int] = None,search : Optional[str]=None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     query = db.query(Hotel)
     if port_id:
         query = query.filter(Hotel.port_id == port_id)
+    if search is not None:
+        query = query.filter(Hotel.name.ilike(f"%{search}%")) 
     return query.all()
 
 @router.post("/hotels")
@@ -204,11 +209,14 @@ def create_hotel(body: HotelCreate, db: Session = Depends(get_db), current_user:
     return db_obj
 
 @router.get("/pubs")
-def list_pubs(port_id: Optional[int] = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_pubs(port_id: Optional[int] = None, search : Optional[str]=None ,db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     query = db.query(Pub)
     if port_id:
         query = query.filter(Pub.port_id == port_id)
+    if search is not None:
+        query = query.filter(Pub.name.ilike(f"%{search}%")) 
+
     return query.all()
 
 @router.post("/pubs")
@@ -244,11 +252,14 @@ def create_pub(body: PubCreate, db: Session = Depends(get_db), current_user: Use
     return db_obj
 
 @router.get("/sightseeing")
-def list_sightseeing(port_id: Optional[int] = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_sightseeing(port_id: Optional[int] = None, search : Optional[str]=None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     query = db.query(Sightseeing)
     if port_id:
         query = query.filter(Sightseeing.port_id == port_id)
+    if search is not None:
+        query = query.filter(Sightseeing.name.ilike(f"%{search}%"))
+    
     return query.all()
 
 @router.post("/sightseeing")
@@ -303,12 +314,14 @@ def track_drivers(db: Session = Depends(get_db), current_user: User = Depends(ge
     return db.query(Driver).all()
 
 @router.get("/tracking/aggregators")
-def track_aggregators(port_id: Optional[int] = None,db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def track_aggregators(port_id: Optional[int] = None,search : Optional[str] = None ,db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     from sqlalchemy.orm import joinedload
     query = db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port))
     if port_id:
         query = query.filter(AggregatorProfile.operating_port_id == port_id)
+    if search is not None:
+        query = query.filter(AggregatorProfile.company_name.ilike(f"%{search}%")) 
     return query.all()
         
     # return db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port)).all()
