@@ -32,6 +32,7 @@ def get_sightseeing(
     max_dist: Optional[float] = None,
     min_price: Optional[float] = None,
     max_price: Optional[float] = None,
+    search: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     query = db.query(Sightseeing)
@@ -43,6 +44,8 @@ def get_sightseeing(
         query = query.filter(Sightseeing.price_per_person >= min_price)
     if max_price is not None:
         query = query.filter(Sightseeing.price_per_person <= max_price)
+    if search is not None:
+        query = query.filter(Sightseeing.name.ilike(f"%{search}%"))
     
     return query.all()
 

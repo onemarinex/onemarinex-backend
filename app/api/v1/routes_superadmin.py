@@ -10,6 +10,7 @@ from app.db.models.user import User
 from app.db.models.restaurant import Restaurant
 from app.db.models.hotels import Hotel
 from app.db.models.pub import Pub
+from app.db.models.vendors import Vendors
 from app.db.models.sightseeing import Sightseeing
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.cab_booking import CabBooking, BookingStatus
@@ -74,6 +75,61 @@ class SightseeingCreate(VendorBase):
     address: Optional[str] = None
     images: Optional[List[str]] = None
 
+class VendorCreationBase(BaseModel):
+    name: str
+    category: str
+    location_name: str
+    distance_from_port: float
+    lat: float
+    lng: float   
+    port_id: int
+
+class VendorCreate(VendorCreationBase):
+    # Optional at creation
+    rating: Optional[float] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    documents: Optional[List[str]] = None
+    images: Optional[List[str]] = None
+    other_information: Optional[Dict[str, Any]] = None
+    
+
+class VendorUpdate(BaseModel):
+    name: Optional[str]
+    category: Optional[str]
+    location_name: Optional[str]
+    distance_from_port: Optional[float]
+    lat: Optional[float]
+    lng: Optional[float]
+    rating: Optional[float]
+    phone: Optional[str]
+    email: Optional[str]
+    documents: Optional[List[str]]
+    images: Optional[List[str]]
+    other_information: Optional[Dict[str, Any]]
+    port_id: Optional[int]
+    status: Optional[str]
+
+
+
+class VendorOut(BaseModel):
+    id: int
+    name: str
+    category: str
+    location_name: str
+    distance_from_port: float
+    lat: float
+    lng: float
+    rating: Optional[float]
+    phone: Optional[str]
+    email: Optional[str]
+    status: str
+    documents: Optional[List[str]]
+    images: Optional[List[str]]
+    other_information: Optional[Dict[str, Any]]
+    created_at: datetime
+    updated_at: datetime    
+    
 # --- Helpers ---
 
 def verify_superadmin(current_user: User):
@@ -92,43 +148,54 @@ def get_dashboard_stats(
     current_user: User = Depends(get_current_user)
 ):
     verify_superadmin(current_user)
-    
-    query_res = db.query(Restaurant)
-    query_hotel = db.query(Hotel)
-    query_pub = db.query(Pub)
-    query_sight = db.query(Sightseeing)
-    query_crew = db.query(CrewProfile)
-    
+    query = db.query(
+        Vendors.category,
+        func.count(Vendors.id).label("count")
+    )
+
     if port_id:
-        # Get port object to use port name for crew/incident filtering if needed
+        query = query.filter(Vendors.port_id == port_id)
+
+    results = query.group_by(Vendors.category).all()
+
+    # 🔹 Convert to dict
+    category_counts = {
+    row.category.value: row.count for row in results
+    }
+    # 🔹 Crew logic (unchanged)
+    query_crew = db.query(CrewProfile)
+
+    if port_id:
         port_obj = db.query(Port).filter(Port.id == port_id).first()
         port_name = port_obj.name if port_obj else None
-        
-        query_res = query_res.filter(Restaurant.port_id == port_id)
-        query_hotel = query_hotel.filter(Hotel.port_id == port_id)
-        query_pub = query_pub.filter(Pub.port_id == port_id)
-        query_sight = query_sight.filter(Sightseeing.port_id == port_id)
-        
+
         if port_name:
-            # Filtering crew and incidents by port name logic
-            query_crew = query_crew.filter(CrewProfile.current_port.ilike(f"%{port_name}%"))
-    
+            query_crew = query_crew.filter(
+                CrewProfile.current_port.ilike(f"%{port_name}%")
+            )
+
+    total_crew = query_crew.count()
+
+    # 🔹 Final response
     return DashboardStats(
-        total_restaurants=query_res.count(),
-        total_crew=query_crew.count(),
-        total_sightseeing=query_sight.count(),
-        total_pubs=query_pub.count(),
-        total_hotels=query_hotel.count()
+        total_restaurants=category_counts.get("restaurant", 0),
+        total_pubs=category_counts.get("pub", 0),
+        total_hotels=category_counts.get("hotel", 0),
+        total_sightseeing=category_counts.get("sightseeing", 0),
+        total_crew=total_crew
     )
 
 # --- CMS Endpoints ---
 
 @router.get("/restaurants")
-def list_restaurants(port_id: Optional[int] = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_restaurants(port_id: Optional[int] = None,  search: Optional[str] = None,
+db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     query = db.query(Restaurant)
     if port_id:
         query = query.filter(Restaurant.port_id == port_id)
+    if search is not None:
+        query = query.filter(Restaurant.name.ilike(f"%{search}%"))    
     return query.all()
 
 @router.post("/restaurants")
@@ -167,11 +234,13 @@ def create_restaurant(body: RestaurantCreate, db: Session = Depends(get_db), cur
     return db_obj
 
 @router.get("/hotels")
-def list_hotels(port_id: Optional[int] = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_hotels(port_id: Optional[int] = None,search : Optional[str]=None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     query = db.query(Hotel)
     if port_id:
         query = query.filter(Hotel.port_id == port_id)
+    if search is not None:
+        query = query.filter(Hotel.name.ilike(f"%{search}%")) 
     return query.all()
 
 @router.post("/hotels")
@@ -204,11 +273,14 @@ def create_hotel(body: HotelCreate, db: Session = Depends(get_db), current_user:
     return db_obj
 
 @router.get("/pubs")
-def list_pubs(port_id: Optional[int] = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_pubs(port_id: Optional[int] = None, search : Optional[str]=None ,db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     query = db.query(Pub)
     if port_id:
         query = query.filter(Pub.port_id == port_id)
+    if search is not None:
+        query = query.filter(Pub.name.ilike(f"%{search}%")) 
+
     return query.all()
 
 @router.post("/pubs")
@@ -244,11 +316,14 @@ def create_pub(body: PubCreate, db: Session = Depends(get_db), current_user: Use
     return db_obj
 
 @router.get("/sightseeing")
-def list_sightseeing(port_id: Optional[int] = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def list_sightseeing(port_id: Optional[int] = None, search : Optional[str]=None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     query = db.query(Sightseeing)
     if port_id:
         query = query.filter(Sightseeing.port_id == port_id)
+    if search is not None:
+        query = query.filter(Sightseeing.name.ilike(f"%{search}%"))
+    
     return query.all()
 
 @router.post("/sightseeing")
@@ -303,12 +378,14 @@ def track_drivers(db: Session = Depends(get_db), current_user: User = Depends(ge
     return db.query(Driver).all()
 
 @router.get("/tracking/aggregators")
-def track_aggregators(port_id: Optional[int] = None,db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def track_aggregators(port_id: Optional[int] = None,search : Optional[str] = None ,db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     from sqlalchemy.orm import joinedload
     query = db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port))
     if port_id:
         query = query.filter(AggregatorProfile.operating_port_id == port_id)
+    if search is not None:
+        query = query.filter(AggregatorProfile.company_name.ilike(f"%{search}%")) 
     return query.all()
         
     # return db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port)).all()
@@ -328,3 +405,56 @@ def track_crew(db: Session = Depends(get_db), current_user: User = Depends(get_c
 def track_service_requests(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     return db.query(PortServiceRequest).order_by(PortServiceRequest.created_at.desc()).all()
+
+
+@router.post("/vendors", response_model=VendorOut)
+def create_place(payload: VendorCreate, db: Session = Depends(get_db),current_user: User = Depends(get_current_user)):
+    verify_superadmin(current_user)
+    vendor = Vendors(**payload.dict())
+    
+    db.add(vendor)
+    db.commit()
+    db.refresh(vendor)
+
+    return vendor
+
+@router.get("/vendors")
+def get_vendors(
+    port_id: Optional[int] = None,
+    vendor_id: Optional[int] = None,
+    category: Optional[str] = None,
+    search : Optional[str]=None,
+    db: Session = Depends(get_db),
+):
+    from sqlalchemy.orm import joinedload
+
+    query = db.query(Vendors).options(joinedload(Vendors.port))
+    if port_id is not None:
+        query = query.filter(Vendors.port_id == port_id)
+
+    if vendor_id is not None:
+        query = query.filter(Vendors.id == vendor_id)
+
+    if category is not None:
+        query = query.filter(Vendors.category == category)
+
+    if search is not None:
+        query = query.filter(Vendors.name.ilike(f"%{search}%"))     
+
+    return query.all()
+
+@router.put("/vendors/{vendor_id}", response_model=VendorOut)
+def update_place(vendor_id: int, payload: VendorUpdate, db: Session = Depends(get_db)):
+
+    vendor = db.query(Vendors).filter(Vendors.id == vendor_id).first()
+
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+
+    for key, value in payload.dict(exclude_unset=True).items():
+        setattr(vendor, key, value)
+
+    db.commit()
+    db.refresh(vendor)
+
+    return vendor

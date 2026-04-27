@@ -30,6 +30,7 @@ def get_restaurants(
     port_id: Optional[int] = None,
     max_dist: Optional[float] = None,
     max_price: Optional[float] = None,
+    search: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     query = db.query(Restaurant)
@@ -39,7 +40,9 @@ def get_restaurants(
         query = query.filter(Restaurant.distance_from_port <= max_dist)
     if max_price is not None:
         query = query.filter(Restaurant.price_per_person <= max_price)
-    
+    if search is not None:
+        query = query.filter(Restaurant.name.ilike(f"%{search}%"))
+    print(query)
     return query.all()
 
 
