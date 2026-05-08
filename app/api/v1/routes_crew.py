@@ -380,8 +380,11 @@ def get_current_shorepass(
     if not profile:
         return None
     
-    # Get the latest shore pass
-    last_pass = db.query(ShorePass).filter(ShorePass.crew_profile_id == profile.id).order_by(ShorePass.created_at.desc()).first()
+    # Get the latest shore pass for the CURRENT port
+    last_pass = db.query(ShorePass).filter(
+        ShorePass.crew_profile_id == profile.id,
+        ShorePass.port_name == profile.current_port
+    ).order_by(ShorePass.created_at.desc()).first()
     return last_pass
 
 @router.post("/shorepass/{pass_id}/verify", response_model=ShorePassOut)
