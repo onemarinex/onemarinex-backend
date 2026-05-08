@@ -43,6 +43,9 @@ class PubBase(BaseModel):
     lng: float
     image_url: Optional[str] = None
     description: Optional[str] = None
+    pub_type: Optional[str] = None
+    category: Optional[str] = None
+    best_for: Optional[str] = None
 
 class PubOut(PubBase):
     id: int

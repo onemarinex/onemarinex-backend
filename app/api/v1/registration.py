@@ -28,8 +28,8 @@ class CrewRegistrationIn(BaseModel):
     full_name: str
     rank: str
     nationality: str
-    passport_number: str
-    date_of_birth: date
+    passport_number: Optional[str] = None
+    date_of_birth: Optional[date] = None
 
 class AgentRegistrationIn(BaseModel):
     # User fields

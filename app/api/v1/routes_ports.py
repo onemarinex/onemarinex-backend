@@ -146,6 +146,26 @@ def notify_me_port(
     return entry
 
 
+@router.get("/{port_code}/service-request/count")
+def get_service_request_count(
+    port_code: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Get the total number of service requests and notify-me requests for a port.
+    Returns 100 + actual count as per social proof requirement.
+    """
+    from sqlalchemy import func
+    count = db.query(func.count(PortServiceRequest.id)).filter(
+        PortServiceRequest.port_code == port_code.lower()
+    ).scalar()
+    
+    return {
+        "port_code": port_code,
+        "count": 100 + (count or 0)
+    }
+
+
 class FacilityScanIn(BaseModel):
     scanned_data: str
 

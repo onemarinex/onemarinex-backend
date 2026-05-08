@@ -66,6 +66,9 @@ class PubCreate(VendorBase):
     service_type: str
     popular_for: Optional[List[str]] = None
     address: Optional[str] = None
+    pub_type: Optional[str] = None
+    category: Optional[str] = None
+    best_for: Optional[str] = None
 
 class SightseeingCreate(VendorBase):
     location_name: str

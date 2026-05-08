@@ -11,9 +11,9 @@ class CrewProfile(Base):
     full_name = Column(String(255), nullable=False)
     rank = Column(String(64), nullable=False)
     nationality = Column(String(2), nullable=False)  # ISO Alpha-2
-    passport_number = Column(String(64), nullable=False)
+    passport_number = Column(String(64), nullable=True)
     hpid = Column(String(64), nullable=True, unique=True)
-    date_of_birth = Column(Date, nullable=False)
+    date_of_birth = Column(Date, nullable=True)
     
     # Professional details
     current_port = Column(String(128), nullable=True)

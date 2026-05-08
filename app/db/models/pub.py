@@ -23,6 +23,9 @@ class Pub(Base):
     image_url = Column(String, nullable=True)
     description = Column(String, nullable=True)
     address = Column(String, nullable=True)
+    pub_type = Column(String, nullable=True) # e.g. Brewery, Roof top, Night club
+    category = Column(String, nullable=True)
+    best_for = Column(String, nullable=True)
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -5,14 +5,23 @@ from app.db.models.contact_message import ContactMessage
 
 router = APIRouter()
 
+from pydantic import BaseModel
+
+class ContactIn(BaseModel):
+    first_name: str
+    last_name: str
+    email: str
+    phone: str
+    message: str
+
 @router.post("/")
-def contact(first_name: str, last_name: str, email: str, phone: str, message: str, db: Session = Depends(get_db)):
+def contact(body: ContactIn, db: Session = Depends(get_db)):
     db_msg = ContactMessage(
-        first_name=first_name,
-        last_name=last_name,
-        email=email,
-        phone=phone,
-        message=message
+        first_name=body.first_name,
+        last_name=body.last_name,
+        email=body.email,
+        phone=body.phone,
+        message=body.message
     )
     db.add(db_msg)
     db.commit()
