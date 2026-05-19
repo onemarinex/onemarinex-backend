@@ -71,7 +71,7 @@ def get_trip_monitoring(
         crew_details = TripCrewOut(
             name=b.crew.full_name,
             rank=b.crew.rank,
-            hp_id=b.crew.passport_number # Assuming passport_number is used as HP-ID
+            hp_id=b.crew.hpid or ""
         )
         
         trip = TripDetailsOut(

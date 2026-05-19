@@ -50,6 +50,16 @@ class CrewProfileOut(BaseModel):
     communication: bool
     notifications: bool
 
+    # Synced fields from Vessel and VesselCrew
+    vessel_imo: Optional[str] = None
+    vessel_type: Optional[str] = None
+    berth_assignment: Optional[str] = None
+    eta: Optional[datetime] = None
+    etd: Optional[datetime] = None
+    vessel_status: Optional[str] = None
+    expiry_date: Optional[date] = None
+    mapping_status: Optional[str] = None
+
     class Config:
         from_attributes = True
 
@@ -136,6 +146,81 @@ class CabEstimate(BaseModel):
     base_fare: float
     per_km_rate: float
 
+def sync_crew_manifest_helper(profile: CrewProfile, db: Session):
+    """
+    Tries to match CrewProfile with VesselCrew manifest.
+    If match found, updates VesselCrew status to Mapped, syncs vessel name,
+    port (if agent has one assigned), and generates an automated ShorePass if not present.
+    """
+    from app.db.models.vessel_crew import VesselCrew
+    from app.db.models.vessel import Vessel
+    
+    # 1. Try to find VesselCrew matching by generated HPID or passport search
+    hpid = profile.hpid or generate_hpid(profile.passport_number, profile.nationality, profile.current_port)
+    
+    v_crew = db.query(VesselCrew).filter(VesselCrew.hp_id == hpid).first()
+    if not v_crew and profile.passport_number:
+        # Fallback: search for VesselCrew by passport code in hp_id
+        v_crew = db.query(VesselCrew).filter(VesselCrew.hp_id.like(f"HP-{profile.passport_number}-%")).first()
+        
+    if v_crew:
+        # 2. Sync fields
+        v_crew.status = "Mapped"
+        
+        # Find vessel
+        vessel = db.query(Vessel).filter(Vessel.id == v_crew.vessel_id).first()
+        if vessel:
+            profile.vessel = vessel.name
+            
+            # Sync port from agent if available and crew doesn't have one set yet
+            vessel_port = None
+            if vessel.agent and vessel.agent.agent_profile:
+                vessel_port = vessel.agent.agent_profile.assigned_port
+                
+            if vessel_port and not profile.current_port:
+                profile.current_port = vessel_port
+                
+            # Keep HPID aligned
+            new_hpid = generate_hpid(profile.passport_number, profile.nationality, profile.current_port)
+            profile.hpid = new_hpid
+            v_crew.hp_id = new_hpid
+            
+            # 3. Auto-generate ShorePass if not exists
+            port_to_use = vessel_port or profile.current_port or "GEN"
+            existing_pass = db.query(ShorePass).filter(
+                ShorePass.crew_profile_id == profile.id,
+                ShorePass.port_name == port_to_use,
+                ShorePass.vessel_name == vessel.name
+            ).first()
+            
+            if not existing_pass:
+                port_code = port_to_use.replace("port_", "")[:3].upper()
+                vessel_code = vessel.name.replace(" ", "")[:3].upper()
+                random_suffix = uuid.uuid4().hex[:4].upper()
+                shore_pass_id = f"SP-{port_code}-{vessel_code}-{random_suffix}"
+                
+                port_display = port_to_use.replace("port_", "").replace("_", " ").title()
+                agent_name = f"{port_display} Port Authority"
+                
+                new_pass = ShorePass(
+                    crew_profile_id=profile.id,
+                    agent_name=agent_name,
+                    shore_pass_id=shore_pass_id,
+                    port_name=port_to_use,
+                    vessel_name=vessel.name,
+                    is_verified=False,
+                    status="pending"
+                )
+                db.add(new_pass)
+                
+        try:
+            db.commit()
+            db.refresh(profile)
+            db.refresh(v_crew)
+        except Exception as e:
+            db.rollback()
+            print(f"Error syncing manifest: {e}")
+
 @router.patch("/profile", response_model=dict)
 def update_crew_profile(
     body: ProfileUpdateIn,
@@ -156,12 +241,19 @@ def update_crew_profile(
     update_data = body.model_dump(exclude_unset=True)
     for field, value in update_data.items():
         setattr(profile, field, value)
+        
+    # Regenerate hpid if port or nationality changed
+    if "current_port" in update_data or "nationality" in update_data or "passport_number" in update_data:
+        profile.hpid = generate_hpid(profile.passport_number, profile.nationality, profile.current_port)
     
     try:
         db.commit()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+    
+    # Sync with manifest
+    sync_crew_manifest_helper(profile, db)
     
     return {"message": "Profile updated successfully"}
 
@@ -173,6 +265,28 @@ def get_crew_profile(
     profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Crew profile not found")
+        
+    # Sync with manifest
+    sync_crew_manifest_helper(profile, db)
+    
+    # Expose the extra fields
+    from app.db.models.vessel_crew import VesselCrew
+    from app.db.models.vessel import Vessel
+    
+    v_crew = db.query(VesselCrew).filter(VesselCrew.hp_id == profile.hpid).first()
+    vessel = None
+    if v_crew:
+        vessel = db.query(Vessel).filter(Vessel.id == v_crew.vessel_id).first()
+        
+    profile.vessel_imo = vessel.imo_number if vessel else None
+    profile.vessel_type = vessel.vessel_type if vessel else None
+    profile.berth_assignment = vessel.berth_assignment if vessel else None
+    profile.eta = vessel.eta if vessel else None
+    profile.etd = vessel.etd if vessel else None
+    profile.vessel_status = vessel.status if vessel else None
+    profile.expiry_date = v_crew.expiry_date if v_crew else None
+    profile.mapping_status = v_crew.status if v_crew else "Unmapped"
+    
     return profile
 
 class SOSConfigIn(BaseModel):

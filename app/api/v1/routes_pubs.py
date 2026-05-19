@@ -8,7 +8,7 @@ from datetime import datetime
 from pydantic import BaseModel
 
 from app.db.session import get_db
-from app.db.models.pub import Pub
+from app.db.models.vendors import Vendors, PlaceCategory
 from app.api.v1.routes_auth import get_current_user
 from app.db.models.user import User
 
@@ -46,6 +46,8 @@ class PubBase(BaseModel):
     pub_type: Optional[str] = None
     category: Optional[str] = None
     best_for: Optional[str] = None
+    facilities: Optional[List[str]] = None
+    about: Optional[str] = None
 
 class PubOut(PubBase):
     id: int
@@ -59,11 +61,35 @@ def get_pubs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    query = db.query(Pub)
+    query = db.query(Vendors).filter(Vendors.category == PlaceCategory.pub, Vendors.status == "Active")
     if port_id:
-        query = query.filter(Pub.port_id == port_id)
-    pubs = query.all()
-    return pubs
+        query = query.filter(Vendors.port_id == port_id)
+    vendors = query.all()
+    results = []
+    for v in vendors:
+        other = v.other_information or {}
+        results.append(PubOut(
+            id=v.id,
+            name=v.name,
+            location_name=v.location_name,
+            distance_from_port=v.distance_from_port,
+            rating=v.rating,
+            price_per_person=other.get("price_per_person", 0.0),
+            timings=other.get("timings", ""),
+            service_type=other.get("category", "Standard"),
+            popular_for=other.get("facilities", []),
+            phone=v.phone,
+            lat=v.lat,
+            lng=v.lng,
+            image_url=v.images[0] if (v.images and len(v.images) > 0) else "https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=400&q=80",
+            description=other.get("about") or other.get("description") or "",
+            pub_type=other.get("pub_type", ""),
+            category=other.get("category", ""),
+            best_for=other.get("best_for", ""),
+            facilities=other.get("facilities", []),
+            about=other.get("about") or other.get("description") or ""
+        ))
+    return results
 
 @router.get("/{pub_id}", response_model=PubOut)
 def get_pub_details(
@@ -71,82 +97,37 @@ def get_pub_details(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    pub = db.query(Pub).filter(Pub.id == pub_id).first()
-    if not pub:
+    v = db.query(Vendors).filter(Vendors.id == pub_id, Vendors.category == PlaceCategory.pub).first()
+    if not v:
         raise HTTPException(status_code=404, detail="Pub not found")
-    return pub
-
-# Admin endpoint to seed data (for development)
-@router.post("/seed", status_code=status.HTTP_201_CREATED)
-def seed_pubs(
-    db: Session = Depends(get_db),
-    # current_user: User = Depends(get_current_user) # In production we'd protect this
-):
-    # Check if data already exists
-    if db.query(Pub).first():
-        return {"message": "Data already seeded"}
-    
-    dummy_pubs = [
-        {
-            "name": "Pakka local",
-            "location_name": "Kondapur, 3.6 KM",
-            "distance_from_port": 3.6,
-            "rating": 4.3,
-            "price_per_person": 69.0,
-            "timings": "11am to 12am",
-            "service_type": "Andhra, Biriyani",
-            "popular_for": ["Andhra Food", "Lively", "Local"],
-            "phone": "+91 9857297638",
-            "lat": 17.4622,
-            "lng": 78.3568,
-            "image_url": "https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=400&q=80",
-            "description": "A popular spot for authentic Andhra cuisine and a lively local atmosphere."
-        },
-        {
-            "name": "Masala Republic by Dadu's",
-            "location_name": "Kondapur, 7.8 KM",
-            "distance_from_port": 7.8,
-            "rating": 4.3,
-            "price_per_person": 75.0,
-            "timings": "8pm to 12am",
-            "service_type": "Asian, Continental",
-            "popular_for": ["Vegetarian", "Elegant", "Fusion"],
-            "phone": "+91 98572976382",
-            "lat": 17.4504,
-            "lng": 78.3808,
-            "image_url": "https://images.unsplash.com/photo-1552566626-52f8b828add9?auto=format&fit=crop&w=400&q=80",
-            "description": "Masala Republic offers a unique vegetarian fine-dining experience with Asian and Continental fusion."
-        },
-        {
-            "name": "Flechazo GOLD",
-            "location_name": "Road Number 10, Jubilee Hills",
-            "distance_from_port": 9.2,
-            "rating": 4.3,
-            "price_per_person": 85.0,
-            "timings": "12pm to 11pm",
-            "service_type": "Mediterranean, North Indian",
-            "popular_for": ["Buffet", "Celebration", "Fusion"],
-            "phone": "+91 98572976383",
-            "lat": 17.4334,
-            "lng": 78.4116,
-            "image_url": "https://images.unsplash.com/photo-1470337458703-46ad1756a187?auto=format&fit=crop&w=400&q=80",
-            "description": "A celebration of food from the Mediterranean and North India, known for its extensive buffet."
-        }
-    ]
-    
-    for pub_data in dummy_pubs:
-        db_pub = Pub(**pub_data)
-        db.add(db_pub)
-    
-    db.commit()
-    return {"message": "Pubs seeded successfully"}
-
+    other = v.other_information or {}
+    return PubOut(
+        id=v.id,
+        name=v.name,
+        location_name=v.location_name,
+        distance_from_port=v.distance_from_port,
+        rating=v.rating,
+        price_per_person=other.get("price_per_person", 0.0),
+        timings=other.get("timings", ""),
+        service_type=other.get("category", "Standard"),
+        popular_for=other.get("facilities", []),
+        phone=v.phone,
+        lat=v.lat,
+        lng=v.lng,
+        image_url=v.images[0] if (v.images and len(v.images) > 0) else "https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=400&q=80",
+        description=other.get("about") or other.get("description") or "",
+        pub_type=other.get("pub_type", ""),
+        category=other.get("category", ""),
+        best_for=other.get("best_for", ""),
+        facilities=other.get("facilities", []),
+        about=other.get("about") or other.get("description") or ""
+    )
 
 # Generate QR code for a pub
 @router.get("/{id}/qr")
 def get_pub_qr(id: int, db: Session = Depends(get_db)):
-    pub = db.query(Pub).filter(Pub.id == id).first()
-    if not pub:
+    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category == PlaceCategory.pub).first()
+    if not v:
         raise HTTPException(status_code=404, detail="Pub not found")
 
     cache_path = f"{QR_DIR}/pub_{id}.png"

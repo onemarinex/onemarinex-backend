@@ -132,7 +132,7 @@ def get_aggregator_dashboard(
             booking_id=b.booking_id,
             crew=CrewShortOut(
                 name=b.crew.full_name,
-                hp_id=b.crew.passport_number or "",
+                hp_id=b.crew.hpid or "",
                 vessel=b.crew.vessel or ""
             ),
             pickup_address=b.pickup_address,
