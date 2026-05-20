@@ -9,7 +9,7 @@ from app.db.models.user import User
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.agent_profile import AgentProfile
 from app.db.models.aggregator_profile import AggregatorProfile
-from app.services.auth import get_password_hash, create_access_token
+from app.services.auth import get_password_hash, create_access_token, create_refresh_token
 from app.services.crew_service import generate_hpid
 from app.api.v1.routes_auth import AuthOut
 from app.core.config import settings
@@ -30,6 +30,14 @@ class CrewRegistrationIn(BaseModel):
     nationality: str
     passport_number: Optional[str] = None
     date_of_birth: Optional[date] = None
+
+class RegistrationCheckIn(BaseModel):
+    email: EmailStr
+    mobile_number: Optional[str] = None
+
+class RegistrationCheckOut(BaseModel):
+    email_exists: bool
+    mobile_exists: bool
 
 class AgentRegistrationIn(BaseModel):
     # User fields
@@ -78,6 +86,9 @@ def register_crew(body: CrewRegistrationIn, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=409, detail="Email already registered")
 
+    if body.mobile_number and db.query(User).filter(User.mobile_number == body.mobile_number).first():
+        raise HTTPException(status_code=409, detail="Mobile number already registered")
+
     # 1. Create User
     user = User(
         name=body.full_name,
@@ -117,8 +128,12 @@ def register_crew(body: CrewRegistrationIn, db: Session = Depends(get_db)):
         subject=user.email,
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
+    refresh_token = create_refresh_token(
+        subject=user.email,
+        expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
+    )
     
-    return AuthOut(access_token=token, role=user.role)
+    return AuthOut(access_token=token, refresh_token=refresh_token, role=user.role)
 
 @router.post("/agent", response_model=AuthOut, status_code=status.HTTP_201_CREATED)
 def register_agent(body: AgentRegistrationIn, db: Session = Depends(get_db)):
@@ -127,6 +142,9 @@ def register_agent(body: AgentRegistrationIn, db: Session = Depends(get_db)):
     # Check if user already exists
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=409, detail="Email already registered")
+
+    if body.mobile_number and db.query(User).filter(User.mobile_number == body.mobile_number).first():
+        raise HTTPException(status_code=409, detail="Mobile number already registered")
 
     # 1. Create User
     user = User(
@@ -166,8 +184,12 @@ def register_agent(body: AgentRegistrationIn, db: Session = Depends(get_db)):
         subject=user.email,
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
+    refresh_token = create_refresh_token(
+        subject=user.email,
+        expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
+    )
     
-    return AuthOut(access_token=token, role=user.role)
+    return AuthOut(access_token=token, refresh_token=refresh_token, role=user.role)
 
 @router.post("/aggregator", response_model=AuthOut, status_code=status.HTTP_201_CREATED)
 def register_aggregator(body: AggregatorRegistrationIn, db: Session = Depends(get_db)):
@@ -176,6 +198,28 @@ def register_aggregator(body: AggregatorRegistrationIn, db: Session = Depends(ge
     # Check if user already exists
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(status_code=409, detail="Email already registered")
+
+    if body.mobile_number and db.query(User).filter(User.mobile_number == body.mobile_number).first():
+        raise HTTPException(status_code=409, detail="Mobile number already registered")
+
+@router.post("/check", response_model=RegistrationCheckOut)
+def registration_check(body: RegistrationCheckIn, db: Session = Depends(get_db)):
+    email = body.email.lower().strip()
+
+    email_exists = db.query(User).filter(User.email == email).first() is not None
+    mobile_exists = False
+    if body.mobile_number:
+        mobile_exists = (
+            db.query(User)
+            .filter(User.mobile_number == body.mobile_number)
+            .first()
+            is not None
+        )
+
+    return RegistrationCheckOut(
+        email_exists=email_exists,
+        mobile_exists=mobile_exists,
+    )
 
     # 1. Create User
     user = User(
@@ -216,8 +260,12 @@ def register_aggregator(body: AggregatorRegistrationIn, db: Session = Depends(ge
         subject=user.email,
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
+    refresh_token = create_refresh_token(
+        subject=user.email,
+        expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
+    )
     
-    return AuthOut(access_token=token, role=user.role)
+    return AuthOut(access_token=token, refresh_token=refresh_token, role=user.role)
 
 @router.put("/aggregator/{agg_id}")
 def update_aggregator(

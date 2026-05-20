@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
@@ -19,6 +19,7 @@ from app.db.models.port import Port
 from app.db.models.aggregator_profile import AggregatorProfile
 from app.db.models.incident import Incident
 from app.db.models.port_service_request import PortServiceRequest
+from app.db.models.contact_message import ContactMessage
 from app.api.v1.routes_auth import get_current_user
 
 router = APIRouter()
@@ -408,6 +409,27 @@ def track_crew(db: Session = Depends(get_db), current_user: User = Depends(get_c
 def track_service_requests(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
     return db.query(PortServiceRequest).order_by(PortServiceRequest.created_at.desc()).all()
+
+@router.get("/contact-messages")
+def list_contact_messages(
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    verify_superadmin(current_user)
+    query = db.query(ContactMessage)
+    if search:
+        pattern = f"%{search}%"
+        query = query.filter(
+            or_(
+                ContactMessage.email.ilike(pattern),
+                ContactMessage.first_name.ilike(pattern),
+                ContactMessage.last_name.ilike(pattern),
+                ContactMessage.phone.ilike(pattern),
+                ContactMessage.message.ilike(pattern),
+            )
+        )
+    return query.order_by(ContactMessage.created_at.desc()).all()
 
 
 @router.post("/vendors", response_model=VendorOut)

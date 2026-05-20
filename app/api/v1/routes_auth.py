@@ -18,7 +18,9 @@ from app.services.auth import (
     get_password_hash,
     verify_password,
     create_access_token,
+    create_refresh_token,
     decode_subject,
+    verify_refresh_token,
 )
 from app.core.config import settings
 
@@ -75,8 +77,12 @@ class LoginIn(BaseModel):
 # Unified auth response for both signup & login
 class AuthOut(BaseModel):
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
     role: str
+
+class RefreshIn(BaseModel):
+    refresh_token: str
 
 
 # ----------------------------
@@ -105,7 +111,11 @@ def signup(body: SignupIn, db: Session = Depends(get_db)):
         subject=user.email,
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
-    return AuthOut(access_token=token, role=user.role)
+    refresh_token = create_refresh_token(
+        subject=user.email,
+        expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
+    )
+    return AuthOut(access_token=token, refresh_token=refresh_token, role=user.role)
 
 
 @router.post("/login", response_model=AuthOut)
@@ -119,4 +129,28 @@ def login(body: LoginIn, db: Session = Depends(get_db)):
         subject=user.email,
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
-    return AuthOut(access_token=token, role=user.role)
+    refresh_token = create_refresh_token(
+        subject=user.email,
+        expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
+    )
+    return AuthOut(access_token=token, refresh_token=refresh_token, role=user.role)
+
+@router.post("/refresh", response_model=AuthOut)
+def refresh_token(body: RefreshIn, db: Session = Depends(get_db)):
+    email = verify_refresh_token(body.refresh_token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    access_token = create_access_token(
+        subject=user.email,
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    refresh_token = create_refresh_token(
+        subject=user.email,
+        expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
+    )
+    return AuthOut(access_token=access_token, refresh_token=refresh_token, role=user.role)
