@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.db.session import engine
 from app.db.base import Base
 
-from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants, routes_incidents, routes_ports, routes_drivers, routes_early_access, routes_chat, routes_superadmin, routes_reviews, routes_sightseeing
+from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants, routes_incidents, routes_ports, routes_drivers, routes_early_access, routes_chat, routes_superadmin, routes_reviews, routes_sightseeing, routes_notifications
 
 from app.api.v1.routes_vendor import router as vendor_router
 from app.api.v1.routes_rfqs import router as rfq_router
@@ -111,6 +111,7 @@ app.include_router(routes_drivers.router, prefix="/api/v1/drivers", tags=["drive
 app.include_router(routes_chat.router, prefix="/api/v1/chat", tags=["chat"])
 app.include_router(routes_superadmin.router, prefix="/api/v1/superadmin", tags=["superadmin"])
 app.include_router(routes_reviews.router, prefix="/api/v1/reviews", tags=["reviews"])
+app.include_router(routes_notifications.router, prefix="/api/v1/notifications", tags=["notifications"])
 
 
 # --- Health checks & root ---
