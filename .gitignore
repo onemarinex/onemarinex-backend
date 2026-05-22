@@ -17,3 +17,8 @@ env/
 
 # Logs
 *.log
+scripts/
+apply_port_id_migration.py
+migrations/
+seeds/
+tests/

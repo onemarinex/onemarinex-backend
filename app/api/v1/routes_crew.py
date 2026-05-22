@@ -10,6 +10,7 @@ from app.db.models.crew_profile import CrewProfile
 from app.db.models.shore_pass import ShorePass
 from app.db.models.cab_booking import CabBooking
 from app.db.models.cab_pricing import CabPricing
+from app.db.models.incident import Incident, IncidentStatus, IncidentType
 from app.api.v1.routes_auth import get_current_user
 from app.services.crew_service import generate_hpid
 from pydantic import BaseModel
@@ -38,8 +39,8 @@ class CrewProfileOut(BaseModel):
     full_name: str
     rank: str
     nationality: str
-    passport_number: str
-    date_of_birth: date
+    passport_number: Optional[str]
+    date_of_birth: Optional[date]
     current_port: Optional[str]
     vessel: Optional[str]
     hpid: Optional[str]
@@ -332,8 +333,7 @@ def trigger_sos(
     Trigger an SOS alert.
     Sends notification to:
     1. Ship's configured SOS email
-    2. Other crew members on the same vessel and port
-    3. HeyPorts support
+    2. HeyPorts support
     """
     if current_user.role != "crew":
         raise HTTPException(status_code=403, detail="Only crew can trigger SOS")
@@ -345,37 +345,34 @@ def trigger_sos(
     if not profile.sos_email:
         raise HTTPException(status_code=400, detail="SOS Email not configured")
 
+    port_name = body.port_name or profile.current_port
+
     # 1. Ship Email
     recipients = [profile.sos_email]
-    
-    # 2. Fellow Crew (same vessel, same port)
-    fellow_crew = db.query(CrewProfile).filter(
-        CrewProfile.vessel == profile.vessel,
-        CrewProfile.current_port == profile.current_port,
-        CrewProfile.user_id != current_user.id
-    ).all()
-    
-    for crew in fellow_crew:
-        # We need the user's email from the linked User table
-        user = db.query(User).filter(User.id == crew.user_id).first()
-        if user and user.email:
-            recipients.append(user.email)
-            
-    # 3. HeyPorts Support
+
+    # 2. HeyPorts Support
     recipients.append("support@heyports.com")
     
     # In a real app, send emails here
     print(f"[SOS TRIGGERED] From: {current_user.email}, Port: {body.port_name}, Lat: {body.lat}, Lng: {body.lng}")
     print(f"[SOS RECIPIENTS] {', '.join(set(recipients))}")
     
-    # Also record as an incident
-    from app.db.models.incident import Incident
+    # Also record as an incident (for Super Admin tracking)
+    incident_id = f"INC-{uuid.uuid4().hex[:6].upper()}"
+    description = (
+        f"SOS triggered by {profile.full_name} (Vessel: {profile.vessel or 'N/A'}) "
+        f"at {port_name}. Location: {body.lat}, {body.lng}"
+    )
     new_incident = Incident(
-        creator_id=current_user.id,
-        type="CREW",
-        title="🚨 SOS ALERT",
-        description=f"SOS triggered by {profile.full_name} at {body.port_name}. Location: {body.lat}, {body.lng}",
-        status="open"
+        incident_id=incident_id,
+        type=IncidentType.CREW,
+        title="SOS Alert",
+        description=description,
+        status=IncidentStatus.ACTIVE,
+        port_name=port_name,
+        reporter_name=profile.full_name or current_user.name,
+        reporter_role=profile.rank,
+        reporter_id=profile.hpid or profile.passport_number,
     )
     db.add(new_incident)
     
@@ -386,9 +383,10 @@ def trigger_sos(
         raise HTTPException(status_code=500, detail=f"Failed to record SOS: {str(e)}")
         
     return {
-        "status": "success", 
+        "status": "success",
         "message": "SOS Alert sent to all recipients",
-        "recipients_count": len(set(recipients))
+        "recipients_count": len(set(recipients)),
+        "incident_id": incident_id,
     }
 
 @router.post("/feedback")
@@ -404,12 +402,18 @@ def submit_feedback(
     
     # Optionally store in DB
     from app.db.models.incident import Incident
+    incident_id = f"INC-{uuid.uuid4().hex[:6].upper()}"
+    crew = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
     feedback_incident = Incident(
-        creator_id=current_user.id,
-        type="FEEDBACK",
+        incident_id=incident_id,
+        type=IncidentType.CREW,
         title="Crew Feedback",
         description=body.message,
-        status="open"
+        status=IncidentStatus.ACTIVE,
+        reporter_name=current_user.name,
+        reporter_role=crew.rank if crew else "Crew",
+        reporter_id=crew.hpid or crew.passport_number if crew else None,
+        port_name=crew.current_port if crew else None,
     )
     db.add(feedback_incident)
     

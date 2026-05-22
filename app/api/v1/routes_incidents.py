@@ -171,12 +171,24 @@ async def get_incident_recipients(
     
     from app.db.models.crew_profile import CrewProfile
     from app.db.models.aggregator_profile import AggregatorProfile
+    from app.db.models.port import Port
+    from sqlalchemy import or_
     
     crew = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
     if not crew or not crew.current_port:
         return [{"id": 0, "name": "General Support"}]
     
-    aggregators = db.query(AggregatorProfile).filter(AggregatorProfile.operating_port == crew.current_port).all()
+    aggregators = (
+        db.query(AggregatorProfile)
+        .join(Port, AggregatorProfile.operating_port_id == Port.id)
+        .filter(
+            or_(
+                Port.code == crew.current_port,
+                Port.name == crew.current_port,
+            )
+        )
+        .all()
+    )
     
     recipients = [{"id": 0, "name": "General Support"}]
     for agg in aggregators:

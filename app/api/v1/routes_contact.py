@@ -26,4 +26,4 @@ def contact(body: ContactIn, db: Session = Depends(get_db)):
     db.add(db_msg)
     db.commit()
     db.refresh(db_msg)
-    return {"message": f"Thanks {first_name}, we received your message."}
+    return {"message": f"Thanks {body.first_name}, we received your message."}

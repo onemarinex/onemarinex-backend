@@ -1,16 +1,19 @@
 import sys
 import os
+from pathlib import Path
 import json
 from sqlalchemy import text
 from datetime import datetime
 
-# Add the project root to sys.path
-sys.path.append(os.getcwd())
+# Add the project root to sys.path (scripts/ -> project root)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 def preload_data():
     from app.db.session import SessionLocal
     
-    file_path = "preload_data.json"
+    file_path = PROJECT_ROOT / "preload_data.json"
     if not os.path.exists(file_path):
         print(f"Error: {file_path} not found.")
         return

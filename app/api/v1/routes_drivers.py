@@ -87,7 +87,7 @@ class DriverLoginIn(BaseModel):
 
 @router.post("/login")
 async def driver_login(body: DriverLoginIn, db: Session = Depends(get_db)):
-    from app.services.auth import verify_password, create_access_token
+    from app.services.auth import verify_password, create_access_token, create_refresh_token
     from datetime import timedelta
     from app.core.config import settings
 
@@ -99,13 +99,51 @@ async def driver_login(body: DriverLoginIn, db: Session = Depends(get_db)):
         subject=driver.email,
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
+    refresh_token = create_refresh_token(
+        subject=driver.email,
+        expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
+    )
     return {
         "access_token": token,
+        "refresh_token": refresh_token,
         "token_type": "bearer",
         "role": "driver",
         "must_change_password": driver.is_temp_password == 1,
         "name": driver.name,
         "aggregator_name": driver.aggregator.company_name if driver.aggregator else "sri venkateswara Agent"
+    }
+
+class DriverRefreshIn(BaseModel):
+    refresh_token: str
+
+@router.post("/refresh")
+async def driver_refresh(body: DriverRefreshIn, db: Session = Depends(get_db)):
+    from app.services.auth import verify_refresh_token, create_access_token, create_refresh_token
+    from datetime import timedelta
+    from app.core.config import settings
+
+    email = verify_refresh_token(body.refresh_token)
+    if not email:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    driver = db.query(Driver).filter(Driver.email == email).first()
+    if not driver:
+        raise HTTPException(status_code=401, detail="Driver not found")
+
+    access_token = create_access_token(
+        subject=driver.email,
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    refresh_token = create_refresh_token(
+        subject=driver.email,
+        expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
+    )
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "role": "driver",
     }
 
 class UpdatePasswordIn(BaseModel):

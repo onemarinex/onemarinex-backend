@@ -37,3 +37,5 @@ from app.db.models import port_service_request  # noqa: F401
 from app.db.models.facility_scan import FacilityScan # noqa: F401
 from app.db.models.chat import ChatMessage # noqa: F401
 from app.db.models.venue_review import VenueReview # noqa: F401
+from app.db.models.notification import Notification # noqa: F401
+from app.db.models.notification_read import NotificationRead # noqa: F401
