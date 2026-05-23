@@ -11,6 +11,8 @@ from app.db.models.shore_pass import ShorePass
 from app.db.models.cab_booking import CabBooking
 from app.db.models.cab_pricing import CabPricing
 from app.db.models.incident import Incident, IncidentStatus, IncidentType
+from app.db.models.notification import Notification
+from app.db.models.crew_sos import CrewSos
 from app.api.v1.routes_auth import get_current_user
 from app.services.crew_service import generate_hpid
 from pydantic import BaseModel
@@ -298,6 +300,20 @@ class SOSTriggerIn(BaseModel):
     lat: Optional[float] = None
     lng: Optional[float] = None
 
+class SosActiveOut(BaseModel):
+    active: bool
+    id: Optional[int] = None
+    status: Optional[str] = None
+    created_at: Optional[datetime] = None
+    port_name: Optional[str] = None
+    vessel: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+
+class SosCancelOut(BaseModel):
+    status: str
+    message: str
+
 class FeedbackIn(BaseModel):
     message: str
 
@@ -323,6 +339,59 @@ def update_sos_config(
         
     return {"message": "SOS config updated successfully", "sos_email": profile.sos_email}
 
+@router.get("/sos/active", response_model=SosActiveOut)
+def get_active_sos(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "crew":
+        raise HTTPException(status_code=403, detail="Only crew can view SOS status")
+
+    active = db.query(CrewSos).filter(
+        CrewSos.user_id == current_user.id,
+        CrewSos.status.in_(["ACTIVE", "ACKNOWLEDGED"]),
+    ).order_by(CrewSos.created_at.desc()).first()
+
+    if not active:
+        return {"active": False}
+
+    return {
+        "active": True,
+        "id": active.id,
+        "status": active.status,
+        "created_at": active.created_at,
+        "port_name": active.port_name,
+        "vessel": active.vessel,
+        "lat": active.lat,
+        "lng": active.lng,
+    }
+
+@router.post("/sos/cancel", response_model=SosCancelOut)
+def cancel_active_sos(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "crew":
+        raise HTTPException(status_code=403, detail="Only crew can cancel SOS")
+
+    active = db.query(CrewSos).filter(
+        CrewSos.user_id == current_user.id,
+        CrewSos.status.in_(["ACTIVE", "ACKNOWLEDGED"]),
+    ).order_by(CrewSos.created_at.desc()).first()
+
+    if not active:
+        return {"status": "inactive", "message": "No active SOS request"}
+
+    active.status = "CANCELLED"
+    active.cancelled_at = datetime.utcnow()
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"status": "cancelled", "message": "SOS request cancelled"}
+
 @router.post("/trigger-sos")
 def trigger_sos(
     body: SOSTriggerIn,
@@ -341,6 +410,13 @@ def trigger_sos(
     profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Crew profile not found")
+
+    active = db.query(CrewSos).filter(
+        CrewSos.user_id == current_user.id,
+        CrewSos.status == "ACTIVE",
+    ).order_by(CrewSos.created_at.desc()).first()
+    if active:
+        raise HTTPException(status_code=409, detail="An active SOS request already exists")
     
     if not profile.sos_email:
         raise HTTPException(status_code=400, detail="SOS Email not configured")
@@ -357,6 +433,36 @@ def trigger_sos(
     print(f"[SOS TRIGGERED] From: {current_user.email}, Port: {body.port_name}, Lat: {body.lat}, Lng: {body.lng}")
     print(f"[SOS RECIPIENTS] {', '.join(set(recipients))}")
     
+    # Record SOS request
+    new_sos = CrewSos(
+        user_id=current_user.id,
+        crew_profile_id=profile.id,
+        port_name=port_name,
+        vessel=profile.vessel,
+        lat=body.lat,
+        lng=body.lng,
+        status="ACTIVE",
+    )
+    db.add(new_sos)
+    db.flush()
+
+    location_text = "this location"
+    if body.lat is not None and body.lng is not None:
+        location_text = f"this location ({body.lat}, {body.lng})"
+
+    sos_notification = Notification(
+        title="SOS Alert",
+        message=(
+            f"Crew member {profile.full_name} raised SOS in {location_text}. "
+            "If you are nearby please get in touch."
+        ),
+        port_name=port_name or None,
+        vessel=profile.vessel or None,
+        created_by=current_user.id,
+        sos_id=new_sos.id,
+    )
+    db.add(sos_notification)
+
     # Also record as an incident (for Super Admin tracking)
     incident_id = f"INC-{uuid.uuid4().hex[:6].upper()}"
     description = (

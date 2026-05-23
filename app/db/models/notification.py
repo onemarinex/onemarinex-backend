@@ -13,7 +13,9 @@ class Notification(Base):
     message = Column(Text, nullable=False)
     port_name = Column(String(128), nullable=True)
     vessel = Column(String(128), nullable=True)
+    sos_id = Column(Integer, ForeignKey("crew_sos_requests.id", ondelete="SET NULL"), nullable=True)
     created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     creator = relationship("User")
+    sos_request = relationship("CrewSos")

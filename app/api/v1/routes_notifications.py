@@ -1,5 +1,6 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import and_
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from datetime import datetime
@@ -8,6 +9,7 @@ from app.db.session import get_db
 from app.db.models.notification import Notification
 from app.db.models.notification_read import NotificationRead
 from app.db.models.crew_profile import CrewProfile
+from app.db.models.crew_sos import CrewSos
 from app.db.models.user import User
 from app.api.v1.routes_auth import get_current_user
 
@@ -27,6 +29,7 @@ class NotificationOut(BaseModel):
     message: str
     port_name: Optional[str] = None
     vessel: Optional[str] = None
+    sos_id: Optional[int] = None
     created_by: Optional[int] = None
     created_at: datetime
 
@@ -43,6 +46,7 @@ class NotificationUpdateIn(BaseModel):
 
 class NotificationCrewOut(NotificationOut):
     is_read: bool
+    sos_status: Optional[str] = None
 
 
 @router.post("/", response_model=NotificationOut, status_code=status.HTTP_201_CREATED)
@@ -138,6 +142,12 @@ def list_notifications_for_crew(
         return []
 
     query = db.query(Notification)
+    query = query.filter(
+        ~and_(
+            Notification.sos_id.isnot(None),
+            Notification.created_by == current_user.id,
+        )
+    )
 
     # Match port/vessel: null acts like "all"
     if profile.current_port:
@@ -157,6 +167,7 @@ def list_notifications_for_crew(
 
     notifications = query.order_by(Notification.created_at.desc()).all()
     ids = [n.id for n in notifications]
+    sos_ids = [n.sos_id for n in notifications if n.sos_id]
 
     read_rows = []
     if ids:
@@ -166,6 +177,13 @@ def list_notifications_for_crew(
         ).all()
     read_ids = {r.notification_id for r in read_rows}
 
+    sos_status_map = {}
+    if sos_ids:
+        rows = db.query(CrewSos.id, CrewSos.status).filter(
+            CrewSos.id.in_(sos_ids)
+        ).all()
+        sos_status_map = {row[0]: row[1] for row in rows}
+
     return [
         {
             "id": n.id,
@@ -173,9 +191,11 @@ def list_notifications_for_crew(
             "message": n.message,
             "port_name": n.port_name,
             "vessel": n.vessel,
+            "sos_id": n.sos_id,
             "created_by": n.created_by,
             "created_at": n.created_at,
             "is_read": n.id in read_ids,
+            "sos_status": sos_status_map.get(n.sos_id),
         }
         for n in notifications
     ]
@@ -194,6 +214,12 @@ def get_unread_count(
         return {"count": 0}
 
     query = db.query(Notification.id)
+    query = query.filter(
+        ~and_(
+            Notification.sos_id.isnot(None),
+            Notification.created_by == current_user.id,
+        )
+    )
     if profile.current_port:
         query = query.filter(
             (Notification.port_name.is_(None))
