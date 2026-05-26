@@ -180,7 +180,7 @@ def get_dashboard_data(
         crew_in_shore = db.query(ShorePass).join(
             CrewProfile, ShorePass.crew_profile_id == CrewProfile.id
         ).join(
-            VesselCrew, VesselCrew.hp_id == CrewProfile.passport_number
+            VesselCrew, VesselCrew.hp_id == CrewProfile.hpid
         ).filter(
             VesselCrew.vessel_id.in_(vessel_ids),
             ShorePass.in_time == None

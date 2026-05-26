@@ -149,7 +149,7 @@ async def create_incident(
             incident_id=incident_id,
             reporter_name=current_user.name,
             reporter_role=crew.rank if crew else "Crew",
-            reporter_id=crew.passport_number if crew else None,
+            reporter_id=crew.hpid if crew else None,
             port_name=crew.current_port if crew else None,
             type=IncidentType.CREW
         )

@@ -6,7 +6,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.db.session import get_db
-from app.db.models.restaurant import Restaurant
+from app.db.models.vendors import Vendors, PlaceCategory
 
 router = APIRouter()
 
@@ -33,32 +33,78 @@ def get_restaurants(
     search: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    query = db.query(Restaurant)
+    query = db.query(Vendors).filter(Vendors.category == PlaceCategory.restaurant, Vendors.status == "Active")
     if port_id is not None:
-        query = query.filter(Restaurant.port_id == port_id)
+        query = query.filter(Vendors.port_id == port_id)
     if max_dist is not None:
-        query = query.filter(Restaurant.distance_from_port <= max_dist)
-    if max_price is not None:
-        query = query.filter(Restaurant.price_per_person <= max_price)
+        query = query.filter(Vendors.distance_from_port <= max_dist)
     if search is not None:
-        query = query.filter(Restaurant.name.ilike(f"%{search}%"))
-    print(query)
-    return query.all()
+        query = query.filter(Vendors.name.ilike(f"%{search}%"))
+        
+    vendors = query.all()
+    results = []
+    for v in vendors:
+        other = v.other_information or {}
+        price = other.get("price_per_person", 0.0)
+        if max_price is not None and price > max_price:
+            continue
+            
+        results.append({
+            "id": v.id,
+            "port_id": v.port_id,
+            "name": v.name,
+            "location_name": v.location_name,
+            "distance_from_port": v.distance_from_port,
+            "rating": v.rating,
+            "price_per_person": price,
+            "timings": other.get("timings", "10:00 AM - 10:00 PM"),
+            "service_type": other.get("category_cuisines") or other.get("service_type") or "Standard",
+            "category_cuisines": other.get("category_cuisines") or other.get("service_type") or "Standard",
+            "phone": v.phone,
+            "lat": v.lat,
+            "lng": v.lng,
+            "image_url": v.images[0] if (v.images and len(v.images) > 0) else "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?q=80&w=2070&auto=format&fit=crop",
+            "description": other.get("about") or other.get("description") or "",
+            "about": other.get("about") or other.get("description") or "",
+            "facilities": other.get("facilities", []),
+            "address": v.location_name,
+        })
+    return results
 
 
 @router.get("/{id}")
 def get_restaurant(id: int, db: Session = Depends(get_db)):
-    restaurant = db.query(Restaurant).filter(Restaurant.id == id).first()
-    if not restaurant:
+    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category == PlaceCategory.restaurant).first()
+    if not v:
         raise HTTPException(status_code=404, detail="Restaurant not found")
-    return restaurant
+    other = v.other_information or {}
+    return {
+        "id": v.id,
+        "port_id": v.port_id,
+        "name": v.name,
+        "location_name": v.location_name,
+        "distance_from_port": v.distance_from_port,
+        "rating": v.rating,
+        "price_per_person": other.get("price_per_person", 0.0),
+        "timings": other.get("timings", "10:00 AM - 10:00 PM"),
+        "service_type": other.get("category_cuisines") or other.get("service_type") or "Standard",
+        "category_cuisines": other.get("category_cuisines") or other.get("service_type") or "Standard",
+        "phone": v.phone,
+        "lat": v.lat,
+        "lng": v.lng,
+        "image_url": v.images[0] if (v.images and len(v.images) > 0) else "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?q=80&w=2070&auto=format&fit=crop",
+        "description": other.get("about") or other.get("description") or "",
+        "about": other.get("about") or other.get("description") or "",
+        "facilities": other.get("facilities", []),
+        "address": v.location_name,
+    }
 
 
 # Generate QR code for a restaurant
 @router.get("/{id}/qr")
 def get_restaurant_qr(id: int, db: Session = Depends(get_db)):
-    restaurant = db.query(Restaurant).filter(Restaurant.id == id).first()
-    if not restaurant:
+    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category == PlaceCategory.restaurant).first()
+    if not v:
         raise HTTPException(status_code=404, detail="Restaurant not found")
 
     cache_path = f"{QR_DIR}/restaurant_{id}.png"
@@ -72,4 +118,3 @@ def get_restaurant_qr(id: int, db: Session = Depends(get_db)):
             f.write(png_bytes)
 
     return Response(content=png_bytes, media_type="image/png")
-

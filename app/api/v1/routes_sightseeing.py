@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.db.models.sightseeing import Sightseeing
+from app.db.models.vendors import Vendors, PlaceCategory
 from typing import List, Optional
 
 router = APIRouter()
@@ -35,19 +35,45 @@ def get_sightseeing(
     search: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    query = db.query(Sightseeing)
+    query = db.query(Vendors).filter(Vendors.category == PlaceCategory.sightseeing, Vendors.status == "Active")
     if port_id is not None:
-        query = query.filter(Sightseeing.port_id == port_id)
+        query = query.filter(Vendors.port_id == port_id)
     if max_dist is not None:
-        query = query.filter(Sightseeing.distance_from_port <= max_dist)
-    if min_price is not None:
-        query = query.filter(Sightseeing.price_per_person >= min_price)
-    if max_price is not None:
-        query = query.filter(Sightseeing.price_per_person <= max_price)
+        query = query.filter(Vendors.distance_from_port <= max_dist)
     if search is not None:
-        query = query.filter(Sightseeing.name.ilike(f"%{search}%"))
+        query = query.filter(Vendors.name.ilike(f"%{search}%"))
     
-    return query.all()
+    vendors = query.all()
+    results = []
+    for v in vendors:
+        other = v.other_information or {}
+        price = other.get("price_per_person", 0.0)
+        if min_price is not None and price < min_price:
+            continue
+        if max_price is not None and price > max_price:
+            continue
+            
+        results.append({
+            "id": v.id,
+            "port_id": v.port_id,
+            "name": v.name,
+            "location": v.location_name,
+            "location_name": v.location_name,
+            "distance_from_port": v.distance_from_port,
+            "rating": v.rating,
+            "price_per_person": price,
+            "timings": other.get("timings", "9:00 AM - 6:00 PM"),
+            "phone": v.phone,
+            "lat": v.lat,
+            "lng": v.lng,
+            "image_url": v.images[0] if (v.images and len(v.images) > 0) else "https://images.unsplash.com/photo-1519451241324-20b4ea2c4220?q=80&w=2070&auto=format&fit=crop",
+            "description": other.get("about") or other.get("description") or "",
+            "about": other.get("about") or other.get("description") or "",
+            "facilities": other.get("facilities", []),
+            "best_time_to_visit": other.get("best_time_to_visit", "Evening"),
+        })
+    return results
+
 
 # Get sightseeing based on filters
 @router.get("/filters")
@@ -59,34 +85,79 @@ def get_sightseeing_by_filters(
     min_rating: Optional[float] = None,
     db: Session = Depends(get_db)
 ):
-    query = db.query(Sightseeing)
+    query = db.query(Vendors).filter(Vendors.category == PlaceCategory.sightseeing, Vendors.status == "Active")
     if port_id is not None:
-        query = query.filter(Sightseeing.port_id == port_id)
+        query = query.filter(Vendors.port_id == port_id)
     if max_dist is not None:
-        query = query.filter(Sightseeing.distance_from_port <= max_dist)
-    if min_price is not None:
-        query = query.filter(Sightseeing.price_per_person >= min_price)
-    if max_price is not None:
-        query = query.filter(Sightseeing.price_per_person <= max_price)
+        query = query.filter(Vendors.distance_from_port <= max_dist)
     if min_rating is not None:
-        query = query.filter(Sightseeing.rating >= min_rating)
+        query = query.filter(Vendors.rating >= min_rating)
     
-    return query.all()
+    vendors = query.all()
+    results = []
+    for v in vendors:
+        other = v.other_information or {}
+        price = other.get("price_per_person", 0.0)
+        if min_price is not None and price < min_price:
+            continue
+        if max_price is not None and price > max_price:
+            continue
+            
+        results.append({
+            "id": v.id,
+            "port_id": v.port_id,
+            "name": v.name,
+            "location": v.location_name,
+            "location_name": v.location_name,
+            "distance_from_port": v.distance_from_port,
+            "rating": v.rating,
+            "price_per_person": price,
+            "timings": other.get("timings", "9:00 AM - 6:00 PM"),
+            "phone": v.phone,
+            "lat": v.lat,
+            "lng": v.lng,
+            "image_url": v.images[0] if (v.images and len(v.images) > 0) else "https://images.unsplash.com/photo-1519451241324-20b4ea2c4220?q=80&w=2070&auto=format&fit=crop",
+            "description": other.get("about") or other.get("description") or "",
+            "about": other.get("about") or other.get("description") or "",
+            "facilities": other.get("facilities", []),
+            "best_time_to_visit": other.get("best_time_to_visit", "Evening"),
+        })
+    return results
+
 
 # Get sightseeing by id
 @router.get("/{id}")
 def get_single_sightseeing(id: int, db: Session = Depends(get_db)):
-    item = db.query(Sightseeing).filter(Sightseeing.id == id).first()
-    if not item:
+    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category == PlaceCategory.sightseeing).first()
+    if not v:
         raise HTTPException(status_code=404, detail="Sightseeing not found")
-    return item
+    other = v.other_information or {}
+    return {
+        "id": v.id,
+        "port_id": v.port_id,
+        "name": v.name,
+        "location": v.location_name,
+        "location_name": v.location_name,
+        "distance_from_port": v.distance_from_port,
+        "rating": v.rating,
+        "price_per_person": other.get("price_per_person", 0.0),
+        "timings": other.get("timings", "9:00 AM - 6:00 PM"),
+        "phone": v.phone,
+        "lat": v.lat,
+        "lng": v.lng,
+        "image_url": v.images[0] if (v.images and len(v.images) > 0) else "https://images.unsplash.com/photo-1519451241324-20b4ea2c4220?q=80&w=2070&auto=format&fit=crop",
+        "description": other.get("about") or other.get("description") or "",
+        "about": other.get("about") or other.get("description") or "",
+        "facilities": other.get("facilities", []),
+        "best_time_to_visit": other.get("best_time_to_visit", "Evening"),
+    }
 
 
 # Generate QR code for a sightseeing location
 @router.get("/{id}/qr")
 def get_sightseeing_qr(id: int, db: Session = Depends(get_db)):
-    item = db.query(Sightseeing).filter(Sightseeing.id == id).first()
-    if not item:
+    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category == PlaceCategory.sightseeing).first()
+    if not v:
         raise HTTPException(status_code=404, detail="Sightseeing not found")
 
     cache_path = f"{QR_DIR}/sightseeing_{id}.png"

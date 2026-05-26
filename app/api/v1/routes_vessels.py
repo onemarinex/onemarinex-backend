@@ -82,7 +82,7 @@ def get_crew_profile(hp_id: str, current_user: User = Depends(get_current_user),
     if not v_crew:
         raise HTTPException(status_code=404, detail="Crew member not found")
     
-    c_profile = db.query(CrewProfile).filter(CrewProfile.passport_number == hp_id).first()
+    c_profile = db.query(CrewProfile).filter(CrewProfile.hpid == hp_id).first()
     
     bookings = []
     visits = []

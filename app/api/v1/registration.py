@@ -121,6 +121,13 @@ def register_crew(body: CrewRegistrationIn, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
+    db.refresh(crew_profile)
+    try:
+        from app.api.v1.routes_crew import sync_crew_manifest_helper
+        sync_crew_manifest_helper(crew_profile, db)
+    except Exception as e:
+        print(f"Error during registration crew manifest sync: {e}")
+
     db.refresh(user)
 
     # 3. Issue Token
