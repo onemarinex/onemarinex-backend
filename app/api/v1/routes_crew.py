@@ -248,16 +248,36 @@ def update_crew_profile(
     # Regenerate hpid if port or nationality changed
     if "current_port" in update_data or "nationality" in update_data or "passport_number" in update_data:
         profile.hpid = generate_hpid(profile.passport_number, profile.nationality, profile.current_port)
-    
+
+    # Always generate a unique HPID if passport_number or current_port or nationality is updated
+    if (
+        'passport_number' in update_data or
+        'current_port' in update_data or
+        'nationality' in update_data
+    ):
+        # Use generate_hpid utility
+        hpid_candidate = generate_hpid(
+            profile.passport_number,
+            profile.nationality,
+            profile.current_port
+        )
+        # If passport_number is missing, append user_id to ensure uniqueness
+        if not profile.passport_number or profile.passport_number.strip() == "":
+            hpid_candidate = f"{hpid_candidate}-{profile.user_id}"
+        # Check for uniqueness in DB
+        existing = db.query(CrewProfile).filter(CrewProfile.hpid == hpid_candidate, CrewProfile.id != profile.id).first()
+        if existing:
+            # Append random suffix if still not unique
+            import uuid
+            hpid_candidate = f"{hpid_candidate}-{uuid.uuid4().hex[:4]}"
+        profile.hpid = hpid_candidate
+
     try:
         db.commit()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-    
-    # Sync with manifest
-    sync_crew_manifest_helper(profile, db)
-    
+
     return {"message": "Profile updated successfully"}
 
 @router.get("/profile", response_model=CrewProfileOut)
