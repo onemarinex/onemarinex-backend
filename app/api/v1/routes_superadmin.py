@@ -382,15 +382,91 @@ def track_drivers(db: Session = Depends(get_db), current_user: User = Depends(ge
     return db.query(Driver).all()
 
 @router.get("/tracking/aggregators")
-def track_aggregators(port_id: Optional[int] = None,search : Optional[str] = None ,db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def track_aggregators(
+    port_id: Optional[int] = None,
+    search: Optional[str] = None,
+    provider_type: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     verify_superadmin(current_user)
     from sqlalchemy.orm import joinedload
-    query = db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port))
+    query = db.query(AggregatorProfile).options(
+        joinedload(AggregatorProfile.user),
+        joinedload(AggregatorProfile.operating_port),
+        joinedload(AggregatorProfile.drivers),
+    )
     if port_id:
         query = query.filter(AggregatorProfile.operating_port_id == port_id)
-    if search is not None:
-        query = query.filter(AggregatorProfile.company_name.ilike(f"%{search}%")) 
-    return query.all()
+    if provider_type:
+        query = query.filter(AggregatorProfile.provider_type == provider_type)
+    if status_filter:
+        query = query.filter(AggregatorProfile.status == status_filter)
+    if search:
+        pattern = f"%{search}%"
+        query = query.filter(
+            or_(
+                AggregatorProfile.company_name.ilike(pattern),
+                AggregatorProfile.contact_person.ilike(pattern),
+                AggregatorProfile.aggregator_identifier.ilike(pattern),
+            )
+        )
+
+    providers = query.order_by(AggregatorProfile.company_name.asc()).all()
+    provider_ids = [provider.id for provider in providers]
+    active_statuses = [
+        BookingStatus.PENDING,
+        BookingStatus.CONFIRMED,
+        BookingStatus.DRIVER_ASSIGNED,
+        BookingStatus.ARRIVED,
+        BookingStatus.IN_PROGRESS,
+    ]
+    active_booking_counts: Dict[int, int] = {}
+    completed_trip_counts: Dict[int, int] = {}
+    if provider_ids:
+        active_booking_counts = dict(
+            db.query(CabBooking.aggregator_id, func.count(CabBooking.id))
+            .filter(
+                CabBooking.aggregator_id.in_(provider_ids),
+                CabBooking.status.in_(active_statuses),
+            )
+            .group_by(CabBooking.aggregator_id)
+            .all()
+        )
+        completed_trip_counts = dict(
+            db.query(CabBooking.aggregator_id, func.count(CabBooking.id))
+            .filter(
+                CabBooking.aggregator_id.in_(provider_ids),
+                CabBooking.status == BookingStatus.COMPLETED,
+            )
+            .group_by(CabBooking.aggregator_id)
+            .all()
+        )
+
+    return [
+        {
+            "id": provider.id,
+            "company_name": provider.company_name,
+            "provider_name": provider.company_name,
+            "provider_type": provider.provider_type or "aggregator",
+            "contact_person": provider.contact_person,
+            "operating_port_id": provider.operating_port_id,
+            "operating_port": provider.operating_port,
+            "gst_number": provider.gst_number,
+            "status": provider.status,
+            "profile_image": provider.profile_image,
+            "aggregator_identifier": provider.aggregator_identifier,
+            "fleet": provider.fleet,
+            "documents": provider.documents,
+            "user": provider.user,
+            "total_drivers": len(provider.drivers or []),
+            "available_drivers": len([driver for driver in provider.drivers or [] if driver.status == "Available"]),
+            "active_bookings": active_booking_counts.get(provider.id, 0),
+            "completed_trips": completed_trip_counts.get(provider.id, 0),
+        }
+        for provider in providers
+    ]
         
     # return db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port)).all()
 

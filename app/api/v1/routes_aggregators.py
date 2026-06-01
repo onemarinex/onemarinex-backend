@@ -9,11 +9,17 @@ from app.db.models.aggregator_profile import AggregatorProfile
 from app.db.models.cab_booking import CabBooking, BookingStatus
 from app.db.models.driver import Driver
 from app.db.models.crew_profile import CrewProfile
+from app.db.models.pricing_controls import PricingDuration, PricingRideType, PricingRule, PricingVehicleCategory
 from app.api.v1.routes_auth import get_current_user
 from app.db.models.user import User
 from pydantic import BaseModel, EmailStr
 
 router = APIRouter()
+
+PRICING_PROVIDER_TYPE_BY_PROFILE_TYPE = {
+    "partnered_driver": "partner_drivers",
+    "aggregator": "aggregators",
+}
 
 # --- Schemas ---
 
@@ -88,6 +94,128 @@ def get_aggregator_profile(
         "status": agg_profile.status,
         "profile_image": agg_profile.profile_image,
         "aggregator_identifier": agg_profile.aggregator_identifier
+	    }
+
+
+@router.get("/pricing-plans")
+def get_pricing_plans(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "aggregator":
+        raise HTTPException(status_code=403, detail="Only fleet providers can view pricing")
+
+    agg_profile = current_user.aggregator_profile
+    if not agg_profile:
+        raise HTTPException(status_code=404, detail="Fleet provider profile not found")
+
+    pricing_provider_type = PRICING_PROVIDER_TYPE_BY_PROFILE_TYPE.get(
+        agg_profile.provider_type or "aggregator",
+        "aggregators",
+    )
+
+    ride_types = (
+        db.query(PricingRideType)
+        .filter(PricingRideType.code.in_(["coordinated_transfer", "package_trip"]))
+        .order_by(PricingRideType.sort_order.asc())
+        .all()
+    )
+    ride_type_by_id = {ride.id: ride for ride in ride_types}
+    vehicle_categories = (
+        db.query(PricingVehicleCategory)
+        .filter(
+            PricingVehicleCategory.port_id == agg_profile.operating_port_id,
+            PricingVehicleCategory.is_active == True,
+        )
+        .order_by(PricingVehicleCategory.name.asc())
+        .all()
+    )
+    vehicle_by_id = {vehicle.id: vehicle for vehicle in vehicle_categories}
+    durations = (
+        db.query(PricingDuration)
+        .filter(
+            PricingDuration.port_id == agg_profile.operating_port_id,
+            PricingDuration.is_active == True,
+        )
+        .order_by(PricingDuration.sort_order.asc(), PricingDuration.duration_minutes.asc())
+        .all()
+    )
+    duration_by_id = {duration.id: duration for duration in durations}
+    rules = (
+        db.query(PricingRule)
+        .filter(
+            PricingRule.port_id == agg_profile.operating_port_id,
+            PricingRule.provider_type == pricing_provider_type,
+            PricingRule.is_archived == False,
+        )
+        .order_by(PricingRule.updated_at.desc())
+        .all()
+    )
+
+    def serialize_rule(rule: PricingRule):
+        ride_type = ride_type_by_id.get(rule.ride_type_id)
+        vehicle = vehicle_by_id.get(rule.vehicle_category_id)
+        duration = duration_by_id.get(rule.duration_id) if rule.duration_id else None
+        return {
+            "id": rule.id,
+            "ride_type_code": ride_type.code if ride_type else None,
+            "ride_type_name": ride_type.name if ride_type else None,
+            "vehicle_category_id": rule.vehicle_category_id,
+            "vehicle_category_name": vehicle.name if vehicle else None,
+            "duration_name": duration.name if duration else None,
+            "base_fare": rule.base_fare,
+            "minimum_fare": rule.minimum_fare,
+            "price_per_km": rule.price_per_km,
+            "price_per_minute": rule.price_per_minute,
+            "free_waiting_minutes": rule.free_waiting_minutes,
+            "extra_waiting_charge": rule.extra_waiting_charge,
+            "cancellation_fee": rule.cancellation_fee,
+            "included_km": rule.included_km,
+            "price_per_extra_km": rule.price_per_extra_km,
+            "price_per_extra_minute": rule.price_per_extra_minute,
+            "price_per_extra_stop": rule.price_per_extra_stop,
+            "platform_commission_pct": rule.platform_commission_pct,
+            "is_active": rule.is_active,
+        }
+
+    return {
+        "provider": {
+            "id": agg_profile.id,
+            "name": agg_profile.company_name,
+            "provider_type": agg_profile.provider_type or "aggregator",
+            "pricing_provider_type": pricing_provider_type,
+            "port_id": agg_profile.operating_port_id,
+            "port_name": agg_profile.operating_port.name if agg_profile.operating_port else None,
+        },
+        "vehicle_categories": [
+            {
+                "id": vehicle.id,
+                "code": vehicle.code,
+                "name": vehicle.name,
+                "seating_capacity": vehicle.seating_capacity,
+                "description": vehicle.description,
+            }
+            for vehicle in vehicle_categories
+        ],
+        "durations": [
+            {
+                "id": duration.id,
+                "ride_type_id": duration.ride_type_id,
+                "name": duration.name,
+                "duration_minutes": duration.duration_minutes,
+            }
+            for duration in durations
+        ],
+        "coordinated_transfer_rules": [
+            serialize_rule(rule)
+            for rule in rules
+            if ride_type_by_id.get(rule.ride_type_id) and ride_type_by_id[rule.ride_type_id].code == "coordinated_transfer"
+        ],
+        "package_trip_rules": [
+            serialize_rule(rule)
+            for rule in rules
+            if ride_type_by_id.get(rule.ride_type_id) and ride_type_by_id[rule.ride_type_id].code == "package_trip"
+        ],
     }
 
 @router.get("/dashboard", response_model=AggregatorDashboardData)

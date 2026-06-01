@@ -11,6 +11,7 @@ class AggregatorProfile(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
     
     company_name = Column(String(255), nullable=False)
+    provider_type = Column(String(32), nullable=False, server_default="aggregator")
     contact_person = Column(String(255), nullable=True)
     operating_port_id = Column(Integer, ForeignKey("ports.id"), nullable=False)
     gst_number = Column(String(64), nullable=True)

@@ -40,3 +40,5 @@ from app.db.models.venue_review import VenueReview # noqa: F401
 from app.db.models.notification import Notification # noqa: F401
 from app.db.models.notification_read import NotificationRead # noqa: F401
 from app.db.models.crew_sos import CrewSos # noqa: F401
+from app.db.models import pricing_controls # noqa: F401
+from app.db.models import pricing_controls # noqa: F401

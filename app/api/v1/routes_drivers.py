@@ -1,11 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from typing import List, Optional
 from datetime import datetime
 import uuid
 from app.db.session import get_db
 from app.db.models.driver import Driver
 from app.db.models.aggregator_profile import AggregatorProfile
+from app.db.models.pricing_controls import PricingVehicleCategory
 from app.api.v1.routes_auth import get_current_user
 from app.api.v1.deps import get_current_driver
 from app.services.auth import decode_subject, get_password_hash, verify_password
@@ -64,6 +66,25 @@ async def create_driver(
     
     driver_data = driver_in.model_dump()
     password = driver_data.pop('password')
+
+    if driver_data.get("vehicle_type"):
+        vehicle_category = (
+            db.query(PricingVehicleCategory)
+            .filter(
+                PricingVehicleCategory.port_id == aggregator.operating_port_id,
+                PricingVehicleCategory.is_active == True,
+                or_(
+                    PricingVehicleCategory.name == driver_data["vehicle_type"],
+                    PricingVehicleCategory.code == driver_data["vehicle_type"],
+                ),
+            )
+            .first()
+        )
+        if not vehicle_category:
+            raise HTTPException(
+                status_code=400,
+                detail="Vehicle type must be one of the active SuperAdmin vehicle categories for this port",
+            )
     
     driver = Driver(
         **driver_data,

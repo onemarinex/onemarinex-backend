@@ -60,8 +60,10 @@ class AggregatorRegistrationIn(BaseModel):
     
     # Profile fields
     company_name: str
+    provider_type: str = Field(default="aggregator", pattern="^(partnered_driver|aggregator)$")
     operating_port_id: int
     aggregator_identifier: Optional[str] = None
+    status: str = Field(default="Active", pattern="^(Active|Suspended|Inactive)$")
 
 class FleetItem(BaseModel):
     type: str
@@ -70,10 +72,11 @@ class FleetItem(BaseModel):
     
 class AggregatorUpdate(BaseModel):
     company_name: Optional[str]
+    provider_type: Optional[str] = Field(default=None, pattern="^(partnered_driver|aggregator)$")
     contact_person: Optional[str]
     operating_port_id: Optional[int]
     gst_number: Optional[str]
-    status: Optional[str]
+    status: Optional[str] = Field(default=None, pattern="^(Active|Suspended|Inactive)$")
 
     fleet: Optional[List[FleetItem]]
     documents: Optional[List[str]]    
@@ -209,25 +212,6 @@ def register_aggregator(body: AggregatorRegistrationIn, db: Session = Depends(ge
     if body.mobile_number and db.query(User).filter(User.mobile_number == body.mobile_number).first():
         raise HTTPException(status_code=409, detail="Mobile number already registered")
 
-@router.post("/check", response_model=RegistrationCheckOut)
-def registration_check(body: RegistrationCheckIn, db: Session = Depends(get_db)):
-    email = body.email.lower().strip()
-
-    email_exists = db.query(User).filter(User.email == email).first() is not None
-    mobile_exists = False
-    if body.mobile_number:
-        mobile_exists = (
-            db.query(User)
-            .filter(User.mobile_number == body.mobile_number)
-            .first()
-            is not None
-        )
-
-    return RegistrationCheckOut(
-        email_exists=email_exists,
-        mobile_exists=mobile_exists,
-    )
-
     # 1. Create User
     user = User(
         name=body.full_name,
@@ -248,12 +232,14 @@ def registration_check(body: RegistrationCheckIn, db: Session = Depends(get_db))
     aggregator_profile = AggregatorProfile(
         user_id=user.id,
         company_name=body.company_name,
+        provider_type=body.provider_type,
         operating_port_id=body.operating_port_id,
         aggregator_identifier=agg_id,
-        contact_person = body.full_name
+        contact_person=body.full_name,
+        status=body.status
     )
     db.add(aggregator_profile)
-    
+
     try:
         db.commit()
     except Exception as e:
@@ -271,8 +257,27 @@ def registration_check(body: RegistrationCheckIn, db: Session = Depends(get_db))
         subject=user.email,
         expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
     )
-    
+
     return AuthOut(access_token=token, refresh_token=refresh_token, role=user.role)
+
+@router.post("/check", response_model=RegistrationCheckOut)
+def registration_check(body: RegistrationCheckIn, db: Session = Depends(get_db)):
+    email = body.email.lower().strip()
+
+    email_exists = db.query(User).filter(User.email == email).first() is not None
+    mobile_exists = False
+    if body.mobile_number:
+        mobile_exists = (
+            db.query(User)
+            .filter(User.mobile_number == body.mobile_number)
+            .first()
+            is not None
+        )
+
+    return RegistrationCheckOut(
+        email_exists=email_exists,
+        mobile_exists=mobile_exists,
+    )
 
 @router.put("/aggregator/{agg_id}")
 def update_aggregator(

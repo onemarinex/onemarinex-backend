@@ -13,6 +13,8 @@ from app.db.models.cab_pricing import CabPricing
 from app.db.models.incident import Incident, IncidentStatus, IncidentType
 from app.db.models.notification import Notification
 from app.db.models.crew_sos import CrewSos
+from app.db.models.port import Port
+from app.db.models.pricing_controls import PricingRideType, PricingRule, PricingVehicleCategory
 from app.api.v1.routes_auth import get_current_user
 from app.services.crew_service import generate_hpid
 from pydantic import BaseModel
@@ -148,6 +150,85 @@ class CabEstimate(BaseModel):
     distance_km: float
     base_fare: float
     per_km_rate: float
+
+
+def resolve_port_for_pricing(db: Session, port_value: Optional[str]) -> Optional[Port]:
+    if not port_value:
+        return None
+    normalized = port_value.strip()
+    if not normalized:
+        return None
+    if normalized.isdigit():
+        return db.query(Port).filter(Port.id == int(normalized)).first()
+    return (
+        db.query(Port)
+        .filter((Port.name.ilike(normalized)) | (Port.code.ilike(normalized)))
+        .first()
+    )
+
+
+def map_dynamic_vehicle_type(vehicle_type: str, vehicle_name: str, passenger_count: int) -> str:
+    normalized = (vehicle_type or "").strip().lower()
+    if normalized in {"ac", "premium", "xl"}:
+        return normalized
+    label = f"{normalized} {(vehicle_name or '').lower()}"
+    if any(token in label for token in ["van", "traveller", "tempo", "premium suv", "premium_suv", "xl"]):
+        return "xl"
+    if passenger_count > 4 or "suv" in label:
+        return "xl"
+    if any(token in label for token in ["bike", "auto", "sedan", "cab", "mini"]):
+        return "ac"
+    return "premium"
+
+
+def get_dynamic_cab_estimates(db: Session, distance: float, port_value: Optional[str]) -> List[CabEstimate]:
+    port = resolve_port_for_pricing(db, port_value)
+    if not port:
+        return []
+
+    ride_type = (
+        db.query(PricingRideType)
+        .filter(PricingRideType.code == "coordinated_transfer")
+        .first()
+    )
+    if not ride_type:
+        return []
+
+    rules = (
+        db.query(PricingRule, PricingVehicleCategory)
+        .join(PricingVehicleCategory, PricingVehicleCategory.id == PricingRule.vehicle_category_id)
+        .filter(
+            PricingRule.port_id == port.id,
+            PricingRule.ride_type_id == ride_type.id,
+            PricingRule.is_active.is_(True),
+            PricingRule.is_archived.is_(False),
+            PricingRule.duration_id.is_(None),
+            PricingVehicleCategory.is_active.is_(True),
+        )
+        .all()
+    )
+
+    cheapest_by_vehicle: dict[int, CabEstimate] = {}
+    for rule, vehicle in rules:
+        subtotal = (rule.base_fare or 0) + (distance * (rule.price_per_km or 0))
+        subtotal = max(subtotal, rule.minimum_fare or 0)
+        adjustment_multiplier = 1.0
+        for adjustment in rule.adjustments or []:
+            if adjustment.get("is_active", True) and "multiplier" in adjustment.get("code", ""):
+                adjustment_multiplier *= float(adjustment.get("value", 1.0))
+        candidate = CabEstimate(
+            vehicle_type=vehicle.code,
+            name=vehicle.name,
+            estimated_price=round(subtotal * adjustment_multiplier, 2),
+            distance_km=round(distance, 2),
+            base_fare=float(rule.base_fare or 0),
+            per_km_rate=float(rule.price_per_km or 0),
+        )
+        existing = cheapest_by_vehicle.get(vehicle.id)
+        if not existing or candidate.estimated_price < existing.estimated_price:
+            cheapest_by_vehicle[vehicle.id] = candidate
+
+    return sorted(cheapest_by_vehicle.values(), key=lambda item: item.estimated_price)
 
 def sync_crew_manifest_helper(profile: CrewProfile, db: Session):
     """
@@ -709,6 +790,11 @@ def book_cab(
     otp = body.otp or (profile.ride_otp if profile else None) or "1234"
     
     from app.db.models.cab_booking import VehicleType, BookingStatus
+    resolved_vehicle_type = map_dynamic_vehicle_type(
+        body.vehicle_type,
+        body.vehicle_name,
+        body.num_passengers,
+    )
     new_booking = CabBooking(
         booking_id=booking_id,
         crew_id=profile.id,
@@ -718,7 +804,7 @@ def book_cab(
         drop_address=body.drop_address,
         drop_lat=body.drop_lat,
         drop_lng=body.drop_lng,
-        vehicle_type=VehicleType(body.vehicle_type),
+        vehicle_type=VehicleType(resolved_vehicle_type),
         vehicle_name=body.vehicle_name,
         estimated_price=body.estimated_price,
         distance_km=body.distance_km,
@@ -740,7 +826,7 @@ def book_cab(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-    
+
     return CabBookingCreateOut(
         booking_id=new_booking.booking_id,
         otp=new_booking.otp,
@@ -767,11 +853,16 @@ def get_cab_estimates(
     pickup_lng: float,
     drop_lat: float,
     drop_lng: float,
+    port: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     # Mock distance calculation (Euclidean * 111 for rough km)
     # Ideally replace this with a call to Ola Maps Directions API
     distance = ((pickup_lat - drop_lat)**2 + (pickup_lng - drop_lng)**2)**0.5 * 111
+
+    dynamic_estimates = get_dynamic_cab_estimates(db, distance, port)
+    if dynamic_estimates:
+        return dynamic_estimates
     
     pricings = db.query(CabPricing).all()
     
