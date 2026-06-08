@@ -35,8 +35,12 @@ class BookingDashboardOut(BaseModel):
     pickup_address: str
     drop_address: str
     vehicle_name: str
+    vehicle_type: Optional[str] = None
+    ride_type: Optional[str] = None
+    ride_type_label: Optional[str] = None
     estimated_price: float
     status: str
+    status_label: Optional[str] = None
     created_at: datetime
     scheduled_time: Optional[datetime]
     driver_name: Optional[str]
@@ -44,9 +48,12 @@ class BookingDashboardOut(BaseModel):
 
 class AggregatorDashboardData(BaseModel):
     stats: Dict[str, int]
-    pending_requests: List[BookingDashboardOut]
+    new_requests: List[BookingDashboardOut]
+    accepted_requests: List[BookingDashboardOut]
     active_trips: List[BookingDashboardOut]
     completed_requests: List[BookingDashboardOut]
+    cancelled_requests: List[BookingDashboardOut]
+    pending_requests: List[BookingDashboardOut]
 
 class DriverAssignIn(BaseModel):
     booking_id: str
@@ -225,36 +232,48 @@ def get_aggregator_dashboard(
 ):
     if current_user.role != "aggregator":
         raise HTTPException(status_code=403, detail="Only aggregators can access the dashboard")
-    
+
     agg_profile = current_user.aggregator_profile
     if not agg_profile:
         raise HTTPException(status_code=404, detail="Aggregator profile not found")
-    
-    port = agg_profile.operating_port
-    
-    # Base query for aggregator's port
-    query = db.query(CabBooking).filter(CabBooking.port.ilike(f"%{port}%"))
-    
-    # Stats
-    pending_count = query.filter(CabBooking.status == BookingStatus.PENDING).count()
-    active_count = query.filter(CabBooking.status.in_([BookingStatus.DRIVER_ASSIGNED, BookingStatus.CONFIRMED])).count() 
-    in_progress_count = query.filter(CabBooking.status == BookingStatus.IN_PROGRESS).count()
-    
-    # Completed today (UTC)
-    now = datetime.utcnow()
-    today_start = datetime(now.year, now.month, now.day)
-    
-    completed_today = query.filter(
-        CabBooking.status == BookingStatus.COMPLETED,
-        CabBooking.completed_at >= today_start
-    ).count()
 
-    # Lists
-    pending_bookings = query.filter(CabBooking.status == BookingStatus.PENDING).order_by(CabBooking.created_at.desc()).limit(20).all()
-    active_bookings = query.filter(CabBooking.status.in_([BookingStatus.DRIVER_ASSIGNED, BookingStatus.CONFIRMED, BookingStatus.IN_PROGRESS])).order_by(CabBooking.created_at.desc()).all()
-    completed_bookings = query.filter(CabBooking.status == BookingStatus.COMPLETED).order_by(CabBooking.updated_at.desc()).limit(50).all()
+    from app.services.booking_service import (
+        STATUS_LABELS,
+        RIDE_TYPE_LABELS,
+        get_provider_dashboard_metrics,
+        serialize_booking,
+    )
+
+    query = db.query(CabBooking).filter(
+        (CabBooking.provider_id == agg_profile.id) | (CabBooking.aggregator_id == agg_profile.id)
+    )
+
+    new_requests = query.filter(
+        CabBooking.status == BookingStatus.PENDING_PROVIDER_RESPONSE
+    ).order_by(CabBooking.created_at.desc()).all()
+    accepted_requests = query.filter(
+        CabBooking.status == BookingStatus.PROVIDER_ACCEPTED
+    ).order_by(CabBooking.created_at.desc()).all()
+    active_trips = query.filter(
+        CabBooking.status.in_(
+            [
+                BookingStatus.DRIVER_ASSIGNED,
+                BookingStatus.DRIVER_ACCEPTED,
+                BookingStatus.ON_TRIP,
+            ]
+        )
+    ).order_by(CabBooking.created_at.desc()).all()
+    completed_requests = query.filter(
+        CabBooking.status == BookingStatus.COMPLETED
+    ).order_by(CabBooking.updated_at.desc()).limit(50).all()
+    cancelled_requests = query.filter(
+        CabBooking.status.in_(
+            [BookingStatus.CANCELLED, BookingStatus.PROVIDER_REJECTED]
+        )
+    ).order_by(CabBooking.updated_at.desc()).limit(50).all()
 
     def transform(b: CabBooking):
+        serialized = serialize_booking(b)
         return BookingDashboardOut(
             id=b.id,
             booking_id=b.booking_id,
@@ -266,24 +285,32 @@ def get_aggregator_dashboard(
             pickup_address=b.pickup_address,
             drop_address=b.drop_address,
             vehicle_name=b.vehicle_name,
+            vehicle_type=serialized.get("vehicle_type"),
+            ride_type=serialized.get("ride_type"),
+            ride_type_label=serialized.get("ride_type_label"),
             estimated_price=float(b.estimated_price),
             status=b.status.value,
+            status_label=serialized.get("status_label"),
             created_at=b.created_at,
             scheduled_time=b.scheduled_time,
             driver_name=b.driver_name,
             num_passengers=b.num_passengers
         )
 
+    stats = get_provider_dashboard_metrics(db, agg_profile)
+    stats["pending_requests"] = stats["new_requests"]
+    stats["today_completed_trips"] = len(
+        [b for b in completed_requests if b.completed_at and b.completed_at.date() == datetime.utcnow().date()]
+    )
+
     return AggregatorDashboardData(
-        stats={
-            "pending_requests": pending_count,
-            "active_trips": active_count,
-            "in_progress_trips": in_progress_count,
-            "today_completed_trips": completed_today
-        },
-        pending_requests=[transform(b) for b in pending_bookings],
-        active_trips=[transform(b) for b in active_bookings],
-        completed_requests=[transform(b) for b in completed_bookings]
+        stats=stats,
+        new_requests=[transform(b) for b in new_requests],
+        accepted_requests=[transform(b) for b in accepted_requests],
+        active_trips=[transform(b) for b in active_trips],
+        completed_requests=[transform(b) for b in completed_requests],
+        cancelled_requests=[transform(b) for b in cancelled_requests],
+        pending_requests=[transform(b) for b in new_requests],
     )
 
 @router.post("/dashboard/assign-driver")
@@ -292,26 +319,25 @@ def assign_driver(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.role != "aggregator":
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
-    booking = db.query(CabBooking).filter(CabBooking.booking_id == body.booking_id).first()
-    if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found")
-    
-    driver = db.query(Driver).filter(Driver.id == body.driver_id).first()
-    if not driver:
-        raise HTTPException(status_code=404, detail="Driver not found")
-    
-    booking.driver_id = driver.id
-    booking.driver_name = driver.name
-    booking.driver_phone = driver.phone
-    booking.driver_plate = driver.vehicle_number
-    booking.aggregator_id = current_user.aggregator_profile.id
-    booking.status = BookingStatus.DRIVER_ASSIGNED
-    
-    db.commit()
-    return {"message": "Driver assigned successfully"}
+    from app.services.booking_service import assign_driver_to_booking, get_booking_by_identifier, serialize_booking
+
+    booking = get_booking_by_identifier(db, body.booking_id)
+    updated = assign_driver_to_booking(db, booking, current_user, body.driver_id)
+    return {"message": "Driver assigned successfully", "booking": serialize_booking(updated)}
+
+
+@router.post("/dashboard/accept-ride")
+def accept_ride(
+    booking_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from app.services.booking_service import accept_booking, get_booking_by_identifier, serialize_booking
+
+    booking = get_booking_by_identifier(db, booking_id)
+    updated = accept_booking(db, booking, current_user)
+    return {"message": "Ride accepted successfully", "booking": serialize_booking(updated)}
+
 
 @router.post("/dashboard/decline-ride")
 def decline_ride(
@@ -319,13 +345,8 @@ def decline_ride(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.role != "aggregator":
-        raise HTTPException(status_code=403, detail="Unauthorized")
-    
-    booking = db.query(CabBooking).filter(CabBooking.booking_id == booking_id).first()
-    if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found")
-    
-    booking.status = BookingStatus.CANCELLED
-    db.commit()
-    return {"message": "Ride declined successfully"}
+    from app.services.booking_service import get_booking_by_identifier, reject_booking, serialize_booking
+
+    booking = get_booking_by_identifier(db, booking_id)
+    updated = reject_booking(db, booking, current_user)
+    return {"message": "Ride declined successfully", "booking": serialize_booking(updated)}

@@ -20,6 +20,7 @@ from app.api.v1 import routes_vessels
 from app.api.v1 import routes_trips
 from app.api.v1 import routes_agents
 from app.api.v1 import routes_aggregators
+from app.api.v1 import routes_bookings
 
 def custom_openapi():
     if app.openapi_schema:
@@ -121,6 +122,7 @@ app.include_router(routes_trips.router,       prefix="/api/v1/trips",         ta
 app.include_router(routes_incidents.router, prefix="/api/v1/incidents", tags=["incidents"])
 app.include_router(routes_agents.router, prefix="/api/v1/agents", tags=["agents"])
 app.include_router(routes_aggregators.router, prefix="/api/v1/aggregators", tags=["aggregators"])
+app.include_router(routes_bookings.router, prefix="/api/v1/bookings", tags=["bookings"])
 app.include_router(routes_ports.router, prefix="/api/v1/ports", tags=["ports"])
 app.include_router(routes_drivers.router, prefix="/api/v1/drivers", tags=["drivers"])
 app.include_router(routes_chat.router, prefix="/api/v1/chat", tags=["chat"])

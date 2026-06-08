@@ -18,6 +18,7 @@ from app.db.models import rfq             # noqa: F401
 from app.db.models import rfq_quote       # noqa: F401
 from app.db.models import shore_pass      # noqa: F401
 from app.db.models import cab_booking     # noqa: F401
+from app.db.models import booking_timeline # noqa: F401
 from app.db.models import driver          # noqa: F401
 from app.db.models import cab_pricing     # noqa: F401
 from app.db.models import file_asset      # noqa: F401

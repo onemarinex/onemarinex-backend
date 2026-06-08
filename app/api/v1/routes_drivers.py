@@ -245,9 +245,16 @@ async def get_assigned_rides(
         raise HTTPException(status_code=401, detail="Invalid driver token")
         
     from sqlalchemy.orm import joinedload
+    from app.db.models.cab_booking import BookingStatus
     rides = db.query(CabBooking).options(joinedload(CabBooking.crew)).filter(
-        CabBooking.driver_id == driver.id,
-        CabBooking.status.in_(['driver_assigned', 'confirmed', 'in_progress'])
+        or_(CabBooking.driver_id == driver.id, CabBooking.assigned_driver_id == driver.id),
+        CabBooking.status.in_([
+            BookingStatus.DRIVER_ASSIGNED,
+            BookingStatus.DRIVER_ACCEPTED,
+            BookingStatus.ON_TRIP,
+            BookingStatus.CONFIRMED,
+            BookingStatus.IN_PROGRESS,
+        ])
     ).all()
     
     return rides
@@ -272,7 +279,7 @@ async def get_driver_rides(
         raise HTTPException(status_code=401, detail="Invalid driver token")
         
     rides = db.query(CabBooking).options(joinedload(CabBooking.crew)).filter(
-        CabBooking.driver_id == driver.id
+        or_(CabBooking.driver_id == driver.id, CabBooking.assigned_driver_id == driver.id)
     ).order_by(CabBooking.created_at.desc()).all()
     
     return rides
@@ -281,28 +288,24 @@ async def get_driver_rides(
 async def accept_ride(
     ride_id: int,
     db: Session = Depends(get_db),
-    authorization: Optional[str] = Header(None)
+    current_driver: Driver = Depends(get_current_driver)
 ):
-    from app.db.models.cab_booking import CabBooking, BookingStatus
-    from app.services.auth import decode_subject
-    
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing token")
-    
-    token = authorization.split(" ")[1]
-    email = decode_subject(token)
-    driver = db.query(Driver).filter(Driver.email == email).first()
-    if not driver:
-        raise HTTPException(status_code=401, detail="Invalid driver")
+    from app.db.models.cab_booking import CabBooking
+    from app.services.booking_service import driver_accept_booking, serialize_booking
 
-    ride = db.query(CabBooking).filter(CabBooking.id == ride_id, CabBooking.driver_id == driver.id).first()
+    ride = db.query(CabBooking).filter(
+        CabBooking.id == ride_id,
+        or_(CabBooking.driver_id == current_driver.id, CabBooking.assigned_driver_id == current_driver.id),
+    ).first()
     if not ride:
         raise HTTPException(status_code=404, detail="Ride not found or not assigned to you")
-    
-    ride.status = BookingStatus.CONFIRMED
-    db.commit()
-    db.refresh(ride)
-    return {"message": "Ride accepted", "otp": ride.crew.ride_otp if ride.crew else "1234"}
+
+    updated = driver_accept_booking(db, ride, current_driver)
+    return {
+        "message": "Ride accepted",
+        "otp": ride.crew.ride_otp if ride.crew else ride.otp or "1234",
+        "booking": serialize_booking(updated),
+    }
 
 @router.post("/rides/{ride_id}/arrive")
 async def driver_arrived(
@@ -337,63 +340,44 @@ async def start_ride(
     ride_id: int,
     body: StartRideIn,
     db: Session = Depends(get_db),
-    authorization: Optional[str] = Header(None)
+    current_driver: Driver = Depends(get_current_driver)
 ):
-    from app.db.models.cab_booking import CabBooking, BookingStatus
-    from app.services.auth import decode_subject
-    
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing token")
-    
-    token = authorization.split(" ")[1]
-    email = decode_subject(token)
-    driver = db.query(Driver).filter(Driver.email == email).first()
-    
-    ride = db.query(CabBooking).filter(CabBooking.id == ride_id, CabBooking.driver_id == driver.id).first()
+    from app.db.models.cab_booking import CabBooking
+    from app.services.booking_service import serialize_booking, start_trip
+
+    ride = db.query(CabBooking).filter(
+        CabBooking.id == ride_id,
+        or_(CabBooking.driver_id == current_driver.id, CabBooking.assigned_driver_id == current_driver.id),
+    ).first()
     if not ride:
         raise HTTPException(status_code=404, detail="Ride not found")
-        
-    # Verify against crew member's fixed lifetime OTP
-    if not ride.crew or ride.crew.ride_otp != body.otp:
+
+    crew_otp = ride.crew.ride_otp if ride.crew else None
+    booking_otp = ride.otp
+    if crew_otp != body.otp and booking_otp != body.otp:
         raise HTTPException(status_code=400, detail="Invalid OTP")
-        
-    ride.status = BookingStatus.IN_PROGRESS
-    ride.started_at = datetime.utcnow()
-    
-    # Mark driver as busy
-    driver.status = "Busy"
-    
-    db.commit()
-    return {"message": "Ride started"}
+
+    updated = start_trip(db, ride, current_driver)
+    return {"message": "Ride started", "booking": serialize_booking(updated)}
 
 @router.post("/rides/{ride_id}/complete")
 async def complete_ride(
     ride_id: int,
     db: Session = Depends(get_db),
-    authorization: Optional[str] = Header(None)
+    current_driver: Driver = Depends(get_current_driver)
 ):
-    from app.db.models.cab_booking import CabBooking, BookingStatus
-    from app.services.auth import decode_subject
-    
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing token")
-    
-    token = authorization.split(" ")[1]
-    email = decode_subject(token)
-    driver = db.query(Driver).filter(Driver.email == email).first()
-    
-    ride = db.query(CabBooking).filter(CabBooking.id == ride_id, CabBooking.driver_id == driver.id).first()
+    from app.db.models.cab_booking import CabBooking
+    from app.services.booking_service import complete_trip, serialize_booking
+
+    ride = db.query(CabBooking).filter(
+        CabBooking.id == ride_id,
+        or_(CabBooking.driver_id == current_driver.id, CabBooking.assigned_driver_id == current_driver.id),
+    ).first()
     if not ride:
         raise HTTPException(status_code=404, detail="Ride not found")
-        
-    ride.status = BookingStatus.COMPLETED
-    ride.completed_at = datetime.utcnow()
-    
-    # Mark driver as available
-    driver.status = "Available"
-    
-    db.commit()
-    return {"message": "Ride completed"}
+
+    updated = complete_trip(db, ride, current_driver)
+    return {"message": "Ride completed", "booking": serialize_booking(updated)}
 
 @router.get("/{driver_id}", response_model=DriverResponse)
 async def get_driver_details(
