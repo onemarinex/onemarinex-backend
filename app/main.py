@@ -4,12 +4,13 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.models import OAuthFlows as OAuthFlowsModel
 from fastapi.openapi.utils import get_openapi
 import os
+from sqlalchemy import inspect, text
 
 from app.core.config import settings
 from app.db.session import engine
 from app.db.base import Base
 
-from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants, routes_incidents, routes_ports, routes_drivers, routes_early_access, routes_chat, routes_superadmin, routes_reviews, routes_sightseeing, routes_notifications, routes_sos
+from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants, routes_incidents, routes_ports, routes_drivers, routes_early_access, routes_chat, routes_superadmin, routes_reviews, routes_sightseeing, routes_notifications, routes_sos, routes_pricing_controls
 
 from app.api.v1.routes_vendor import router as vendor_router
 from app.api.v1.routes_rfqs import router as rfq_router
@@ -19,6 +20,8 @@ from app.api.v1 import routes_vessels
 from app.api.v1 import routes_trips
 from app.api.v1 import routes_agents
 from app.api.v1 import routes_aggregators
+from app.api.v1 import routes_bookings
+from app.api.v1 import routes_itinerary
 
 def custom_openapi():
     if app.openapi_schema:
@@ -84,6 +87,20 @@ app.add_middleware(
 def on_startup():
     # Base is already linked to all models via app/db/base.py imports
     Base.metadata.create_all(bind=engine)
+    ensure_legacy_schema_columns()
+
+
+def ensure_legacy_schema_columns():
+    inspector = inspect(engine)
+    if "aggregator_profiles" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("aggregator_profiles")}
+    if "provider_type" in columns:
+        return
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE aggregator_profiles ADD COLUMN provider_type VARCHAR(32) DEFAULT 'aggregator' NOT NULL")
+        )
 
 # --- Routes ---
 app.include_router(routes_auth.router,    prefix="/api/v1/auth",    tags=["authentication"])
@@ -106,13 +123,16 @@ app.include_router(routes_trips.router,       prefix="/api/v1/trips",         ta
 app.include_router(routes_incidents.router, prefix="/api/v1/incidents", tags=["incidents"])
 app.include_router(routes_agents.router, prefix="/api/v1/agents", tags=["agents"])
 app.include_router(routes_aggregators.router, prefix="/api/v1/aggregators", tags=["aggregators"])
+app.include_router(routes_bookings.router, prefix="/api/v1/bookings", tags=["bookings"])
 app.include_router(routes_ports.router, prefix="/api/v1/ports", tags=["ports"])
 app.include_router(routes_drivers.router, prefix="/api/v1/drivers", tags=["drivers"])
 app.include_router(routes_chat.router, prefix="/api/v1/chat", tags=["chat"])
 app.include_router(routes_superadmin.router, prefix="/api/v1/superadmin", tags=["superadmin"])
+app.include_router(routes_pricing_controls.router, prefix="/api/v1/superadmin", tags=["pricing-controls"])
 app.include_router(routes_reviews.router, prefix="/api/v1/reviews", tags=["reviews"])
 app.include_router(routes_notifications.router, prefix="/api/v1/notifications", tags=["notifications"])
 app.include_router(routes_sos.router, prefix="/api/v1/sos", tags=["sos"])
+app.include_router(routes_itinerary.router, prefix="/api/v1/itinerary", tags=["itinerary"])
 
 
 # --- Health checks & root ---

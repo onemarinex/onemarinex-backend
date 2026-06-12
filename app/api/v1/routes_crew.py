@@ -13,6 +13,8 @@ from app.db.models.cab_pricing import CabPricing
 from app.db.models.incident import Incident, IncidentStatus, IncidentType
 from app.db.models.notification import Notification
 from app.db.models.crew_sos import CrewSos
+from app.db.models.port import Port
+from app.db.models.pricing_controls import PricingRideType, PricingRule, PricingVehicleCategory
 from app.api.v1.routes_auth import get_current_user
 from app.services.crew_service import generate_hpid
 from pydantic import BaseModel
@@ -99,9 +101,10 @@ class CabBookingCreateIn(BaseModel):
     distance_km: float
     num_passengers: int = 1
     port: Optional[str] = None
-    crew_member_ids: Optional[List[str]] = None  # List of HeyPorts IDs
+    crew_member_ids: Optional[List[str]] = None
     scheduled_time: Optional[datetime] = None
     otp: Optional[str] = None
+    ride_type: str  # flexible_ride | guaranteed_coordinated_ride
 
 class CabBookingCreateOut(BaseModel):
     booking_id: str
@@ -119,7 +122,17 @@ class CabBookingDetailsOut(BaseModel):
     driver_phone: Optional[str]
     otp: str
     agent_number: str
+    helpline_number: Optional[str] = None
     status: str
+    ride_type: Optional[str] = None
+    ride_type_label: Optional[str] = None
+    provider_name: Optional[str] = None
+    provider_type: Optional[str] = None
+    driver_assigned_at: Optional[datetime] = None
+    driver_accepted_at: Optional[datetime] = None
+    provider_response_at: Optional[datetime] = None
+    trip_started_at: Optional[datetime] = None
+    trip_completed_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:
@@ -148,6 +161,164 @@ class CabEstimate(BaseModel):
     distance_km: float
     base_fare: float
     per_km_rate: float
+
+
+# ─── rich per-vehicle pricing record used by /cab/options ────────────────────
+class CabVehiclePricing(BaseModel):
+    vehicle_code: str
+    vehicle_name: str
+    seating_capacity: int
+    icon_url: Optional[str]
+    description: Optional[str]
+    # calculated estimate for this request
+    estimated_price: float
+    distance_km: float
+    # base fare components
+    base_fare: float
+    minimum_fare: Optional[float]
+    # per-unit charges
+    price_per_km: Optional[float]
+    price_per_minute: Optional[float]
+    # waiting / cancellation extras
+    free_waiting_minutes: Optional[float]
+    extra_waiting_charge_per_min: Optional[float]
+    cancellation_fee: Optional[float]
+    # package-only extras (null for coordinated_transfer)
+    included_km: Optional[float]
+    price_per_extra_km: Optional[float]
+    price_per_extra_minute: Optional[float]
+    price_per_extra_stop: Optional[float]
+    # commercial
+    platform_commission_pct: Optional[float]
+    # dynamic adjustments attached to this rule
+    adjustments: List[dict]
+    # ride type to pass to /cab/book
+    ride_type: str
+
+
+class CabOptionsResponse(BaseModel):
+    port_id: Optional[int]
+    port_name: Optional[str]
+    distance_km: float
+    flexible_cabs: List[CabVehiclePricing]
+    aggregator_cabs: List[CabVehiclePricing]
+
+
+def resolve_port_for_pricing(db: Session, port_value: Optional[str]) -> Optional[Port]:
+    if not port_value:
+        return None
+    normalized = port_value.strip()
+    if not normalized:
+        return None
+    if normalized.isdigit():
+        return db.query(Port).filter(Port.id == int(normalized)).first()
+    return (
+        db.query(Port)
+        .filter((Port.name.ilike(normalized)) | (Port.code.ilike(normalized)))
+        .first()
+    )
+
+
+def map_dynamic_vehicle_type(vehicle_type: str, vehicle_name: str, passenger_count: int) -> str:
+    normalized = (vehicle_type or "").strip().lower()
+    if normalized in {"ac", "premium", "xl"}:
+        return normalized
+    label = f"{normalized} {(vehicle_name or '').lower()}"
+    if any(token in label for token in ["van", "traveller", "tempo", "premium suv", "premium_suv", "xl"]):
+        return "xl"
+    if passenger_count > 4 or "suv" in label:
+        return "xl"
+    if any(token in label for token in ["bike", "auto", "sedan", "cab", "mini"]):
+        return "ac"
+    return "premium"
+
+
+def get_dynamic_cab_estimates(db: Session, distance: float, port_value: Optional[str]) -> List[CabEstimate]:
+    port = resolve_port_for_pricing(db, port_value)
+    if not port:
+        return []
+
+    ride_type = (
+        db.query(PricingRideType)
+        .filter(PricingRideType.code == "coordinated_transfer")
+        .first()
+    )
+    if not ride_type:
+        return []
+
+    rules = (
+        db.query(PricingRule, PricingVehicleCategory)
+        .join(PricingVehicleCategory, PricingVehicleCategory.id == PricingRule.vehicle_category_id)
+        .filter(
+            PricingRule.port_id == port.id,
+            PricingRule.ride_type_id == ride_type.id,
+            PricingRule.is_active.is_(True),
+            PricingRule.is_archived.is_(False),
+            PricingRule.duration_id.is_(None),
+            PricingVehicleCategory.is_active.is_(True),
+        )
+        .all()
+    )
+
+    cheapest_by_vehicle: dict[int, CabEstimate] = {}
+    for rule, vehicle in rules:
+        subtotal = (rule.base_fare or 0) + (distance * (rule.price_per_km or 0))
+        subtotal = max(subtotal, rule.minimum_fare or 0)
+        adjustment_multiplier = 1.0
+        for adjustment in rule.adjustments or []:
+            if adjustment.get("is_active", True) and "multiplier" in adjustment.get("code", ""):
+                adjustment_multiplier *= float(adjustment.get("value", 1.0))
+        candidate = CabEstimate(
+            vehicle_type=vehicle.code,
+            name=vehicle.name,
+            estimated_price=round(subtotal * adjustment_multiplier, 2),
+            distance_km=round(distance, 2),
+            base_fare=float(rule.base_fare or 0),
+            per_km_rate=float(rule.price_per_km or 0),
+        )
+        existing = cheapest_by_vehicle.get(vehicle.id)
+        if not existing or candidate.estimated_price < existing.estimated_price:
+            cheapest_by_vehicle[vehicle.id] = candidate
+
+    return sorted(cheapest_by_vehicle.values(), key=lambda item: item.estimated_price)
+
+
+def filter_estimates_for_ride_type(
+    db: Session,
+    estimates: List[CabEstimate],
+    ride_type_value: Optional[str],
+    port_value: Optional[str],
+) -> List[CabEstimate]:
+    if not ride_type_value:
+        return estimates
+
+    from app.db.models.cab_booking import RideType
+    from app.services.booking_service import find_provider_for_ride
+
+    try:
+        ride_type = RideType(ride_type_value)
+    except ValueError:
+        return []
+
+    available_estimates: List[CabEstimate] = []
+    for estimate in estimates:
+        resolved_vehicle_type = map_dynamic_vehicle_type(
+            estimate.vehicle_type,
+            estimate.name,
+            1,
+        )
+        try:
+            find_provider_for_ride(
+                db,
+                ride_type,
+                port_value,
+                resolved_vehicle_type,
+                estimate.name,
+            )
+        except HTTPException:
+            continue
+        available_estimates.append(estimate)
+    return available_estimates
 
 def sync_crew_manifest_helper(profile: CrewProfile, db: Session):
     """
@@ -690,6 +861,257 @@ def get_shorepass_history(
     ).order_by(ShorePass.created_at.desc()).all()
     return passes
 
+# ─── Provider-type bridge ─────────────────────────────────────────────────────
+# pricing_controls tables use plural keys (partner_drivers / aggregators).
+# AggregatorProfile.provider_type and booking_service use singular keys
+# (partnered_driver / aggregator).
+# This mapping bridges the two domains so availability checks use the right key.
+_PRICING_TYPE_TO_BOOKING: dict[str, str] = {
+    "partner_drivers": "partnered_driver",
+    "aggregators": "aggregator",
+}
+# Reverse: booking provider_type → pricing rule provider_type
+_BOOKING_TYPE_TO_PRICING: dict[str, str] = {v: k for k, v in _PRICING_TYPE_TO_BOOKING.items()}
+
+
+def _has_active_provider_for_port(
+    db: Session,
+    port_id: int,
+    booking_provider_type: str,
+) -> bool:
+    """Return True if at least one Active AggregatorProfile with active drivers
+    exists for the given port and provider type."""
+    from app.db.models.aggregator_profile import AggregatorProfile
+    from sqlalchemy.orm import joinedload as _jl
+
+    providers = (
+        db.query(AggregatorProfile)
+        .options(_jl(AggregatorProfile.drivers))
+        .filter(
+            AggregatorProfile.operating_port_id == port_id,
+            AggregatorProfile.provider_type == booking_provider_type,
+            AggregatorProfile.status == "Active",
+        )
+        .all()
+    )
+    return any(
+        any((d.status or "").lower() != "offline" for d in (p.drivers or []))
+        for p in providers
+    )
+
+
+def _vehicle_has_provider(
+    db: Session,
+    port_id: int,
+    booking_provider_type: str,
+    vehicle_code: str,
+    vehicle_name: str,
+) -> bool:
+    """Return True if at least one active driver at this port and provider type
+    carries a matching vehicle."""
+    from app.db.models.aggregator_profile import AggregatorProfile
+    from sqlalchemy.orm import joinedload as _jl
+
+    providers = (
+        db.query(AggregatorProfile)
+        .options(_jl(AggregatorProfile.drivers))
+        .filter(
+            AggregatorProfile.operating_port_id == port_id,
+            AggregatorProfile.provider_type == booking_provider_type,
+            AggregatorProfile.status == "Active",
+        )
+        .all()
+    )
+    for provider in providers:
+        for driver in provider.drivers or []:
+            if (driver.status or "").lower() == "offline":
+                continue
+            if vehicle_category_matches(db, port_id, vehicle_code, vehicle_name, driver.vehicle_type):
+                return True
+    return False
+
+
+def _build_cab_options_for_provider(
+    db: Session,
+    port_id: int,
+    ride_type_obj: "PricingRideType",
+    pricing_provider_type: str,   # key used in PricingRule.provider_type  e.g. "partner_drivers"
+    booking_ride_type: str,        # value to put in CabVehiclePricing.ride_type e.g. "flexible_ride"
+    distance_km: float,
+) -> List[CabVehiclePricing]:
+    """
+    Return one CabVehiclePricing per vehicle for the given provider type and port.
+
+    Steps:
+    1. Resolve the booking-system provider_type from the pricing provider_type.
+    2. Quick check: if no active provider of this type exists at the port, return [].
+    3. Pull all active, non-archived PricingRules for (port, ride_type, provider_type).
+    4. For each vehicle category keep the cheapest rule.
+    5. Filter out vehicles for which no active driver at this port can serve
+       (provider has matching vehicle type on any active driver).
+    """
+    booking_provider_type = _PRICING_TYPE_TO_BOOKING.get(pricing_provider_type, pricing_provider_type)
+
+    # Fast port+provider check — skip all DB work if nobody is serving this port
+    if not _has_active_provider_for_port(db, port_id, booking_provider_type):
+        return []
+
+    rules = (
+        db.query(PricingRule, PricingVehicleCategory)
+        .join(PricingVehicleCategory, PricingVehicleCategory.id == PricingRule.vehicle_category_id)
+        .filter(
+            PricingRule.port_id == port_id,
+            PricingRule.ride_type_id == ride_type_obj.id,
+            PricingRule.provider_type == pricing_provider_type,
+            PricingRule.is_active.is_(True),
+            PricingRule.is_archived.is_(False),
+            PricingRule.duration_id.is_(None),
+            PricingVehicleCategory.is_active.is_(True),
+        )
+        .all()
+    )
+
+    # Keep cheapest rule per vehicle category
+    best: dict[int, tuple] = {}
+    for rule, vehicle in rules:
+        subtotal = (rule.base_fare or 0) + (distance_km * (rule.price_per_km or 0))
+        subtotal = max(subtotal, rule.minimum_fare or 0)
+        multiplier = 1.0
+        for adj in rule.adjustments or []:
+            if adj.get("is_active", True) and "multiplier" in adj.get("code", ""):
+                multiplier *= float(adj.get("value", 1.0))
+        final = round(subtotal * multiplier, 2)
+        existing = best.get(vehicle.id)
+        if existing is None or final < existing[0]:
+            best[vehicle.id] = (final, rule, vehicle)
+
+    result = []
+    for final_price, rule, vehicle in sorted(best.values(), key=lambda x: x[0]):
+        # Per-vehicle availability: only include if a matching driver exists at this port
+        if not _vehicle_has_provider(db, port_id, booking_provider_type, vehicle.code, vehicle.name):
+            continue
+        result.append(
+            CabVehiclePricing(
+                vehicle_code=vehicle.code,
+                vehicle_name=vehicle.name,
+                seating_capacity=vehicle.seating_capacity,
+                icon_url=vehicle.icon_url,
+                description=vehicle.description,
+                estimated_price=final_price,
+                distance_km=round(distance_km, 2),
+                base_fare=float(rule.base_fare or 0),
+                minimum_fare=rule.minimum_fare,
+                price_per_km=rule.price_per_km,
+                price_per_minute=rule.price_per_minute,
+                free_waiting_minutes=rule.free_waiting_minutes,
+                extra_waiting_charge_per_min=rule.extra_waiting_charge,
+                cancellation_fee=rule.cancellation_fee,
+                included_km=rule.included_km,
+                price_per_extra_km=rule.price_per_extra_km,
+                price_per_extra_minute=rule.price_per_extra_minute,
+                price_per_extra_stop=rule.price_per_extra_stop,
+                platform_commission_pct=rule.platform_commission_pct,
+                adjustments=rule.adjustments or [],
+                ride_type=booking_ride_type,
+            )
+        )
+    return result
+
+
+@router.get("/cab/options", response_model=CabOptionsResponse)
+def get_cab_options(
+    pickup_lat: float,
+    pickup_lng: float,
+    drop_lat: float,
+    drop_lng: float,
+    port: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """
+    Returns all cabs available for a port split by provider type.
+
+    - flexible_cabs    → HeyPorts partnered drivers  (ride_type = "flexible_ride")
+    - aggregator_cabs  → Fleet aggregators            (ride_type = "guaranteed_coordinated_ride")
+
+    A cab appears only when:
+      1. An active pricing rule exists for this port + provider type + vehicle.
+      2. An active provider of the matching type operates at this port.
+      3. That provider has at least one active driver carrying a matching vehicle type.
+
+    Each entry carries the full pricing breakdown so the UI can display fare
+    estimates without an additional call. Pass `vehicle_code` as `vehicle_type`
+    and the `ride_type` value directly to POST /api/v1/crew/cab/book.
+
+    Port accepts: port name (e.g. "Mumbai Port"), port code, or numeric port ID.
+    """
+    distance_km = ((pickup_lat - drop_lat) ** 2 + (pickup_lng - drop_lng) ** 2) ** 0.5 * 111
+
+    resolved_port = resolve_port_for_pricing(db, port)
+    if not resolved_port:
+        return CabOptionsResponse(
+            port_id=None,
+            port_name=None,
+            distance_km=round(distance_km, 2),
+            flexible_cabs=[],
+            aggregator_cabs=[],
+        )
+
+    ride_type_obj = (
+        db.query(PricingRideType)
+        .filter(PricingRideType.code == "coordinated_transfer")
+        .first()
+    )
+    if not ride_type_obj:
+        return CabOptionsResponse(
+            port_id=resolved_port.id,
+            port_name=resolved_port.name,
+            distance_km=round(distance_km, 2),
+            flexible_cabs=[],
+            aggregator_cabs=[],
+        )
+
+    from app.db.models.cab_booking import RideType as BookingRideType
+
+    flexible_cabs = _build_cab_options_for_provider(
+        db,
+        port_id=resolved_port.id,
+        ride_type_obj=ride_type_obj,
+        pricing_provider_type="partner_drivers",
+        booking_ride_type=BookingRideType.FLEXIBLE_RIDE.value,
+        distance_km=distance_km,
+    )
+    aggregator_cabs = _build_cab_options_for_provider(
+        db,
+        port_id=resolved_port.id,
+        ride_type_obj=ride_type_obj,
+        pricing_provider_type="aggregators",
+        booking_ride_type=BookingRideType.GUARANTEED_COORDINATED_RIDE.value,
+        distance_km=distance_km,
+    )
+
+    return CabOptionsResponse(
+        port_id=resolved_port.id,
+        port_name=resolved_port.name,
+        distance_km=round(distance_km, 2),
+        flexible_cabs=flexible_cabs,
+        aggregator_cabs=aggregator_cabs,
+    )
+
+
+@router.get("/cab/ride-availability")
+def get_ride_availability(
+    port: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != "crew":
+        raise HTTPException(status_code=403, detail="Only crew can check ride availability")
+    profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+    port_value = port or (profile.current_port if profile else None)
+    from app.services.booking_service import get_ride_availability as compute_availability
+    return compute_availability(db, port_value)
+
+
 @router.post("/cab/book", response_model=CabBookingCreateOut)
 def book_cab(
     body: CabBookingCreateIn,
@@ -699,16 +1121,45 @@ def book_cab(
     profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Crew profile not found")
-    
-    # Generate booking ID: CAB-XXXXXXXX
+
+    from app.db.models.cab_booking import VehicleType, BookingStatus, RideType
+    from app.db.models.booking_timeline import TimelineEventType
+    from app.services.booking_service import find_provider_for_ride, is_ride_type_available
+    from app.services.timeline_service import create_timeline_event
+
+    try:
+        ride_type = RideType(body.ride_type)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid ride type")
+
+    port_value = body.port or profile.current_port
+    resolved_vehicle_type = map_dynamic_vehicle_type(
+        body.vehicle_type,
+        body.vehicle_name,
+        body.num_passengers,
+    )
+
+    if not is_ride_type_available(
+        db,
+        ride_type,
+        port_value,
+        resolved_vehicle_type,
+        body.vehicle_name,
+    ):
+        raise HTTPException(status_code=400, detail="Selected ride type is not available for this port")
+
+    provider = find_provider_for_ride(
+        db,
+        ride_type,
+        port_value,
+        resolved_vehicle_type,
+        body.vehicle_name,
+    )
+
     booking_id = f"CAB-{uuid.uuid4().hex[:8].upper()}"
-    
-    print(f"DEBUG: Receiving booking with price: {body.estimated_price}")
-    
-    # Use provided OTP (generated by frontend) or fallback to profile/default
     otp = body.otp or (profile.ride_otp if profile else None) or "1234"
-    
-    from app.db.models.cab_booking import VehicleType, BookingStatus
+    now = datetime.utcnow()
+
     new_booking = CabBooking(
         booking_id=booking_id,
         crew_id=profile.id,
@@ -718,29 +1169,54 @@ def book_cab(
         drop_address=body.drop_address,
         drop_lat=body.drop_lat,
         drop_lng=body.drop_lng,
-        vehicle_type=VehicleType(body.vehicle_type),
+        vehicle_type=VehicleType(resolved_vehicle_type),
         vehicle_name=body.vehicle_name,
+        vehicle_category=body.vehicle_name,
         estimated_price=body.estimated_price,
         distance_km=body.distance_km,
         num_passengers=body.num_passengers,
-        port=body.port or profile.current_port,
+        port=port_value,
         crew_member_ids=body.crew_member_ids,
         scheduled_time=body.scheduled_time,
         otp=otp,
-        driver_name=None,
-        driver_phone=None,
+        ride_type=ride_type,
+        provider_id=provider.id,
+        aggregator_id=provider.id,
+        aggregator_name=provider.company_name,
         agent_number="+91 9876543251",
-        status=BookingStatus.PENDING
+        helpline_number="+91 1800-HEYPORTS",
+        status=BookingStatus.PENDING_PROVIDER_RESPONSE,
     )
-    
+
     db.add(new_booking)
+    db.flush()
+
+    create_timeline_event(
+        db,
+        booking_db_id=new_booking.id,
+        event_type=TimelineEventType.BOOKING_CREATED,
+        actor_id=profile.id,
+        actor_type="crew",
+        metadata={"ride_type": ride_type.value},
+        event_time=now,
+    )
+    create_timeline_event(
+        db,
+        booking_db_id=new_booking.id,
+        event_type=TimelineEventType.PROVIDER_NOTIFIED,
+        actor_id=provider.id,
+        actor_type="system",
+        metadata={"provider_name": provider.company_name},
+        event_time=now,
+    )
+
     try:
         db.commit()
         db.refresh(new_booking)
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-    
+
     return CabBookingCreateOut(
         booking_id=new_booking.booking_id,
         otp=new_booking.otp,
@@ -767,11 +1243,17 @@ def get_cab_estimates(
     pickup_lng: float,
     drop_lat: float,
     drop_lng: float,
+    port: Optional[str] = None,
+    ride_type: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     # Mock distance calculation (Euclidean * 111 for rough km)
     # Ideally replace this with a call to Ola Maps Directions API
     distance = ((pickup_lat - drop_lat)**2 + (pickup_lng - drop_lng)**2)**0.5 * 111
+
+    dynamic_estimates = get_dynamic_cab_estimates(db, distance, port)
+    if dynamic_estimates:
+        return filter_estimates_for_ride_type(db, dynamic_estimates, ride_type, port)
     
     pricings = db.query(CabPricing).all()
     
@@ -795,7 +1277,7 @@ def get_cab_estimates(
                 base_fare=float(dp["base"]),
                 per_km_rate=float(dp["rate"])
             ))
-        return res
+        return filter_estimates_for_ride_type(db, res, ride_type, port)
 
     estimates = []
     for p in pricings:
@@ -809,7 +1291,7 @@ def get_cab_estimates(
             base_fare=p.base_fare,
             per_km_rate=p.per_km_rate
         ))
-    return estimates
+    return filter_estimates_for_ride_type(db, estimates, ride_type, port)
 
 @router.get("/cab/bookings/{booking_id}", response_model=CabBookingDetailsOut)
 def get_booking_details(
@@ -833,17 +1315,29 @@ def get_booking_details(
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
     
+    from app.services.booking_service import RIDE_TYPE_LABELS, serialize_booking
+    serialized = serialize_booking(booking)
     return CabBookingDetailsOut(
         booking_id=booking.booking_id,
         vehicle_name=booking.vehicle_name,
         estimated_price=float(booking.estimated_price),
         drop_address=booking.drop_address,
         num_passengers=booking.num_passengers,
-        driver_name=booking.driver_name or "Not Yet Assigned",
-        driver_phone=booking.driver_phone or "Not Yet Assigned",
+        driver_name=serialized.get("driver_name") or "Not Yet Assigned",
+        driver_phone=serialized.get("driver_phone") or "Not Yet Assigned",
         otp=booking.otp,
         agent_number=booking.agent_number,
+        helpline_number=serialized.get("helpline_number"),
         status=booking.status.value,
+        ride_type=serialized.get("ride_type"),
+        ride_type_label=serialized.get("ride_type_label"),
+        provider_name=serialized.get("provider_name"),
+        provider_type=serialized.get("provider_type"),
+        driver_assigned_at=serialized.get("driver_assigned_at"),
+        driver_accepted_at=serialized.get("driver_accepted_at"),
+        provider_response_at=serialized.get("provider_response_at"),
+        trip_started_at=serialized.get("trip_started_at"),
+        trip_completed_at=serialized.get("trip_completed_at"),
         created_at=booking.created_at
     )
 
@@ -876,14 +1370,32 @@ def cancel_booking(
     if booking.status == BookingStatus.COMPLETED:
         raise HTTPException(status_code=400, detail="Cannot cancel completed booking")
     
+    from app.db.models.booking_timeline import TimelineEventType
+    from app.services.timeline_service import create_timeline_event
+
+    if booking.status in {
+        BookingStatus.ON_TRIP,
+        BookingStatus.COMPLETED,
+        BookingStatus.PROVIDER_REJECTED,
+    }:
+        raise HTTPException(status_code=400, detail="Cannot cancel booking in current status")
+
     booking.status = BookingStatus.CANCELLED
-    
+    create_timeline_event(
+        db,
+        booking_db_id=booking.id,
+        event_type=TimelineEventType.TRIP_CANCELLED,
+        actor_id=profile.id,
+        actor_type="crew",
+        metadata={"reason": "cancelled_by_crew"},
+    )
+
     try:
         db.commit()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to cancel booking: {str(e)}")
-    
+
     return {"message": "Booking cancelled successfully", "booking_id": booking_id}
 
 @router.get("/cab/history", response_model=List[CabBookingOut])

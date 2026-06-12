@@ -32,7 +32,11 @@ class Driver(Base):
 
     # --- relationships ---
     aggregator = relationship("AggregatorProfile", backref="drivers")
-    cab_bookings = relationship("CabBooking", back_populates="assigned_driver")
+    cab_bookings = relationship(
+        "CabBooking",
+        foreign_keys="CabBooking.assigned_driver_id",
+        back_populates="assigned_driver",
+    )
 
     def __repr__(self) -> str:
         return f"<Driver id={self.id} name={self.name} vehicle={self.vehicle_number}>"

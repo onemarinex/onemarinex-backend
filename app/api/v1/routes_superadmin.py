@@ -32,6 +32,13 @@ class DashboardStats(BaseModel):
     total_sightseeing: int
     total_pubs: int
     total_hotels: int
+    pending_provider_response: int = 0
+    accepted_by_provider: int = 0
+    rejected_by_provider: int = 0
+    assigned_trips: int = 0
+    active_trips: int = 0
+    completed_trips: int = 0
+    cancelled_trips: int = 0
 
 class VendorBase(BaseModel):
     name: str
@@ -180,13 +187,16 @@ def get_dashboard_stats(
 
     total_crew = query_crew.count()
 
-    # 🔹 Final response
+    from app.services.booking_service import get_dashboard_metrics
+    booking_metrics = get_dashboard_metrics(db, port_id=port_id)
+
     return DashboardStats(
         total_restaurants=category_counts.get("restaurant", 0),
         total_pubs=category_counts.get("pub", 0),
         total_hotels=category_counts.get("hotel", 0),
         total_sightseeing=category_counts.get("sightseeing", 0),
-        total_crew=total_crew
+        total_crew=total_crew,
+        **booking_metrics,
     )
 
 # --- CMS Endpoints ---
@@ -363,18 +373,56 @@ def create_sightseeing(body: SightseeingCreate, db: Session = Depends(get_db), c
 # --- Tracking Endpoints ---
 
 @router.get("/tracking/cab-bookings")
-def track_cab_bookings(status: Optional[str] = None, port_id: Optional[int] = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def track_cab_bookings(
+    status: Optional[str] = None,
+    port_id: Optional[int] = None,
+    provider_id: Optional[int] = None,
+    provider_type: Optional[str] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     verify_superadmin(current_user)
     from sqlalchemy.orm import joinedload
-    query = db.query(CabBooking).options(joinedload(CabBooking.crew), joinedload(CabBooking.assigned_driver))
+    from app.services.booking_service import serialize_booking
+
+    query = db.query(CabBooking).options(
+        joinedload(CabBooking.crew),
+        joinedload(CabBooking.assigned_driver),
+        joinedload(CabBooking.provider),
+    )
     if status:
-        query = query.filter(CabBooking.status == status)
+        try:
+            query = query.filter(CabBooking.status == BookingStatus(status))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
     if port_id:
         port_obj = db.query(Port).filter(Port.id == port_id).first()
         if port_obj:
-            query = query.join(CrewProfile, CabBooking.crew_profile_id == CrewProfile.id)
-            query = query.filter(CrewProfile.current_port.ilike(f"%{port_obj.name}%"))
-    return query.order_by(CabBooking.created_at.desc()).all()
+            query = query.filter(CabBooking.port.ilike(f"%{port_obj.name}%"))
+    if provider_id:
+        query = query.filter(
+            or_(
+                CabBooking.provider_id == provider_id,
+                CabBooking.aggregator_id == provider_id,
+            )
+        )
+    if provider_type:
+        query = query.join(
+            AggregatorProfile,
+            or_(
+                CabBooking.provider_id == AggregatorProfile.id,
+                CabBooking.aggregator_id == AggregatorProfile.id,
+            ),
+        ).filter(AggregatorProfile.provider_type == provider_type)
+    if date_from:
+        query = query.filter(CabBooking.created_at >= date_from)
+    if date_to:
+        query = query.filter(CabBooking.created_at <= date_to)
+
+    bookings = query.order_by(CabBooking.created_at.desc()).all()
+    return [serialize_booking(booking) for booking in bookings]
 
 @router.get("/tracking/drivers")
 def track_drivers(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -382,15 +430,95 @@ def track_drivers(db: Session = Depends(get_db), current_user: User = Depends(ge
     return db.query(Driver).all()
 
 @router.get("/tracking/aggregators")
-def track_aggregators(port_id: Optional[int] = None,search : Optional[str] = None ,db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def track_aggregators(
+    port_id: Optional[int] = None,
+    search: Optional[str] = None,
+    provider_type: Optional[str] = None,
+    status_filter: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     verify_superadmin(current_user)
     from sqlalchemy.orm import joinedload
-    query = db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port))
+    query = db.query(AggregatorProfile).options(
+        joinedload(AggregatorProfile.user),
+        joinedload(AggregatorProfile.operating_port),
+        joinedload(AggregatorProfile.drivers),
+    )
     if port_id:
         query = query.filter(AggregatorProfile.operating_port_id == port_id)
-    if search is not None:
-        query = query.filter(AggregatorProfile.company_name.ilike(f"%{search}%")) 
-    return query.all()
+    if provider_type:
+        query = query.filter(AggregatorProfile.provider_type == provider_type)
+    if status_filter:
+        query = query.filter(AggregatorProfile.status == status_filter)
+    if search:
+        pattern = f"%{search}%"
+        query = query.filter(
+            or_(
+                AggregatorProfile.company_name.ilike(pattern),
+                AggregatorProfile.contact_person.ilike(pattern),
+                AggregatorProfile.aggregator_identifier.ilike(pattern),
+            )
+        )
+
+    providers = query.order_by(AggregatorProfile.company_name.asc()).all()
+    provider_ids = [provider.id for provider in providers]
+    active_statuses = [
+        BookingStatus.PENDING_PROVIDER_RESPONSE,
+        BookingStatus.PROVIDER_ACCEPTED,
+        BookingStatus.DRIVER_ASSIGNED,
+        BookingStatus.DRIVER_ACCEPTED,
+        BookingStatus.ON_TRIP,
+        BookingStatus.PENDING,
+        BookingStatus.CONFIRMED,
+        BookingStatus.ARRIVED,
+        BookingStatus.IN_PROGRESS,
+    ]
+    active_booking_counts: Dict[int, int] = {}
+    completed_trip_counts: Dict[int, int] = {}
+    if provider_ids:
+        active_booking_counts = dict(
+            db.query(CabBooking.aggregator_id, func.count(CabBooking.id))
+            .filter(
+                CabBooking.aggregator_id.in_(provider_ids),
+                CabBooking.status.in_(active_statuses),
+            )
+            .group_by(CabBooking.aggregator_id)
+            .all()
+        )
+        completed_trip_counts = dict(
+            db.query(CabBooking.aggregator_id, func.count(CabBooking.id))
+            .filter(
+                CabBooking.aggregator_id.in_(provider_ids),
+                CabBooking.status == BookingStatus.COMPLETED,
+            )
+            .group_by(CabBooking.aggregator_id)
+            .all()
+        )
+
+    return [
+        {
+            "id": provider.id,
+            "company_name": provider.company_name,
+            "provider_name": provider.company_name,
+            "provider_type": provider.provider_type or "aggregator",
+            "contact_person": provider.contact_person,
+            "operating_port_id": provider.operating_port_id,
+            "operating_port": provider.operating_port,
+            "gst_number": provider.gst_number,
+            "status": provider.status,
+            "profile_image": provider.profile_image,
+            "aggregator_identifier": provider.aggregator_identifier,
+            "fleet": provider.fleet,
+            "documents": provider.documents,
+            "user": provider.user,
+            "total_drivers": len(provider.drivers or []),
+            "available_drivers": len([driver for driver in provider.drivers or [] if driver.status == "Available"]),
+            "active_bookings": active_booking_counts.get(provider.id, 0),
+            "completed_trips": completed_trip_counts.get(provider.id, 0),
+        }
+        for provider in providers
+    ]
         
     # return db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port)).all()
 
