@@ -21,6 +21,7 @@ from app.api.v1 import routes_trips
 from app.api.v1 import routes_agents
 from app.api.v1 import routes_aggregators
 from app.api.v1 import routes_bookings
+from app.api.v1 import routes_itinerary
 
 def custom_openapi():
     if app.openapi_schema:
@@ -131,6 +132,7 @@ app.include_router(routes_pricing_controls.router, prefix="/api/v1/superadmin", 
 app.include_router(routes_reviews.router, prefix="/api/v1/reviews", tags=["reviews"])
 app.include_router(routes_notifications.router, prefix="/api/v1/notifications", tags=["notifications"])
 app.include_router(routes_sos.router, prefix="/api/v1/sos", tags=["sos"])
+app.include_router(routes_itinerary.router, prefix="/api/v1/itinerary", tags=["itinerary"])
 
 
 # --- Health checks & root ---
