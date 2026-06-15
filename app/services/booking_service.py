@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.models.aggregator_profile import AggregatorProfile
@@ -19,6 +19,12 @@ from app.services.timeline_service import create_timeline_event
 RIDE_TYPE_TO_PROVIDER_TYPE = {
     RideType.FLEXIBLE_RIDE: "partnered_driver",
     RideType.GUARANTEED_COORDINATED_RIDE: "aggregator",
+}
+
+# Support legacy/plural provider_type values found across environments.
+RIDE_TYPE_PROVIDER_TYPE_ALIASES = {
+    RideType.FLEXIBLE_RIDE: ["partnered_driver", "partner_drivers", "partner_driver"],
+    RideType.GUARANTEED_COORDINATED_RIDE: ["aggregator", "aggregators"],
 }
 
 RIDE_TYPE_LABELS = {
@@ -46,9 +52,24 @@ def resolve_port(db: Session, port_value: Optional[str]) -> Optional[Port]:
         return None
     if normalized.isdigit():
         return db.query(Port).filter(Port.id == int(normalized)).first()
+
+    alias = normalized.lower()
+    alias = alias[5:] if alias.startswith("port_") else alias
+    alias = alias.replace("_", " ").strip()
+    compact_alias = alias.replace(" ", "")
+
     return (
         db.query(Port)
-        .filter(or_(Port.name.ilike(normalized), Port.code.ilike(normalized)))
+        .filter(
+            or_(
+                Port.name.ilike(normalized),
+                Port.code.ilike(normalized),
+                Port.name.ilike(f"%{alias}%"),
+                Port.code.ilike(f"%{alias}%"),
+                func.replace(func.lower(Port.name), " ", "").ilike(f"%{compact_alias}%"),
+                func.replace(func.lower(Port.code), " ", "").ilike(f"%{compact_alias}%"),
+            )
+        )
         .first()
     )
 
@@ -183,14 +204,17 @@ def is_ride_type_available(
     if not port:
         return False
 
-    provider_type = RIDE_TYPE_TO_PROVIDER_TYPE[ride_type]
+    provider_types = RIDE_TYPE_PROVIDER_TYPE_ALIASES.get(
+        ride_type,
+        [RIDE_TYPE_TO_PROVIDER_TYPE[ride_type]],
+    )
     providers = (
         db.query(AggregatorProfile)
         .options(joinedload(AggregatorProfile.drivers))
         .filter(
             AggregatorProfile.operating_port_id == port.id,
-            AggregatorProfile.provider_type == provider_type,
-            AggregatorProfile.status == "Active",
+            AggregatorProfile.provider_type.in_(provider_types),
+            func.lower(func.coalesce(AggregatorProfile.status, "")) == "active",
         )
         .all()
     )
@@ -248,14 +272,17 @@ def find_provider_for_ride(
     if not port:
         raise HTTPException(status_code=400, detail="Port not found for booking")
 
-    provider_type = RIDE_TYPE_TO_PROVIDER_TYPE[ride_type]
+    provider_types = RIDE_TYPE_PROVIDER_TYPE_ALIASES.get(
+        ride_type,
+        [RIDE_TYPE_TO_PROVIDER_TYPE[ride_type]],
+    )
     providers = (
         db.query(AggregatorProfile)
         .options(joinedload(AggregatorProfile.drivers))
         .filter(
             AggregatorProfile.operating_port_id == port.id,
-            AggregatorProfile.provider_type == provider_type,
-            AggregatorProfile.status == "Active",
+            AggregatorProfile.provider_type.in_(provider_types),
+            func.lower(func.coalesce(AggregatorProfile.status, "")) == "active",
         )
         .all()
     )
@@ -264,9 +291,17 @@ def find_provider_for_ride(
         if provider_has_matching_drivers(db, provider, vehicle_type, vehicle_name):
             return provider
 
+    # Fallback for inconsistent driver vehicle labels in production data.
+    for provider in providers:
+        if provider_has_active_drivers(provider):
+            return provider
+
     raise HTTPException(
         status_code=400,
-        detail=f"No active provider available for {RIDE_TYPE_LABELS[ride_type]}",
+        detail=(
+            f"No active provider available for {RIDE_TYPE_LABELS[ride_type]}"
+            f" at port '{port.name}'"
+        ),
     )
 
 
