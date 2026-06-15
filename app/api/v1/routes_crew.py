@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import cast, String
 from typing import List, Optional
 from datetime import date, datetime, timedelta
 import uuid
@@ -1412,9 +1413,24 @@ def get_booking_history(
     if not profile:
         raise HTTPException(status_code=404, detail="Crew profile not found")
     
-    bookings = db.query(CabBooking).filter(
-        CabBooking.crew_id == profile.id
-    ).order_by(CabBooking.created_at.desc()).all()
+    bookings = (
+        db.query(
+            CabBooking.id,
+            CabBooking.booking_id,
+            CabBooking.pickup_address,
+            CabBooking.drop_address,
+            cast(CabBooking.vehicle_type, String).label("vehicle_type"),
+            CabBooking.vehicle_name,
+            CabBooking.estimated_price,
+            CabBooking.num_passengers,
+            cast(CabBooking.status, String).label("status"),
+            CabBooking.scheduled_time,
+            CabBooking.created_at,
+        )
+        .filter(CabBooking.crew_id == profile.id)
+        .order_by(CabBooking.created_at.desc())
+        .all()
+    )
     
     return [
         CabBookingOut(
@@ -1422,11 +1438,11 @@ def get_booking_history(
             booking_id=booking.booking_id,
             pickup_address=booking.pickup_address,
             drop_address=booking.drop_address,
-            vehicle_type=booking.vehicle_type.value,
+            vehicle_type=(booking.vehicle_type or "").lower(),
             vehicle_name=booking.vehicle_name,
             estimated_price=float(booking.estimated_price),
             num_passengers=booking.num_passengers,
-            status=booking.status.value,
+            status=(booking.status or "").lower(),
             scheduled_time=booking.scheduled_time,
             created_at=booking.created_at
         )
