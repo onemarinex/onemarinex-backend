@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, cast, String
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.models.aggregator_profile import AggregatorProfile
@@ -193,16 +193,16 @@ def provider_has_matching_drivers(
     )
 
 
-def is_ride_type_available(
+def get_eligible_providers_for_ride(
     db: Session,
     ride_type: RideType,
     port_value: Optional[str],
-    vehicle_type: str = "ac",
-    vehicle_name: str = "Cab AC",
-) -> bool:
+    vehicle_type: str,
+    vehicle_name: str,
+) -> List[AggregatorProfile]:
     port = resolve_port(db, port_value)
     if not port:
-        return False
+        return []
 
     provider_types = RIDE_TYPE_PROVIDER_TYPE_ALIASES.get(
         ride_type,
@@ -219,10 +219,73 @@ def is_ride_type_available(
         .all()
     )
 
-    for provider in providers:
-        if provider_has_active_drivers(provider):
-            return True
-    return False
+    matched = [
+        provider
+        for provider in providers
+        if provider_has_matching_drivers(db, provider, vehicle_type, vehicle_name)
+    ]
+    if matched:
+        return matched
+
+    return [provider for provider in providers if provider_has_active_drivers(provider)]
+
+
+def is_provider_eligible_for_booking(
+    db: Session,
+    booking: CabBooking,
+    provider: AggregatorProfile,
+) -> bool:
+    if not booking.ride_type:
+        return False
+
+    provider_types = RIDE_TYPE_PROVIDER_TYPE_ALIASES.get(
+        booking.ride_type,
+        [RIDE_TYPE_TO_PROVIDER_TYPE[booking.ride_type]],
+    )
+    if (provider.provider_type or "") not in provider_types:
+        return False
+
+    if (provider.status or "").strip().lower() != "active":
+        return False
+
+    port = resolve_port(db, booking.port)
+    if not port or provider.operating_port_id != port.id:
+        return False
+
+    provider_with_drivers = (
+        db.query(AggregatorProfile)
+        .options(joinedload(AggregatorProfile.drivers))
+        .filter(AggregatorProfile.id == provider.id)
+        .first()
+    )
+    if not provider_with_drivers:
+        return False
+
+    vehicle_type = booking.vehicle_type.value if booking.vehicle_type else ""
+    return provider_has_matching_drivers(
+        db,
+        provider_with_drivers,
+        vehicle_type,
+        booking.vehicle_name,
+    )
+
+
+def is_ride_type_available(
+    db: Session,
+    ride_type: RideType,
+    port_value: Optional[str],
+    vehicle_type: str = "ac",
+    vehicle_name: str = "Cab AC",
+) -> bool:
+    return bool(
+        get_eligible_providers_for_ride(
+            db,
+            ride_type,
+            port_value,
+            vehicle_type,
+            vehicle_name,
+        )
+    )
 
 
 def get_ride_availability(db: Session, port_value: Optional[str]) -> Dict[str, Any]:
@@ -268,41 +331,26 @@ def find_provider_for_ride(
     vehicle_type: str,
     vehicle_name: str,
 ) -> AggregatorProfile:
-    port = resolve_port(db, port_value)
-    if not port:
-        raise HTTPException(status_code=400, detail="Port not found for booking")
-
-    provider_types = RIDE_TYPE_PROVIDER_TYPE_ALIASES.get(
+    providers = get_eligible_providers_for_ride(
+        db,
         ride_type,
-        [RIDE_TYPE_TO_PROVIDER_TYPE[ride_type]],
+        port_value,
+        vehicle_type,
+        vehicle_name,
     )
-    providers = (
-        db.query(AggregatorProfile)
-        .options(joinedload(AggregatorProfile.drivers))
-        .filter(
-            AggregatorProfile.operating_port_id == port.id,
-            AggregatorProfile.provider_type.in_(provider_types),
-            func.lower(func.coalesce(AggregatorProfile.status, "")) == "active",
+    if not providers:
+        port = resolve_port(db, port_value)
+        if not port:
+            raise HTTPException(status_code=400, detail="Port not found for booking")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No active provider available for {RIDE_TYPE_LABELS[ride_type]}"
+                f" at port '{port.name}'"
+            ),
         )
-        .all()
-    )
 
-    for provider in providers:
-        if provider_has_matching_drivers(db, provider, vehicle_type, vehicle_name):
-            return provider
-
-    # Fallback for inconsistent driver vehicle labels in production data.
-    for provider in providers:
-        if provider_has_active_drivers(provider):
-            return provider
-
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            f"No active provider available for {RIDE_TYPE_LABELS[ride_type]}"
-            f" at port '{port.name}'"
-        ),
-    )
+    return providers[0]
 
 
 def get_booking_by_identifier(db: Session, booking_identifier: str) -> CabBooking:
@@ -414,17 +462,51 @@ def get_eligible_drivers(
 
 
 def accept_booking(db: Session, booking: CabBooking, user: User) -> CabBooking:
-    profile = ensure_provider_access(booking, user)
-    if booking.status != BookingStatus.PENDING_PROVIDER_RESPONSE:
-        raise HTTPException(status_code=400, detail="Booking is not awaiting provider response")
+    if user.role != "aggregator":
+        raise HTTPException(status_code=403, detail="Only fleet providers can perform this action")
+    profile = user.aggregator_profile
+    if not profile:
+        raise HTTPException(status_code=404, detail="Fleet provider profile not found")
 
     now = datetime.utcnow()
-    booking.status = BookingStatus.PROVIDER_ACCEPTED
-    booking.provider_response_status = "accepted"
-    booking.provider_response_at = now
-    booking.provider_id = profile.id
-    booking.aggregator_id = profile.id
-    booking.aggregator_name = profile.company_name
+    if booking.provider_id is None and booking.aggregator_id is None:
+        if not is_provider_eligible_for_booking(db, booking, profile):
+            raise HTTPException(status_code=403, detail="Booking is not eligible for your provider account")
+
+    updated_rows = (
+        db.query(CabBooking)
+        .filter(
+            CabBooking.id == booking.id,
+            cast(CabBooking.status, String) == BookingStatus.PENDING_PROVIDER_RESPONSE.value,
+            CabBooking.provider_id.is_(None),
+            CabBooking.aggregator_id.is_(None),
+        )
+        .update(
+            {
+                CabBooking.status: BookingStatus.PROVIDER_ACCEPTED,
+                CabBooking.provider_response_status: "accepted",
+                CabBooking.provider_response_at: now,
+                CabBooking.provider_id: profile.id,
+                CabBooking.aggregator_id: profile.id,
+                CabBooking.aggregator_name: profile.company_name,
+            },
+            synchronize_session=False,
+        )
+    )
+
+    if updated_rows == 0:
+        latest = (
+            db.query(
+                CabBooking.provider_id,
+                CabBooking.aggregator_id,
+                cast(CabBooking.status, String).label("status"),
+            )
+            .filter(CabBooking.id == booking.id)
+            .first()
+        )
+        if latest and (latest.provider_id or latest.aggregator_id):
+            raise HTTPException(status_code=409, detail="Booking already accepted by another provider")
+        raise HTTPException(status_code=400, detail="Booking is not awaiting provider response")
 
     create_timeline_event(
         db,
@@ -436,8 +518,10 @@ def accept_booking(db: Session, booking: CabBooking, user: User) -> CabBooking:
         event_time=now,
     )
     db.commit()
-    db.refresh(booking)
-    return booking
+    refreshed = db.query(CabBooking).filter(CabBooking.id == booking.id).first()
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="Booking not found after acceptance")
+    return refreshed
 
 
 def reject_booking(db: Session, booking: CabBooking, user: User) -> CabBooking:

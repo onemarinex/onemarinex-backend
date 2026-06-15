@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import func, cast, String, or_
+from sqlalchemy import func, cast, String, or_, and_
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date
 
 from app.db.session import get_db
 from app.db.models.aggregator_profile import AggregatorProfile
-from app.db.models.cab_booking import CabBooking, BookingStatus
+from app.db.models.cab_booking import CabBooking, BookingStatus, RideType
 from app.db.models.driver import Driver
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.pricing_controls import PricingDuration, PricingRideType, PricingRule, PricingVehicleCategory
@@ -274,6 +274,9 @@ def get_aggregator_dashboard(
             CabBooking.scheduled_time,
             CabBooking.driver_name,
             CabBooking.num_passengers,
+            CabBooking.provider_id,
+            CabBooking.aggregator_id,
+            CabBooking.port,
             CrewProfile.full_name.label("crew_name"),
             CrewProfile.hpid.label("crew_hpid"),
             CrewProfile.vessel.label("crew_vessel"),
@@ -283,6 +286,11 @@ def get_aggregator_dashboard(
             or_(
                 CabBooking.provider_id == agg_profile.id,
                 CabBooking.aggregator_id == agg_profile.id,
+                and_(
+                    CabBooking.provider_id.is_(None),
+                    CabBooking.aggregator_id.is_(None),
+                    cast(CabBooking.status, String) == "pending_provider_response",
+                ),
             )
         )
         .order_by(CabBooking.created_at.desc())
@@ -318,8 +326,40 @@ def get_aggregator_dashboard(
             num_passengers=row.num_passengers,
         )
 
+    from app.services.booking_service import RIDE_TYPE_PROVIDER_TYPE_ALIASES, resolve_port
+
+    def row_visible_to_provider(row: Any) -> bool:
+        # Direct assignment visibility
+        if row.provider_id == agg_profile.id or row.aggregator_id == agg_profile.id:
+            return True
+
+        # Broadcast visibility only for unassigned pending requests
+        if normalized_status(row) != "pending_provider_response":
+            return False
+        if row.provider_id is not None or row.aggregator_id is not None:
+            return False
+
+        ride_type_value = (row.ride_type or "").lower()
+        if not ride_type_value:
+            return False
+        provider_type_allowed = set()
+        if ride_type_value == "flexible_ride":
+            provider_type_allowed = set(RIDE_TYPE_PROVIDER_TYPE_ALIASES.get(RideType.FLEXIBLE_RIDE, []))
+        elif ride_type_value == "guaranteed_coordinated_ride":
+            provider_type_allowed = set(RIDE_TYPE_PROVIDER_TYPE_ALIASES.get(RideType.GUARANTEED_COORDINATED_RIDE, []))
+
+        if (agg_profile.provider_type or "") not in provider_type_allowed:
+            return False
+
+        resolved_port = resolve_port(db, row.port)
+        if not resolved_port:
+            return False
+        return resolved_port.id == agg_profile.operating_port_id
+
+    visible_rows = [row for row in rows if row_visible_to_provider(row)]
+
     def pick(status_values: set[str], limit: Optional[int] = None, sort_by_updated: bool = False) -> List[Any]:
-        filtered = [r for r in rows if normalized_status(r) in status_values]
+        filtered = [r for r in visible_rows if normalized_status(r) in status_values]
         if sort_by_updated:
             filtered = sorted(filtered, key=lambda r: r.updated_at or r.created_at, reverse=True)
         if limit is not None:

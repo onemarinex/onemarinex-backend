@@ -1020,6 +1020,72 @@ def _build_cab_options_for_provider(
     return result
 
 
+def _resolve_server_side_fare(
+    db: Session,
+    *,
+    pickup_lat: float,
+    pickup_lng: float,
+    drop_lat: float,
+    drop_lng: float,
+    port_value: Optional[str],
+    booking_ride_type: str,
+    vehicle_type: str,
+    vehicle_name: str,
+) -> tuple[Optional[float], float]:
+    distance_km = ((pickup_lat - drop_lat) ** 2 + (pickup_lng - drop_lng) ** 2) ** 0.5 * 111
+    resolved_port = resolve_port_for_pricing(db, port_value)
+    if not resolved_port:
+        return None, round(distance_km, 2)
+
+    ride_type_obj = (
+        db.query(PricingRideType)
+        .filter(PricingRideType.code == "coordinated_transfer")
+        .first()
+    )
+    if not ride_type_obj:
+        return None, round(distance_km, 2)
+
+    pricing_provider_type = _BOOKING_TYPE_TO_PRICING.get(booking_ride_type)
+    if not pricing_provider_type:
+        return None, round(distance_km, 2)
+
+    options = _build_cab_options_for_provider(
+        db,
+        port_id=resolved_port.id,
+        ride_type_obj=ride_type_obj,
+        pricing_provider_type=pricing_provider_type,
+        booking_ride_type=booking_ride_type,
+        distance_km=distance_km,
+    )
+    if not options:
+        return None, round(distance_km, 2)
+
+    resolved_vehicle = map_dynamic_vehicle_type(vehicle_type, vehicle_name, 1)
+    exact = next(
+        (
+            option
+            for option in options
+            if (option.vehicle_code or "").lower() == resolved_vehicle
+        ),
+        None,
+    )
+    if exact:
+        return float(exact.estimated_price), round(distance_km, 2)
+
+    name_match = next(
+        (
+            option
+            for option in options
+            if (option.vehicle_name or "").strip().lower() == (vehicle_name or "").strip().lower()
+        ),
+        None,
+    )
+    if name_match:
+        return float(name_match.estimated_price), round(distance_km, 2)
+
+    return float(options[0].estimated_price), round(distance_km, 2)
+
+
 @router.get("/cab/options", response_model=CabOptionsResponse)
 def get_cab_options(
     pickup_lat: float,
@@ -1126,7 +1192,7 @@ def book_cab(
 
     from app.db.models.cab_booking import VehicleType, BookingStatus, RideType
     from app.db.models.booking_timeline import TimelineEventType
-    from app.services.booking_service import find_provider_for_ride, is_ride_type_available
+    from app.services.booking_service import get_eligible_providers_for_ride, is_ride_type_available
     from app.services.timeline_service import create_timeline_event
 
     try:
@@ -1150,13 +1216,29 @@ def book_cab(
     ):
         raise HTTPException(status_code=400, detail="Selected ride type is not available for this port")
 
-    provider = find_provider_for_ride(
+    eligible_providers = get_eligible_providers_for_ride(
         db,
         ride_type,
         port_value,
         resolved_vehicle_type,
         body.vehicle_name,
     )
+    if not eligible_providers:
+        raise HTTPException(status_code=400, detail="No active provider available for selected ride")
+
+    resolved_price, resolved_distance = _resolve_server_side_fare(
+        db,
+        pickup_lat=body.pickup_lat,
+        pickup_lng=body.pickup_lng,
+        drop_lat=body.drop_lat,
+        drop_lng=body.drop_lng,
+        port_value=port_value,
+        booking_ride_type=ride_type.value,
+        vehicle_type=resolved_vehicle_type,
+        vehicle_name=body.vehicle_name,
+    )
+    final_price = resolved_price if resolved_price is not None else body.estimated_price
+    final_distance = resolved_distance if resolved_distance > 0 else body.distance_km
 
     booking_id = f"CAB-{uuid.uuid4().hex[:8].upper()}"
     otp = body.otp or (profile.ride_otp if profile else None) or "1234"
@@ -1174,17 +1256,17 @@ def book_cab(
         vehicle_type=VehicleType(resolved_vehicle_type),
         vehicle_name=body.vehicle_name,
         vehicle_category=body.vehicle_name,
-        estimated_price=body.estimated_price,
-        distance_km=body.distance_km,
+        estimated_price=final_price,
+        distance_km=final_distance,
         num_passengers=body.num_passengers,
         port=port_value,
         crew_member_ids=body.crew_member_ids,
         scheduled_time=body.scheduled_time,
         otp=otp,
         ride_type=ride_type,
-        provider_id=provider.id,
-        aggregator_id=provider.id,
-        aggregator_name=provider.company_name,
+        provider_id=None,
+        aggregator_id=None,
+        aggregator_name=None,
         agent_number="+91 9876543251",
         helpline_number="+91 1800-HEYPORTS",
         status=BookingStatus.PENDING_PROVIDER_RESPONSE,
@@ -1206,9 +1288,12 @@ def book_cab(
         db,
         booking_db_id=new_booking.id,
         event_type=TimelineEventType.PROVIDER_NOTIFIED,
-        actor_id=provider.id,
+        actor_id=None,
         actor_type="system",
-        metadata={"provider_name": provider.company_name},
+        metadata={
+            "eligible_provider_count": len(eligible_providers),
+            "eligible_provider_ids": [provider.id for provider in eligible_providers],
+        },
         event_time=now,
     )
 
