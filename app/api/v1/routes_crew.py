@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import cast, String
+from sqlalchemy import cast, String, func
 from typing import List, Optional
 from datetime import date, datetime, timedelta
 import uuid
@@ -15,6 +15,7 @@ from app.db.models.incident import Incident, IncidentStatus, IncidentType
 from app.db.models.notification import Notification
 from app.db.models.crew_sos import CrewSos
 from app.db.models.port import Port
+from app.db.models.aggregator_profile import AggregatorProfile
 from app.db.models.pricing_controls import PricingRideType, PricingRule, PricingVehicleCategory
 from app.api.v1.routes_auth import get_current_user
 from app.services.crew_service import generate_hpid
@@ -1192,7 +1193,7 @@ def book_cab(
 
     from app.db.models.cab_booking import VehicleType, BookingStatus, RideType
     from app.db.models.booking_timeline import TimelineEventType
-    from app.services.booking_service import get_eligible_providers_for_ride, is_ride_type_available
+    from app.services.booking_service import is_ride_type_available
     from app.services.timeline_service import create_timeline_event
 
     try:
@@ -1216,15 +1217,13 @@ def book_cab(
     ):
         raise HTTPException(status_code=400, detail="Selected ride type is not available for this port")
 
-    eligible_providers = get_eligible_providers_for_ride(
-        db,
-        ride_type,
-        port_value,
-        resolved_vehicle_type,
-        body.vehicle_name,
+    broadcast_providers = (
+        db.query(AggregatorProfile)
+        .filter(func.lower(func.coalesce(AggregatorProfile.status, "")) == "active")
+        .all()
     )
-    if not eligible_providers:
-        raise HTTPException(status_code=400, detail="No active provider available for selected ride")
+    if not broadcast_providers:
+        raise HTTPException(status_code=400, detail="No active providers available")
 
     resolved_price, resolved_distance = _resolve_server_side_fare(
         db,
@@ -1291,8 +1290,8 @@ def book_cab(
         actor_id=None,
         actor_type="system",
         metadata={
-            "eligible_provider_count": len(eligible_providers),
-            "eligible_provider_ids": [provider.id for provider in eligible_providers],
+            "eligible_provider_count": len(broadcast_providers),
+            "eligible_provider_ids": [provider.id for provider in broadcast_providers],
         },
         event_time=now,
     )

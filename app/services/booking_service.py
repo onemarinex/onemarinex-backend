@@ -469,10 +469,6 @@ def accept_booking(db: Session, booking: CabBooking, user: User) -> CabBooking:
         raise HTTPException(status_code=404, detail="Fleet provider profile not found")
 
     now = datetime.utcnow()
-    if booking.provider_id is None and booking.aggregator_id is None:
-        if not is_provider_eligible_for_booking(db, booking, profile):
-            raise HTTPException(status_code=403, detail="Booking is not eligible for your provider account")
-
     updated_rows = (
         db.query(CabBooking)
         .filter(

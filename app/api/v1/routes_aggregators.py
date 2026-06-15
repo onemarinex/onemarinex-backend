@@ -6,7 +6,7 @@ from datetime import datetime, date
 
 from app.db.session import get_db
 from app.db.models.aggregator_profile import AggregatorProfile
-from app.db.models.cab_booking import CabBooking, BookingStatus, RideType
+from app.db.models.cab_booking import CabBooking, BookingStatus
 from app.db.models.driver import Driver
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.pricing_controls import PricingDuration, PricingRideType, PricingRule, PricingVehicleCategory
@@ -326,8 +326,6 @@ def get_aggregator_dashboard(
             num_passengers=row.num_passengers,
         )
 
-    from app.services.booking_service import RIDE_TYPE_PROVIDER_TYPE_ALIASES, resolve_port
-
     def row_visible_to_provider(row: Any) -> bool:
         # Direct assignment visibility
         if row.provider_id == agg_profile.id or row.aggregator_id == agg_profile.id:
@@ -338,23 +336,7 @@ def get_aggregator_dashboard(
             return False
         if row.provider_id is not None or row.aggregator_id is not None:
             return False
-
-        ride_type_value = (row.ride_type or "").lower()
-        if not ride_type_value:
-            return False
-        provider_type_allowed = set()
-        if ride_type_value == "flexible_ride":
-            provider_type_allowed = set(RIDE_TYPE_PROVIDER_TYPE_ALIASES.get(RideType.FLEXIBLE_RIDE, []))
-        elif ride_type_value == "guaranteed_coordinated_ride":
-            provider_type_allowed = set(RIDE_TYPE_PROVIDER_TYPE_ALIASES.get(RideType.GUARANTEED_COORDINATED_RIDE, []))
-
-        if (agg_profile.provider_type or "") not in provider_type_allowed:
-            return False
-
-        resolved_port = resolve_port(db, row.port)
-        if not resolved_port:
-            return False
-        return resolved_port.id == agg_profile.operating_port_id
+        return True
 
     visible_rows = [row for row in rows if row_visible_to_provider(row)]
 
