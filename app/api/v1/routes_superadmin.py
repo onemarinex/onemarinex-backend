@@ -605,10 +605,9 @@ def track_aggregators(
                 {
                     "id": provider.user.id,
                     "email": provider.user.email,
-                    "full_name": provider.user.full_name,
+                    "name": provider.user.name,
                     "mobile_number": provider.user.mobile_number,
                     "role": provider.user.role,
-                    "is_active": provider.user.is_active,
                 }
                 if provider.user
                 else None
