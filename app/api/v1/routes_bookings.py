@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -7,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_current_driver
 from app.api.v1.routes_auth import get_current_user
+from app.db.models.cab_booking import CabBooking
 from app.db.models.driver import Driver
 from app.db.models.user import User
 from app.db.session import get_db
@@ -32,6 +34,17 @@ from app.services.magic_link_service import (
 from app.services.timeline_service import get_booking_timeline
 
 router = APIRouter()
+
+
+def _resolve_booking_db_id(db: Session, booking_identifier: str) -> int:
+    query = db.query(CabBooking.id)
+    if booking_identifier.isdigit():
+        row = query.filter(CabBooking.id == int(booking_identifier)).first()
+    else:
+        row = query.filter(CabBooking.booking_id == booking_identifier).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return int(row.id)
 
 
 class AssignDriverIn(BaseModel):
@@ -208,8 +221,8 @@ def accept_booking_endpoint(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    booking = get_booking_by_identifier(db, booking_id)
-    updated = accept_booking(db, booking, current_user)
+    booking_db_id = _resolve_booking_db_id(db, booking_id)
+    updated = accept_booking(db, SimpleNamespace(id=booking_db_id), current_user)
     return serialize_booking(updated)
 
 
