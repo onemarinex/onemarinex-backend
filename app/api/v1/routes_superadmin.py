@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, cast, String
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
+import logging
 
 from app.db.session import get_db
 from app.db.models.user import User
@@ -25,6 +26,7 @@ from app.db.models.driver_magic_link import DriverMagicLink
 from app.api.v1.routes_auth import get_current_user
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # --- Schemas ---
 
@@ -547,15 +549,15 @@ def track_aggregators(
         providers = query.order_by(AggregatorProfile.company_name.asc()).all()
         provider_ids = [provider.id for provider, _, _ in providers]
         active_statuses = [
-            BookingStatus.PENDING_PROVIDER_RESPONSE,
-            BookingStatus.PROVIDER_ACCEPTED,
-            BookingStatus.DRIVER_ASSIGNED,
-            BookingStatus.DRIVER_ACCEPTED,
-            BookingStatus.ON_TRIP,
-            BookingStatus.PENDING,
-            BookingStatus.CONFIRMED,
-            BookingStatus.ARRIVED,
-            BookingStatus.IN_PROGRESS,
+            BookingStatus.PENDING_PROVIDER_RESPONSE.value,
+            BookingStatus.PROVIDER_ACCEPTED.value,
+            BookingStatus.DRIVER_ASSIGNED.value,
+            BookingStatus.DRIVER_ACCEPTED.value,
+            BookingStatus.ON_TRIP.value,
+            BookingStatus.PENDING.value,
+            BookingStatus.CONFIRMED.value,
+            BookingStatus.ARRIVED.value,
+            BookingStatus.IN_PROGRESS.value,
         ]
         active_booking_counts: Dict[int, int] = {}
         completed_trip_counts: Dict[int, int] = {}
@@ -564,7 +566,7 @@ def track_aggregators(
                 db.query(CabBooking.aggregator_id, func.count(CabBooking.id))
                 .filter(
                     CabBooking.aggregator_id.in_(provider_ids),
-                    CabBooking.status.in_(active_statuses),
+                    cast(CabBooking.status, String).in_(active_statuses),
                 )
                 .group_by(CabBooking.aggregator_id)
                 .all()
@@ -573,7 +575,7 @@ def track_aggregators(
                 db.query(CabBooking.aggregator_id, func.count(CabBooking.id))
                 .filter(
                     CabBooking.aggregator_id.in_(provider_ids),
-                    CabBooking.status == BookingStatus.COMPLETED,
+                    cast(CabBooking.status, String) == BookingStatus.COMPLETED.value,
                 )
                 .group_by(CabBooking.aggregator_id)
                 .all()
@@ -650,6 +652,7 @@ def track_aggregators(
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception(f"Failed to load aggregator tracking data: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to load aggregator tracking data: {e}",
