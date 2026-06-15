@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 from typing import List, Optional, Dict, Any
@@ -645,7 +646,7 @@ def track_aggregators(
                     "completed_trips": completed_trip_counts.get(provider.id, 0),
                 }
             )
-        return response
+        return jsonable_encoder(response)
     except HTTPException:
         raise
     except Exception as e:
@@ -653,9 +654,6 @@ def track_aggregators(
             status_code=500,
             detail=f"Failed to load aggregator tracking data: {e}",
         )
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to load aggregator tracking data: {exc}")
-        
     # return db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port)).all()
 
 @router.get("/tracking/incidents")
