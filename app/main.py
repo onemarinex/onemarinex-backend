@@ -73,10 +73,13 @@ origins = [
     "http://localhost:5174",
     "http://127.0.0.1:5174",
     "https://heyports-56we8.ondigitalocean.app",  # Production frontend
+    "https://www.heyports-56we8.ondigitalocean.app",
+    "https://heyports-dev-5285u.ondigitalocean.app",
 ]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=r"https://[a-z0-9-]+\.ondigitalocean\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

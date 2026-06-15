@@ -586,14 +586,33 @@ def track_aggregators(
             "provider_type": provider.provider_type or "aggregator",
             "contact_person": provider.contact_person,
             "operating_port_id": provider.operating_port_id,
-            "operating_port": provider.operating_port,
+            "operating_port": (
+                {
+                    "id": provider.operating_port.id,
+                    "name": provider.operating_port.name,
+                    "code": provider.operating_port.code,
+                }
+                if provider.operating_port
+                else None
+            ),
             "gst_number": provider.gst_number,
             "status": provider.status,
             "profile_image": provider.profile_image,
             "aggregator_identifier": provider.aggregator_identifier,
             "fleet": provider.fleet,
             "documents": provider.documents,
-            "user": provider.user,
+            "user": (
+                {
+                    "id": provider.user.id,
+                    "email": provider.user.email,
+                    "full_name": provider.user.full_name,
+                    "mobile_number": provider.user.mobile_number,
+                    "role": provider.user.role,
+                    "is_active": provider.user.is_active,
+                }
+                if provider.user
+                else None
+            ),
             "total_drivers": len(provider.drivers or []),
             "available_drivers": len([driver for driver in provider.drivers or [] if driver.status == "Available"]),
             "active_bookings": active_booking_counts.get(provider.id, 0),
