@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, cast, String, or_
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date
 
@@ -238,80 +238,122 @@ def get_aggregator_dashboard(
     if not agg_profile:
         raise HTTPException(status_code=404, detail="Aggregator profile not found")
 
-    from app.services.booking_service import (
-        STATUS_LABELS,
-        RIDE_TYPE_LABELS,
-        get_provider_dashboard_metrics,
-        serialize_booking,
+    status_labels = {
+        "pending_provider_response": "Pending Provider Response",
+        "provider_accepted": "Provider Accepted",
+        "provider_rejected": "Provider Rejected",
+        "driver_assigned": "Driver Assigned",
+        "driver_accepted": "Driver Accepted",
+        "on_trip": "On Trip",
+        "completed": "Completed",
+        "cancelled": "Cancelled",
+        "pending": "Pending",
+        "confirmed": "Confirmed",
+        "arrived": "Arrived",
+        "in_progress": "In Progress",
+    }
+    ride_type_labels = {
+        "flexible_ride": "Flexible Ride",
+        "guaranteed_coordinated_ride": "Guaranteed Coordinated Ride",
+    }
+
+    rows = (
+        db.query(
+            CabBooking.id,
+            CabBooking.booking_id,
+            CabBooking.pickup_address,
+            CabBooking.drop_address,
+            CabBooking.vehicle_name,
+            cast(CabBooking.vehicle_type, String).label("vehicle_type"),
+            cast(CabBooking.ride_type, String).label("ride_type"),
+            CabBooking.estimated_price,
+            cast(CabBooking.status, String).label("status"),
+            CabBooking.created_at,
+            CabBooking.updated_at,
+            CabBooking.completed_at,
+            CabBooking.scheduled_time,
+            CabBooking.driver_name,
+            CabBooking.num_passengers,
+            CrewProfile.full_name.label("crew_name"),
+            CrewProfile.hpid.label("crew_hpid"),
+            CrewProfile.vessel.label("crew_vessel"),
+        )
+        .outerjoin(CrewProfile, CabBooking.crew_id == CrewProfile.id)
+        .filter(
+            or_(
+                CabBooking.provider_id == agg_profile.id,
+                CabBooking.aggregator_id == agg_profile.id,
+            )
+        )
+        .order_by(CabBooking.created_at.desc())
+        .all()
     )
 
-    query = db.query(CabBooking).filter(
-        (CabBooking.provider_id == agg_profile.id) | (CabBooking.aggregator_id == agg_profile.id)
-    )
+    def normalized_status(row: Any) -> str:
+        return (row.status or "").lower()
 
-    new_requests = query.filter(
-        CabBooking.status == BookingStatus.PENDING_PROVIDER_RESPONSE
-    ).order_by(CabBooking.created_at.desc()).all()
-    accepted_requests = query.filter(
-        CabBooking.status == BookingStatus.PROVIDER_ACCEPTED
-    ).order_by(CabBooking.created_at.desc()).all()
-    active_trips = query.filter(
-        CabBooking.status.in_(
-            [
-                BookingStatus.DRIVER_ASSIGNED,
-                BookingStatus.DRIVER_ACCEPTED,
-                BookingStatus.ON_TRIP,
-            ]
-        )
-    ).order_by(CabBooking.created_at.desc()).all()
-    completed_requests = query.filter(
-        CabBooking.status == BookingStatus.COMPLETED
-    ).order_by(CabBooking.updated_at.desc()).limit(50).all()
-    cancelled_requests = query.filter(
-        CabBooking.status.in_(
-            [BookingStatus.CANCELLED, BookingStatus.PROVIDER_REJECTED]
-        )
-    ).order_by(CabBooking.updated_at.desc()).limit(50).all()
-
-    def transform(b: CabBooking):
-        serialized = serialize_booking(b)
+    def transform(row: Any) -> BookingDashboardOut:
+        ride_type_value = (row.ride_type or "").lower() if row.ride_type else None
+        status_value = normalized_status(row)
         return BookingDashboardOut(
-            id=b.id,
-            booking_id=b.booking_id,
+            id=row.id,
+            booking_id=row.booking_id,
             crew=CrewShortOut(
-                name=b.crew.full_name,
-                hp_id=b.crew.hpid or "",
-                vessel=b.crew.vessel or ""
+                name=row.crew_name or "Unknown",
+                hp_id=row.crew_hpid or "",
+                vessel=row.crew_vessel or "",
             ),
-            pickup_address=b.pickup_address,
-            drop_address=b.drop_address,
-            vehicle_name=b.vehicle_name,
-            vehicle_type=serialized.get("vehicle_type"),
-            ride_type=serialized.get("ride_type"),
-            ride_type_label=serialized.get("ride_type_label"),
-            estimated_price=float(b.estimated_price),
-            status=b.status.value,
-            status_label=serialized.get("status_label"),
-            created_at=b.created_at,
-            scheduled_time=b.scheduled_time,
-            driver_name=b.driver_name,
-            num_passengers=b.num_passengers
+            pickup_address=row.pickup_address,
+            drop_address=row.drop_address,
+            vehicle_name=row.vehicle_name,
+            vehicle_type=(row.vehicle_type or "").lower() if row.vehicle_type else None,
+            ride_type=ride_type_value,
+            ride_type_label=ride_type_labels.get(ride_type_value),
+            estimated_price=float(row.estimated_price),
+            status=status_value,
+            status_label=status_labels.get(status_value, row.status),
+            created_at=row.created_at,
+            scheduled_time=row.scheduled_time,
+            driver_name=row.driver_name,
+            num_passengers=row.num_passengers,
         )
 
-    stats = get_provider_dashboard_metrics(db, agg_profile)
-    stats["pending_requests"] = stats["new_requests"]
-    stats["today_completed_trips"] = len(
-        [b for b in completed_requests if b.completed_at and b.completed_at.date() == datetime.utcnow().date()]
-    )
+    def pick(status_values: set[str], limit: Optional[int] = None, sort_by_updated: bool = False) -> List[Any]:
+        filtered = [r for r in rows if normalized_status(r) in status_values]
+        if sort_by_updated:
+            filtered = sorted(filtered, key=lambda r: r.updated_at or r.created_at, reverse=True)
+        if limit is not None:
+            return filtered[:limit]
+        return filtered
+
+    new_requests_rows = pick({"pending_provider_response"})
+    accepted_rows = pick({"provider_accepted"})
+    active_rows = pick({"driver_assigned", "driver_accepted", "on_trip"})
+    completed_rows = pick({"completed"}, limit=50, sort_by_updated=True)
+    cancelled_rows = pick({"cancelled", "provider_rejected"}, limit=50, sort_by_updated=True)
+
+    today = datetime.utcnow().date()
+    stats = {
+        "new_requests": len(new_requests_rows),
+        "accepted": len(accepted_rows),
+        "active_trips": len(pick({"on_trip"})),
+        "completed": len(pick({"completed"})),
+        "cancelled": len(cancelled_rows),
+        "assigned": len(pick({"driver_assigned", "driver_accepted"})),
+        "pending_requests": len(new_requests_rows),
+        "today_completed_trips": len(
+            [r for r in completed_rows if r.completed_at and r.completed_at.date() == today]
+        ),
+    }
 
     return AggregatorDashboardData(
         stats=stats,
-        new_requests=[transform(b) for b in new_requests],
-        accepted_requests=[transform(b) for b in accepted_requests],
-        active_trips=[transform(b) for b in active_trips],
-        completed_requests=[transform(b) for b in completed_requests],
-        cancelled_requests=[transform(b) for b in cancelled_requests],
-        pending_requests=[transform(b) for b in new_requests],
+        new_requests=[transform(r) for r in new_requests_rows],
+        accepted_requests=[transform(r) for r in accepted_rows],
+        active_trips=[transform(r) for r in active_rows],
+        completed_requests=[transform(r) for r in completed_rows],
+        cancelled_requests=[transform(r) for r in cancelled_rows],
+        pending_requests=[transform(r) for r in new_requests_rows],
     )
 
 @router.post("/dashboard/assign-driver")

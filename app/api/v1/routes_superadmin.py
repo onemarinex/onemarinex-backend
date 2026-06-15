@@ -22,7 +22,7 @@ from app.db.models.aggregator_profile import AggregatorProfile
 from app.db.models.incident import Incident
 from app.db.models.port_service_request import PortServiceRequest
 from app.db.models.contact_message import ContactMessage
-from app.db.models.driver_magic_link import DriverMagicLink
+from app.db.models.driver_magic_link import DriverMagicLink, DriverMagicLinkReachEvent
 from app.api.v1.routes_auth import get_current_user
 
 router = APIRouter()
@@ -388,19 +388,82 @@ def track_cab_bookings(
     current_user: User = Depends(get_current_user),
 ):
     verify_superadmin(current_user)
-    from sqlalchemy.orm import joinedload
-    from app.services.booking_service import serialize_booking
+    status_labels = {
+        "pending_provider_response": "Pending Provider Response",
+        "provider_accepted": "Provider Accepted",
+        "provider_rejected": "Provider Rejected",
+        "driver_assigned": "Driver Assigned",
+        "driver_accepted": "Driver Accepted",
+        "on_trip": "On Trip",
+        "completed": "Completed",
+        "cancelled": "Cancelled",
+        "pending": "Pending",
+        "confirmed": "Confirmed",
+        "arrived": "Arrived",
+        "in_progress": "In Progress",
+    }
+    ride_type_labels = {
+        "flexible_ride": "Flexible Ride",
+        "guaranteed_coordinated_ride": "Guaranteed Coordinated Ride",
+    }
 
-    query = db.query(CabBooking).options(
-        joinedload(CabBooking.crew),
-        joinedload(CabBooking.assigned_driver),
-        joinedload(CabBooking.provider),
+    query = db.query(
+        CabBooking.id,
+        CabBooking.booking_id,
+        cast(CabBooking.ride_type, String).label("ride_type"),
+        CabBooking.port,
+        CabBooking.pickup_address,
+        CabBooking.drop_address,
+        cast(CabBooking.vehicle_type, String).label("vehicle_type"),
+        CabBooking.vehicle_name,
+        CabBooking.vehicle_category,
+        CabBooking.estimated_price,
+        CabBooking.num_passengers,
+        cast(CabBooking.status, String).label("status"),
+        CabBooking.provider_id,
+        CabBooking.aggregator_id,
+        CabBooking.aggregator_name,
+        CabBooking.provider_response_status,
+        CabBooking.provider_response_at,
+        CabBooking.assigned_driver_id,
+        CabBooking.driver_id,
+        CabBooking.driver_name,
+        CabBooking.driver_phone,
+        CabBooking.driver_plate,
+        CabBooking.driver_assigned_at,
+        CabBooking.driver_accepted_at,
+        CabBooking.trip_started_at,
+        CabBooking.started_at,
+        CabBooking.trip_completed_at,
+        CabBooking.completed_at,
+        CabBooking.otp,
+        CabBooking.helpline_number,
+        CabBooking.agent_number,
+        CabBooking.scheduled_time,
+        CabBooking.created_at,
+        CabBooking.updated_at,
+        CrewProfile.id.label("crew_id"),
+        CrewProfile.full_name.label("crew_name"),
+        CrewProfile.hpid.label("crew_hpid"),
+        CrewProfile.vessel.label("crew_vessel"),
+        AggregatorProfile.company_name.label("provider_company_name"),
+        AggregatorProfile.provider_type.label("provider_type"),
+        Driver.name.label("assigned_driver_name"),
+        Driver.phone.label("assigned_driver_phone"),
+        Driver.vehicle_number.label("assigned_driver_vehicle_number"),
     )
+    query = query.outerjoin(CrewProfile, CabBooking.crew_id == CrewProfile.id)
+    query = query.outerjoin(
+        AggregatorProfile,
+        or_(
+            CabBooking.provider_id == AggregatorProfile.id,
+            CabBooking.aggregator_id == AggregatorProfile.id,
+        ),
+    )
+    query = query.outerjoin(Driver, CabBooking.assigned_driver_id == Driver.id)
+
     if status:
-        try:
-            query = query.filter(CabBooking.status == BookingStatus(status))
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+        query = query.filter(cast(CabBooking.status, String) == status.lower())
     if port_id:
         port_obj = db.query(Port).filter(Port.id == port_id).first()
         if port_obj:
@@ -413,20 +476,60 @@ def track_cab_bookings(
             )
         )
     if provider_type:
-        query = query.join(
-            AggregatorProfile,
-            or_(
-                CabBooking.provider_id == AggregatorProfile.id,
-                CabBooking.aggregator_id == AggregatorProfile.id,
-            ),
-        ).filter(AggregatorProfile.provider_type == provider_type)
+        query = query.filter(AggregatorProfile.provider_type == provider_type)
     if date_from:
         query = query.filter(CabBooking.created_at >= date_from)
     if date_to:
         query = query.filter(CabBooking.created_at <= date_to)
 
     bookings = query.order_by(CabBooking.created_at.desc()).all()
-    return [serialize_booking(booking) for booking in bookings]
+    response: List[Dict[str, Any]] = []
+    for booking in bookings:
+        status_value = (booking.status or "").lower() if booking.status else None
+        ride_type_value = (booking.ride_type or "").lower() if booking.ride_type else None
+        response.append(
+            {
+                "id": booking.id,
+                "booking_id": booking.booking_id,
+                "ride_type": ride_type_value,
+                "ride_type_label": ride_type_labels.get(ride_type_value),
+                "port": booking.port,
+                "crew": {
+                    "id": booking.crew_id,
+                    "name": booking.crew_name,
+                    "hp_id": booking.crew_hpid,
+                    "vessel": booking.crew_vessel,
+                },
+                "pickup_address": booking.pickup_address,
+                "drop_address": booking.drop_address,
+                "vehicle_type": (booking.vehicle_type or "").lower() if booking.vehicle_type else None,
+                "vehicle_name": booking.vehicle_name,
+                "vehicle_category": booking.vehicle_category,
+                "estimated_price": float(booking.estimated_price),
+                "num_passengers": booking.num_passengers,
+                "status": status_value,
+                "status_label": status_labels.get(status_value, booking.status),
+                "provider_id": booking.provider_id or booking.aggregator_id,
+                "provider_name": booking.provider_company_name or booking.aggregator_name,
+                "provider_type": booking.provider_type,
+                "provider_response_status": booking.provider_response_status,
+                "provider_response_at": booking.provider_response_at,
+                "assigned_driver_id": booking.assigned_driver_id or booking.driver_id,
+                "driver_name": booking.driver_name or booking.assigned_driver_name,
+                "driver_phone": booking.driver_phone or booking.assigned_driver_phone,
+                "driver_plate": booking.driver_plate or booking.assigned_driver_vehicle_number,
+                "driver_assigned_at": booking.driver_assigned_at,
+                "driver_accepted_at": booking.driver_accepted_at,
+                "trip_started_at": booking.trip_started_at or booking.started_at,
+                "trip_completed_at": booking.trip_completed_at or booking.completed_at,
+                "otp": booking.otp,
+                "helpline_number": booking.helpline_number or booking.agent_number,
+                "scheduled_time": booking.scheduled_time,
+                "created_at": booking.created_at,
+                "updated_at": booking.updated_at,
+            }
+        )
+    return response
 
 
 @router.get("/tracking/magic-links")
@@ -436,27 +539,34 @@ def track_magic_links(
     current_user: User = Depends(get_current_user),
 ):
     verify_superadmin(current_user)
-    from sqlalchemy.orm import joinedload
-
-    query = db.query(DriverMagicLink).options(
-        joinedload(DriverMagicLink.booking).joinedload(CabBooking.crew),
-        joinedload(DriverMagicLink.booking).joinedload(CabBooking.assigned_driver),
-        joinedload(DriverMagicLink.booking).joinedload(CabBooking.aggregator),
-        joinedload(DriverMagicLink.reach_events),
+    link_query = (
+        db.query(
+            DriverMagicLink.id,
+            DriverMagicLink.token,
+            DriverMagicLink.itinerary_stops,
+            DriverMagicLink.created_at,
+            DriverMagicLink.updated_at,
+            CabBooking.id.label("cab_booking_id"),
+            CabBooking.booking_id,
+            CabBooking.aggregator_name,
+            CabBooking.driver_name,
+            CabBooking.pickup_address,
+            CabBooking.drop_address,
+            CrewProfile.full_name.label("crew_name"),
+            CrewProfile.hpid.label("crew_hpid"),
+        )
+        .join(CabBooking, DriverMagicLink.booking_id == CabBooking.id)
+        .outerjoin(CrewProfile, CabBooking.crew_id == CrewProfile.id)
+        .outerjoin(Driver, CabBooking.assigned_driver_id == Driver.id)
+        .outerjoin(
+            AggregatorProfile,
+            or_(CabBooking.provider_id == AggregatorProfile.id, CabBooking.aggregator_id == AggregatorProfile.id),
+        )
     )
 
     if search:
         pattern = f"%{search}%"
-        query = query.join(CabBooking, DriverMagicLink.booking_id == CabBooking.id).join(
-            CrewProfile,
-            CabBooking.crew_id == CrewProfile.id,
-        ).outerjoin(
-            Driver,
-            CabBooking.assigned_driver_id == Driver.id,
-        ).outerjoin(
-            AggregatorProfile,
-            or_(CabBooking.provider_id == AggregatorProfile.id, CabBooking.aggregator_id == AggregatorProfile.id),
-        ).filter(
+        link_query = link_query.filter(
             or_(
                 CrewProfile.full_name.ilike(pattern),
                 Driver.name.ilike(pattern),
@@ -464,47 +574,69 @@ def track_magic_links(
             )
         )
 
-    links = query.order_by(DriverMagicLink.updated_at.desc(), DriverMagicLink.id.desc()).all()
+    link_rows = link_query.order_by(DriverMagicLink.updated_at.desc(), DriverMagicLink.id.desc()).all()
+    link_ids = [row.id for row in link_rows]
+
+    events_by_link: Dict[int, List[Dict[str, Any]]] = {}
+    reached_stop_ids: Dict[int, set] = {}
+    latest_event_by_link: Dict[int, Any] = {}
+    if link_ids:
+        event_rows = (
+            db.query(
+                DriverMagicLinkReachEvent.id,
+                DriverMagicLinkReachEvent.magic_link_id,
+                DriverMagicLinkReachEvent.stop_id,
+                DriverMagicLinkReachEvent.stop_name,
+                DriverMagicLinkReachEvent.latitude,
+                DriverMagicLinkReachEvent.longitude,
+                DriverMagicLinkReachEvent.notes,
+                DriverMagicLinkReachEvent.reached_at,
+            )
+            .filter(DriverMagicLinkReachEvent.magic_link_id.in_(link_ids))
+            .order_by(DriverMagicLinkReachEvent.reached_at.desc(), DriverMagicLinkReachEvent.id.desc())
+            .all()
+        )
+        for event in event_rows:
+            events_by_link.setdefault(event.magic_link_id, []).append(
+                {
+                    "id": event.id,
+                    "stop_id": event.stop_id,
+                    "stop_name": event.stop_name,
+                    "latitude": event.latitude,
+                    "longitude": event.longitude,
+                    "notes": event.notes,
+                    "reached_at": event.reached_at,
+                }
+            )
+            reached_stop_ids.setdefault(event.magic_link_id, set()).add(event.stop_id)
+            if event.magic_link_id not in latest_event_by_link:
+                latest_event_by_link[event.magic_link_id] = event
+
     response: List[Dict[str, Any]] = []
-    for link in links:
-        booking = link.booking
-        if not booking:
-            continue
-        reached_count = len({event.stop_id for event in (link.reach_events or [])})
-        itinerary_count = len(link.itinerary_stops or [])
-        latest_event = (link.reach_events or [None])[0]
+    for row in link_rows:
+        itinerary = row.itinerary_stops or []
+        latest_event = latest_event_by_link.get(row.id)
         response.append(
             {
-                "id": link.id,
-                "token": link.token,
-                "magic_path": f"/magic-link/{link.token}",
-                "booking_id": booking.booking_id,
-                "aggregator_name": booking.aggregator_name,
-                "driver_name": booking.driver_name,
-                "crew_name": booking.crew.full_name if booking.crew else None,
-                "crew_hpid": booking.crew.hpid if booking.crew else None,
-                "pickup_address": booking.pickup_address,
-                "drop_address": booking.drop_address,
-                "reached_count": reached_count,
-                "itinerary_count": itinerary_count,
+                "id": row.id,
+                "token": row.token,
+                "magic_path": f"/magic-link/{row.token}",
+                "booking_id": row.booking_id,
+                "aggregator_name": row.aggregator_name,
+                "driver_name": row.driver_name,
+                "crew_name": row.crew_name,
+                "crew_hpid": row.crew_hpid,
+                "pickup_address": row.pickup_address,
+                "drop_address": row.drop_address,
+                "reached_count": len(reached_stop_ids.get(row.id, set())),
+                "itinerary_count": len(itinerary),
                 "latest_reached_at": latest_event.reached_at if latest_event else None,
                 "latest_reached_latitude": latest_event.latitude if latest_event else None,
                 "latest_reached_longitude": latest_event.longitude if latest_event else None,
-                "created_at": link.created_at,
-                "updated_at": link.updated_at,
-                "itinerary": link.itinerary_stops or [],
-                "events": [
-                    {
-                        "id": event.id,
-                        "stop_id": event.stop_id,
-                        "stop_name": event.stop_name,
-                        "latitude": event.latitude,
-                        "longitude": event.longitude,
-                        "notes": event.notes,
-                        "reached_at": event.reached_at,
-                    }
-                    for event in (link.reach_events or [])
-                ],
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+                "itinerary": itinerary,
+                "events": events_by_link.get(row.id, []),
             }
         )
     return response
