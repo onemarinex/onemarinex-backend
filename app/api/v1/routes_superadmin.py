@@ -522,12 +522,10 @@ def track_aggregators(
 ):
     try:
         verify_superadmin(current_user)
-        from sqlalchemy.orm import joinedload
-
-        query = db.query(AggregatorProfile).options(
-            joinedload(AggregatorProfile.user),
-            joinedload(AggregatorProfile.operating_port),
-            joinedload(AggregatorProfile.drivers),
+        query = (
+            db.query(AggregatorProfile, User, Port)
+            .outerjoin(User, AggregatorProfile.user_id == User.id)
+            .outerjoin(Port, AggregatorProfile.operating_port_id == Port.id)
         )
         if port_id:
             query = query.filter(AggregatorProfile.operating_port_id == port_id)
@@ -546,7 +544,7 @@ def track_aggregators(
             )
 
         providers = query.order_by(AggregatorProfile.company_name.asc()).all()
-        provider_ids = [provider.id for provider in providers]
+        provider_ids = [provider.id for provider, _, _ in providers]
         active_statuses = [
             BookingStatus.PENDING_PROVIDER_RESPONSE,
             BookingStatus.PROVIDER_ACCEPTED,
@@ -580,47 +578,74 @@ def track_aggregators(
                 .all()
             )
 
-        return [
-            {
-                "id": provider.id,
-                "company_name": provider.company_name,
-                "provider_name": provider.company_name,
-                "provider_type": provider.provider_type or "aggregator",
-                "contact_person": provider.contact_person,
-                "operating_port_id": provider.operating_port_id,
-                "operating_port": (
-                    {
-                        "id": provider.operating_port.id,
-                        "name": provider.operating_port.name,
-                        "code": provider.operating_port.code,
-                    }
-                    if provider.operating_port
-                    else None
-                ),
-                "gst_number": provider.gst_number,
-                "status": provider.status,
-                "profile_image": provider.profile_image,
-                "aggregator_identifier": provider.aggregator_identifier,
-                "fleet": provider.fleet,
-                "documents": provider.documents,
-                "user": (
-                    {
-                        "id": provider.user.id,
-                        "email": provider.user.email,
-                        "name": provider.user.name,
-                        "mobile_number": provider.user.mobile_number,
-                        "role": provider.user.role,
-                    }
-                    if provider.user
-                    else None
-                ),
-                "total_drivers": len(provider.drivers or []),
-                "available_drivers": len([driver for driver in provider.drivers or [] if driver.status == "Available"]),
-                "active_bookings": active_booking_counts.get(provider.id, 0),
-                "completed_trips": completed_trip_counts.get(provider.id, 0),
-            }
-            for provider in providers
-        ]
+        driver_counts: Dict[int, Dict[str, int]] = {}
+        if provider_ids:
+            total_driver_rows = (
+                db.query(Driver.aggregator_id, func.count(Driver.id))
+                .filter(Driver.aggregator_id.in_(provider_ids))
+                .group_by(Driver.aggregator_id)
+                .all()
+            )
+            available_driver_rows = (
+                db.query(Driver.aggregator_id, func.count(Driver.id))
+                .filter(
+                    Driver.aggregator_id.in_(provider_ids),
+                    Driver.status == "Available",
+                )
+                .group_by(Driver.aggregator_id)
+                .all()
+            )
+            for aggregator_id, total_count in total_driver_rows:
+                driver_counts[aggregator_id] = {
+                    "total_drivers": int(total_count or 0),
+                    "available_drivers": 0,
+                }
+            for aggregator_id, available_count in available_driver_rows:
+                driver_counts.setdefault(
+                    aggregator_id,
+                    {"total_drivers": 0, "available_drivers": 0},
+                )["available_drivers"] = int(available_count or 0)
+
+        response: List[Dict[str, Any]] = []
+        for provider, user, port in providers:
+            counts = driver_counts.get(provider.id, {"total_drivers": 0, "available_drivers": 0})
+            response.append(
+                {
+                    "id": provider.id,
+                    "company_name": provider.company_name,
+                    "provider_name": provider.company_name,
+                    "provider_type": provider.provider_type or "aggregator",
+                    "contact_person": provider.contact_person,
+                    "operating_port_id": provider.operating_port_id,
+                    "operating_port": (
+                        {"id": port.id, "name": port.name, "code": port.code}
+                        if port
+                        else None
+                    ),
+                    "gst_number": provider.gst_number,
+                    "status": provider.status,
+                    "profile_image": provider.profile_image,
+                    "aggregator_identifier": provider.aggregator_identifier,
+                    "fleet": provider.fleet,
+                    "documents": provider.documents,
+                    "user": (
+                        {
+                            "id": user.id,
+                            "email": user.email,
+                            "name": user.name,
+                            "mobile_number": user.mobile_number,
+                            "role": user.role,
+                        }
+                        if user
+                        else None
+                    ),
+                    "total_drivers": counts["total_drivers"],
+                    "available_drivers": counts["available_drivers"],
+                    "active_bookings": active_booking_counts.get(provider.id, 0),
+                    "completed_trips": completed_trip_counts.get(provider.id, 0),
+                }
+            )
+        return response
     except HTTPException:
         raise
     except Exception as exc:
