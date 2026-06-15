@@ -648,6 +648,11 @@ def track_aggregators(
         return response
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load aggregator tracking data: {e}",
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to load aggregator tracking data: {exc}")
         

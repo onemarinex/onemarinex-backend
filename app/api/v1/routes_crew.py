@@ -17,6 +17,7 @@ from app.db.models.port import Port
 from app.db.models.pricing_controls import PricingRideType, PricingRule, PricingVehicleCategory
 from app.api.v1.routes_auth import get_current_user
 from app.services.crew_service import generate_hpid
+from app.services.booking_service import vehicle_category_matches
 from pydantic import BaseModel
 
 router = APIRouter()
