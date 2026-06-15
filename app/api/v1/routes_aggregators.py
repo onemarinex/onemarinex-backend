@@ -58,6 +58,7 @@ class AggregatorDashboardData(BaseModel):
 class DriverAssignIn(BaseModel):
     booking_id: str
     driver_id: int
+    itinerary_stops: Optional[List[Dict[str, Any]]] = None
 
 class AggregatorProfileOut(BaseModel):
     id: int
@@ -320,10 +321,24 @@ def assign_driver(
     current_user: User = Depends(get_current_user)
 ):
     from app.services.booking_service import assign_driver_to_booking, get_booking_by_identifier, serialize_booking
+    from app.services.magic_link_service import create_or_refresh_magic_link
 
     booking = get_booking_by_identifier(db, body.booking_id)
     updated = assign_driver_to_booking(db, booking, current_user, body.driver_id)
-    return {"message": "Driver assigned successfully", "booking": serialize_booking(updated)}
+    magic_link = create_or_refresh_magic_link(
+        db,
+        booking=updated,
+        aggregator_id=current_user.aggregator_profile.id if current_user.aggregator_profile else None,
+        itinerary_stops=body.itinerary_stops,
+    )
+    return {
+        "message": "Driver assigned successfully",
+        "booking": serialize_booking(updated),
+        "magic_link": {
+            "token": magic_link.token,
+            "path": f"/magic-link/{magic_link.token}",
+        },
+    }
 
 
 @router.post("/dashboard/accept-ride")

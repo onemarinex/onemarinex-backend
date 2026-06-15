@@ -1,8 +1,8 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_current_driver
@@ -23,6 +23,12 @@ from app.services.booking_service import (
     serialize_booking,
     start_trip,
 )
+from app.services.magic_link_service import (
+    create_or_refresh_magic_link,
+    get_magic_link_by_token,
+    mark_stop_reached,
+    serialize_magic_link_public_payload,
+)
 from app.services.timeline_service import get_booking_timeline
 
 router = APIRouter()
@@ -30,11 +36,47 @@ router = APIRouter()
 
 class AssignDriverIn(BaseModel):
     driver_id: int
+    itinerary_stops: Optional[List[Dict[str, Any]]] = None
+
+
+class MarkReachedIn(BaseModel):
+    latitude: float
+    longitude: float
+    notes: Optional[str] = Field(default=None, max_length=500)
 
 
 class BookingListOut(BaseModel):
     bookings: List[dict]
     total: int
+
+
+@router.get("/magic/{token}")
+def get_magic_link_payload(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    magic_link = get_magic_link_by_token(db, token)
+    return serialize_magic_link_public_payload(magic_link)
+
+
+@router.post("/magic/{token}/stops/{stop_id}/reached")
+def mark_magic_link_stop_reached(
+    token: str,
+    stop_id: str,
+    body: MarkReachedIn,
+    db: Session = Depends(get_db),
+):
+    magic_link = get_magic_link_by_token(db, token)
+    mark_stop_reached(
+        db,
+        magic_link=magic_link,
+        stop_id=stop_id,
+        latitude=body.latitude,
+        longitude=body.longitude,
+        notes=body.notes,
+    )
+    refreshed = get_magic_link_by_token(db, token)
+    return serialize_magic_link_public_payload(refreshed)
 
 
 @router.get("")
@@ -191,7 +233,19 @@ def assign_driver_endpoint(
 ):
     booking = get_booking_by_identifier(db, booking_id)
     updated = assign_driver_to_booking(db, booking, current_user, body.driver_id)
-    return serialize_booking(updated)
+    magic_link = create_or_refresh_magic_link(
+        db,
+        booking=updated,
+        aggregator_id=current_user.aggregator_profile.id if current_user.aggregator_profile else None,
+        itinerary_stops=body.itinerary_stops,
+    )
+    return {
+        "booking": serialize_booking(updated),
+        "magic_link": {
+            "token": magic_link.token,
+            "path": f"/magic-link/{magic_link.token}",
+        },
+    }
 
 
 @router.post("/{booking_id}/driver-accept")

@@ -20,6 +20,7 @@ from app.db.models.aggregator_profile import AggregatorProfile
 from app.db.models.incident import Incident
 from app.db.models.port_service_request import PortServiceRequest
 from app.db.models.contact_message import ContactMessage
+from app.db.models.driver_magic_link import DriverMagicLink
 from app.api.v1.routes_auth import get_current_user
 
 router = APIRouter()
@@ -423,6 +424,87 @@ def track_cab_bookings(
 
     bookings = query.order_by(CabBooking.created_at.desc()).all()
     return [serialize_booking(booking) for booking in bookings]
+
+
+@router.get("/tracking/magic-links")
+def track_magic_links(
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    verify_superadmin(current_user)
+    from sqlalchemy.orm import joinedload
+
+    query = db.query(DriverMagicLink).options(
+        joinedload(DriverMagicLink.booking).joinedload(CabBooking.crew),
+        joinedload(DriverMagicLink.booking).joinedload(CabBooking.assigned_driver),
+        joinedload(DriverMagicLink.booking).joinedload(CabBooking.aggregator),
+        joinedload(DriverMagicLink.reach_events),
+    )
+
+    if search:
+        pattern = f"%{search}%"
+        query = query.join(CabBooking, DriverMagicLink.booking_id == CabBooking.id).join(
+            CrewProfile,
+            CabBooking.crew_id == CrewProfile.id,
+        ).outerjoin(
+            Driver,
+            CabBooking.assigned_driver_id == Driver.id,
+        ).outerjoin(
+            AggregatorProfile,
+            or_(CabBooking.provider_id == AggregatorProfile.id, CabBooking.aggregator_id == AggregatorProfile.id),
+        ).filter(
+            or_(
+                CrewProfile.full_name.ilike(pattern),
+                Driver.name.ilike(pattern),
+                AggregatorProfile.company_name.ilike(pattern),
+            )
+        )
+
+    links = query.order_by(DriverMagicLink.updated_at.desc(), DriverMagicLink.id.desc()).all()
+    response: List[Dict[str, Any]] = []
+    for link in links:
+        booking = link.booking
+        if not booking:
+            continue
+        reached_count = len({event.stop_id for event in (link.reach_events or [])})
+        itinerary_count = len(link.itinerary_stops or [])
+        latest_event = (link.reach_events or [None])[0]
+        response.append(
+            {
+                "id": link.id,
+                "token": link.token,
+                "magic_path": f"/magic-link/{link.token}",
+                "booking_id": booking.booking_id,
+                "aggregator_name": booking.aggregator_name,
+                "driver_name": booking.driver_name,
+                "crew_name": booking.crew.full_name if booking.crew else None,
+                "crew_hpid": booking.crew.hpid if booking.crew else None,
+                "pickup_address": booking.pickup_address,
+                "drop_address": booking.drop_address,
+                "reached_count": reached_count,
+                "itinerary_count": itinerary_count,
+                "latest_reached_at": latest_event.reached_at if latest_event else None,
+                "latest_reached_latitude": latest_event.latitude if latest_event else None,
+                "latest_reached_longitude": latest_event.longitude if latest_event else None,
+                "created_at": link.created_at,
+                "updated_at": link.updated_at,
+                "itinerary": link.itinerary_stops or [],
+                "events": [
+                    {
+                        "id": event.id,
+                        "stop_id": event.stop_id,
+                        "stop_name": event.stop_name,
+                        "latitude": event.latitude,
+                        "longitude": event.longitude,
+                        "notes": event.notes,
+                        "reached_at": event.reached_at,
+                    }
+                    for event in (link.reach_events or [])
+                ],
+            }
+        )
+    return response
 
 @router.get("/tracking/drivers")
 def track_drivers(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
