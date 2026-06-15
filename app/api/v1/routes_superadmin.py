@@ -520,105 +520,111 @@ def track_aggregators(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    verify_superadmin(current_user)
-    from sqlalchemy.orm import joinedload
-    query = db.query(AggregatorProfile).options(
-        joinedload(AggregatorProfile.user),
-        joinedload(AggregatorProfile.operating_port),
-        joinedload(AggregatorProfile.drivers),
-    )
-    if port_id:
-        query = query.filter(AggregatorProfile.operating_port_id == port_id)
-    if provider_type:
-        query = query.filter(AggregatorProfile.provider_type == provider_type)
-    if status_filter:
-        query = query.filter(AggregatorProfile.status == status_filter)
-    if search:
-        pattern = f"%{search}%"
-        query = query.filter(
-            or_(
-                AggregatorProfile.company_name.ilike(pattern),
-                AggregatorProfile.contact_person.ilike(pattern),
-                AggregatorProfile.aggregator_identifier.ilike(pattern),
-            )
-        )
+    try:
+        verify_superadmin(current_user)
+        from sqlalchemy.orm import joinedload
 
-    providers = query.order_by(AggregatorProfile.company_name.asc()).all()
-    provider_ids = [provider.id for provider in providers]
-    active_statuses = [
-        BookingStatus.PENDING_PROVIDER_RESPONSE,
-        BookingStatus.PROVIDER_ACCEPTED,
-        BookingStatus.DRIVER_ASSIGNED,
-        BookingStatus.DRIVER_ACCEPTED,
-        BookingStatus.ON_TRIP,
-        BookingStatus.PENDING,
-        BookingStatus.CONFIRMED,
-        BookingStatus.ARRIVED,
-        BookingStatus.IN_PROGRESS,
-    ]
-    active_booking_counts: Dict[int, int] = {}
-    completed_trip_counts: Dict[int, int] = {}
-    if provider_ids:
-        active_booking_counts = dict(
-            db.query(CabBooking.aggregator_id, func.count(CabBooking.id))
-            .filter(
-                CabBooking.aggregator_id.in_(provider_ids),
-                CabBooking.status.in_(active_statuses),
-            )
-            .group_by(CabBooking.aggregator_id)
-            .all()
+        query = db.query(AggregatorProfile).options(
+            joinedload(AggregatorProfile.user),
+            joinedload(AggregatorProfile.operating_port),
+            joinedload(AggregatorProfile.drivers),
         )
-        completed_trip_counts = dict(
-            db.query(CabBooking.aggregator_id, func.count(CabBooking.id))
-            .filter(
-                CabBooking.aggregator_id.in_(provider_ids),
-                CabBooking.status == BookingStatus.COMPLETED,
+        if port_id:
+            query = query.filter(AggregatorProfile.operating_port_id == port_id)
+        if provider_type:
+            query = query.filter(AggregatorProfile.provider_type == provider_type)
+        if status_filter:
+            query = query.filter(AggregatorProfile.status == status_filter)
+        if search:
+            pattern = f"%{search}%"
+            query = query.filter(
+                or_(
+                    AggregatorProfile.company_name.ilike(pattern),
+                    AggregatorProfile.contact_person.ilike(pattern),
+                    AggregatorProfile.aggregator_identifier.ilike(pattern),
+                )
             )
-            .group_by(CabBooking.aggregator_id)
-            .all()
-        )
 
-    return [
-        {
-            "id": provider.id,
-            "company_name": provider.company_name,
-            "provider_name": provider.company_name,
-            "provider_type": provider.provider_type or "aggregator",
-            "contact_person": provider.contact_person,
-            "operating_port_id": provider.operating_port_id,
-            "operating_port": (
-                {
-                    "id": provider.operating_port.id,
-                    "name": provider.operating_port.name,
-                    "code": provider.operating_port.code,
-                }
-                if provider.operating_port
-                else None
-            ),
-            "gst_number": provider.gst_number,
-            "status": provider.status,
-            "profile_image": provider.profile_image,
-            "aggregator_identifier": provider.aggregator_identifier,
-            "fleet": provider.fleet,
-            "documents": provider.documents,
-            "user": (
-                {
-                    "id": provider.user.id,
-                    "email": provider.user.email,
-                    "name": provider.user.name,
-                    "mobile_number": provider.user.mobile_number,
-                    "role": provider.user.role,
-                }
-                if provider.user
-                else None
-            ),
-            "total_drivers": len(provider.drivers or []),
-            "available_drivers": len([driver for driver in provider.drivers or [] if driver.status == "Available"]),
-            "active_bookings": active_booking_counts.get(provider.id, 0),
-            "completed_trips": completed_trip_counts.get(provider.id, 0),
-        }
-        for provider in providers
-    ]
+        providers = query.order_by(AggregatorProfile.company_name.asc()).all()
+        provider_ids = [provider.id for provider in providers]
+        active_statuses = [
+            BookingStatus.PENDING_PROVIDER_RESPONSE,
+            BookingStatus.PROVIDER_ACCEPTED,
+            BookingStatus.DRIVER_ASSIGNED,
+            BookingStatus.DRIVER_ACCEPTED,
+            BookingStatus.ON_TRIP,
+            BookingStatus.PENDING,
+            BookingStatus.CONFIRMED,
+            BookingStatus.ARRIVED,
+            BookingStatus.IN_PROGRESS,
+        ]
+        active_booking_counts: Dict[int, int] = {}
+        completed_trip_counts: Dict[int, int] = {}
+        if provider_ids:
+            active_booking_counts = dict(
+                db.query(CabBooking.aggregator_id, func.count(CabBooking.id))
+                .filter(
+                    CabBooking.aggregator_id.in_(provider_ids),
+                    CabBooking.status.in_(active_statuses),
+                )
+                .group_by(CabBooking.aggregator_id)
+                .all()
+            )
+            completed_trip_counts = dict(
+                db.query(CabBooking.aggregator_id, func.count(CabBooking.id))
+                .filter(
+                    CabBooking.aggregator_id.in_(provider_ids),
+                    CabBooking.status == BookingStatus.COMPLETED,
+                )
+                .group_by(CabBooking.aggregator_id)
+                .all()
+            )
+
+        return [
+            {
+                "id": provider.id,
+                "company_name": provider.company_name,
+                "provider_name": provider.company_name,
+                "provider_type": provider.provider_type or "aggregator",
+                "contact_person": provider.contact_person,
+                "operating_port_id": provider.operating_port_id,
+                "operating_port": (
+                    {
+                        "id": provider.operating_port.id,
+                        "name": provider.operating_port.name,
+                        "code": provider.operating_port.code,
+                    }
+                    if provider.operating_port
+                    else None
+                ),
+                "gst_number": provider.gst_number,
+                "status": provider.status,
+                "profile_image": provider.profile_image,
+                "aggregator_identifier": provider.aggregator_identifier,
+                "fleet": provider.fleet,
+                "documents": provider.documents,
+                "user": (
+                    {
+                        "id": provider.user.id,
+                        "email": provider.user.email,
+                        "name": provider.user.name,
+                        "mobile_number": provider.user.mobile_number,
+                        "role": provider.user.role,
+                    }
+                    if provider.user
+                    else None
+                ),
+                "total_drivers": len(provider.drivers or []),
+                "available_drivers": len([driver for driver in provider.drivers or [] if driver.status == "Available"]),
+                "active_bookings": active_booking_counts.get(provider.id, 0),
+                "completed_trips": completed_trip_counts.get(provider.id, 0),
+            }
+            for provider in providers
+        ]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load aggregator tracking data: {exc}")
         
     # return db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port)).all()
 
