@@ -4,11 +4,13 @@ from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import String, cast, func
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_current_driver
 from app.api.v1.routes_auth import get_current_user
-from app.db.models.cab_booking import CabBooking
+from app.db.models.booking_timeline import BookingTimeline, TimelineEventType
+from app.db.models.cab_booking import CabBooking, BookingStatus
 from app.db.models.driver import Driver
 from app.db.models.user import User
 from app.db.session import get_db
@@ -24,13 +26,16 @@ from app.services.booking_service import (
     reject_booking,
     serialize_booking,
     start_trip,
+    vehicle_category_matches,
 )
 from app.services.magic_link_service import (
+    add_stop_to_magic_link,
     create_or_refresh_magic_link,
     get_magic_link_by_token,
     mark_stop_reached,
     serialize_magic_link_public_payload,
 )
+from app.services.timeline_service import create_timeline_event
 from app.services.timeline_service import get_booking_timeline
 
 router = APIRouter()
@@ -47,6 +52,33 @@ def _resolve_booking_db_id(db: Session, booking_identifier: str) -> int:
     return int(row.id)
 
 
+def _get_booking_action_row(db: Session, booking_identifier: str):
+    query = db.query(
+        CabBooking.id,
+        cast(CabBooking.status, String).label("status"),
+        CabBooking.provider_id,
+        CabBooking.aggregator_id,
+        CabBooking.driver_id,
+        CabBooking.assigned_driver_id,
+        CabBooking.driver_name,
+        cast(CabBooking.vehicle_type, String).label("vehicle_type"),
+        CabBooking.vehicle_name,
+        CabBooking.pickup_address,
+        CabBooking.pickup_lat,
+        CabBooking.pickup_lng,
+        CabBooking.drop_address,
+        CabBooking.drop_lat,
+        CabBooking.drop_lng,
+    )
+    if booking_identifier.isdigit():
+        row = query.filter(CabBooking.id == int(booking_identifier)).first()
+    else:
+        row = query.filter(CabBooking.booking_id == booking_identifier).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return row
+
+
 class AssignDriverIn(BaseModel):
     driver_id: int
     itinerary_stops: Optional[List[Dict[str, Any]]] = None
@@ -56,6 +88,18 @@ class MarkReachedIn(BaseModel):
     latitude: float
     longitude: float
     notes: Optional[str] = Field(default=None, max_length=500)
+
+
+class VerifyMagicOtpIn(BaseModel):
+    otp: str = Field(min_length=4, max_length=10)
+
+
+class AddMagicStopIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    address: Optional[str] = Field(default=None, max_length=255)
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    type: Optional[str] = Field(default="facility", max_length=32)
 
 
 class BookingListOut(BaseModel):
@@ -88,6 +132,78 @@ def mark_magic_link_stop_reached(
         longitude=body.longitude,
         notes=body.notes,
     )
+    refreshed = get_magic_link_by_token(db, token)
+    return serialize_magic_link_public_payload(refreshed)
+
+
+@router.post("/magic/{token}/verify-otp")
+def verify_magic_link_otp(
+    token: str,
+    body: VerifyMagicOtpIn,
+    db: Session = Depends(get_db),
+):
+    magic_link = get_magic_link_by_token(db, token)
+    booking = magic_link.booking
+    if not booking:
+        raise HTTPException(status_code=404, detail="Linked booking not found")
+
+    crew_otp = booking.crew.ride_otp if booking.crew else None
+    booking_otp = booking.otp
+    if body.otp != (crew_otp or "") and body.otp != (booking_otp or ""):
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+
+    return {"verified": True}
+
+
+@router.post("/magic/{token}/stops")
+def add_magic_link_stop(
+    token: str,
+    body: AddMagicStopIn,
+    db: Session = Depends(get_db),
+):
+    magic_link = get_magic_link_by_token(db, token)
+    updated = add_stop_to_magic_link(
+        db,
+        magic_link,
+        name=body.name,
+        address=body.address,
+        latitude=body.latitude,
+        longitude=body.longitude,
+        stop_type=body.type or "facility",
+    )
+    return serialize_magic_link_public_payload(updated)
+
+
+@router.post("/magic/{token}/complete-ride")
+def complete_magic_link_ride(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    magic_link = get_magic_link_by_token(db, token)
+    booking = magic_link.booking
+    if not booking:
+        raise HTTPException(status_code=404, detail="Linked booking not found")
+
+    now = datetime.utcnow()
+    db.query(CabBooking).filter(CabBooking.id == booking.id).update(
+        {
+            CabBooking.status: BookingStatus.COMPLETED,
+            CabBooking.completed_at: now,
+            CabBooking.trip_completed_at: now,
+        },
+        synchronize_session=False,
+    )
+    create_timeline_event(
+        db,
+        booking_db_id=booking.id,
+        event_type=TimelineEventType.TRIP_COMPLETED,
+        actor_id=None,
+        actor_type="magic_link",
+        metadata={"source": "public_magic_link"},
+        event_time=now,
+    )
+    db.commit()
+
     refreshed = get_magic_link_by_token(db, token)
     return serialize_magic_link_public_payload(refreshed)
 
@@ -188,7 +304,6 @@ def list_eligible_drivers(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    booking = get_booking_by_identifier(db, booking_id)
     if current_user.role != "aggregator":
         raise HTTPException(status_code=403, detail="Only fleet providers can view eligible drivers")
 
@@ -196,11 +311,31 @@ def list_eligible_drivers(
     if not provider:
         raise HTTPException(status_code=404, detail="Fleet provider profile not found")
 
+    booking = _get_booking_action_row(db, booking_id)
     provider_id = booking.provider_id or booking.aggregator_id
     if provider_id != provider.id:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
-    drivers = get_eligible_drivers(db, booking, provider)
+    vehicle_type = (booking.vehicle_type or "").lower()
+    drivers = (
+        db.query(Driver)
+        .filter(Driver.aggregator_id == provider.id)
+        .all()
+    )
+    eligible = []
+    for driver in drivers:
+        if (driver.status or "").lower() != "available":
+            continue
+        if not vehicle_category_matches(
+            db,
+            provider.operating_port_id,
+            vehicle_type,
+            booking.vehicle_name,
+            driver.vehicle_type,
+        ):
+            continue
+        eligible.append(driver)
+
     return [
         {
             "id": driver.id,
@@ -211,7 +346,7 @@ def list_eligible_drivers(
             "status": driver.status,
             "rating": driver.rating,
         }
-        for driver in drivers
+        for driver in eligible
     ]
 
 
@@ -232,9 +367,53 @@ def reject_booking_endpoint(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    booking = get_booking_by_identifier(db, booking_id)
-    updated = reject_booking(db, booking, current_user)
-    return serialize_booking(updated)
+    if current_user.role != "aggregator":
+        raise HTTPException(status_code=403, detail="Only fleet providers can perform this action")
+
+    provider = current_user.aggregator_profile
+    if not provider:
+        raise HTTPException(status_code=404, detail="Fleet provider profile not found")
+
+    booking = _get_booking_action_row(db, booking_id)
+    assigned_provider_id = booking.provider_id or booking.aggregator_id
+    if assigned_provider_id is not None and assigned_provider_id != provider.id:
+        raise HTTPException(status_code=403, detail="Booking not assigned to your provider account")
+
+    current_status = (booking.status or "").lower()
+    if current_status != BookingStatus.PENDING_PROVIDER_RESPONSE.value:
+        raise HTTPException(status_code=400, detail="Booking is not awaiting provider response")
+
+    already_declined = (
+        db.query(BookingTimeline.id)
+        .filter(
+            BookingTimeline.booking_id == booking.id,
+            BookingTimeline.actor_type == "provider",
+            BookingTimeline.actor_id == provider.id,
+            func.upper(BookingTimeline.event_type) == TimelineEventType.PROVIDER_REJECTED.value,
+        )
+        .first()
+    )
+    if already_declined:
+        return {
+            "message": "Booking already declined by this provider",
+            "booking_id": booking_id,
+        }
+
+    now = datetime.utcnow()
+    create_timeline_event(
+        db,
+        booking_db_id=booking.id,
+        event_type=TimelineEventType.PROVIDER_REJECTED,
+        actor_id=provider.id,
+        actor_type="provider",
+        metadata={"provider_name": provider.company_name},
+        event_time=now,
+    )
+    db.commit()
+    return {
+        "message": "Booking declined for this provider; still available to others",
+        "booking_id": booking_id,
+    }
 
 
 @router.post("/{booking_id}/assign-driver")
@@ -244,16 +423,124 @@ def assign_driver_endpoint(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    booking = get_booking_by_identifier(db, booking_id)
-    updated = assign_driver_to_booking(db, booking, current_user, body.driver_id)
+    if current_user.role != "aggregator":
+        raise HTTPException(status_code=403, detail="Only fleet providers can perform this action")
+
+    provider = current_user.aggregator_profile
+    if not provider:
+        raise HTTPException(status_code=404, detail="Fleet provider profile not found")
+
+    booking = _get_booking_action_row(db, booking_id)
+    assigned_provider_id = booking.provider_id or booking.aggregator_id
+    if assigned_provider_id != provider.id:
+        raise HTTPException(status_code=403, detail="Booking not assigned to your provider account")
+
+    current_status = (booking.status or "").lower()
+    already_assigned_driver_id = booking.assigned_driver_id or booking.driver_id
+    if current_status == BookingStatus.DRIVER_ASSIGNED.value and already_assigned_driver_id == body.driver_id:
+        updated = SimpleNamespace(
+            id=booking.id,
+            pickup_address=booking.pickup_address,
+            pickup_lat=booking.pickup_lat,
+            pickup_lng=booking.pickup_lng,
+            drop_address=booking.drop_address,
+            drop_lat=booking.drop_lat,
+            drop_lng=booking.drop_lng,
+        )
+        magic_link = create_or_refresh_magic_link(
+            db,
+            booking=updated,
+            aggregator_id=provider.id,
+            itinerary_stops=body.itinerary_stops,
+        )
+        return {
+            "booking_id": booking_id,
+            "message": "Driver already assigned",
+            "magic_link": {
+                "token": magic_link.token,
+                "path": f"/magic-link/{magic_link.token}",
+            },
+        }
+
+    if current_status != BookingStatus.PROVIDER_ACCEPTED.value:
+        raise HTTPException(status_code=400, detail="Booking must be accepted before assigning a driver")
+
+    driver = (
+        db.query(Driver)
+        .filter(Driver.id == body.driver_id, Driver.aggregator_id == provider.id)
+        .first()
+    )
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver not found")
+    if (driver.status or "").lower() != "available":
+        raise HTTPException(status_code=400, detail="Driver is not available")
+
+    vehicle_type = (booking.vehicle_type or "").lower()
+    if not vehicle_category_matches(
+        db,
+        provider.operating_port_id,
+        vehicle_type,
+        booking.vehicle_name,
+        driver.vehicle_type,
+    ):
+        raise HTTPException(status_code=400, detail="Driver vehicle category does not match booking")
+
+    now = datetime.utcnow()
+    updated_rows = (
+        db.query(CabBooking)
+        .filter(
+            CabBooking.id == booking.id,
+            func.lower(cast(CabBooking.status, String)) == BookingStatus.PROVIDER_ACCEPTED.value,
+            CabBooking.provider_id == provider.id,
+        )
+        .update(
+            {
+                CabBooking.driver_id: driver.id,
+                CabBooking.assigned_driver_id: driver.id,
+                CabBooking.driver_name: driver.name,
+                CabBooking.driver_phone: driver.phone,
+                CabBooking.driver_plate: driver.vehicle_number,
+                CabBooking.driver_assigned_at: now,
+                CabBooking.status: BookingStatus.DRIVER_ASSIGNED,
+            },
+            synchronize_session=False,
+        )
+    )
+    if updated_rows == 0:
+        raise HTTPException(status_code=409, detail="Booking is no longer in accepted state")
+
+    create_timeline_event(
+        db,
+        booking_db_id=booking.id,
+        event_type=TimelineEventType.DRIVER_ASSIGNED,
+        actor_id=provider.id,
+        actor_type="provider",
+        metadata={
+            "driver_id": driver.id,
+            "driver_name": driver.name,
+            "vehicle_number": driver.vehicle_number,
+        },
+        event_time=now,
+    )
+    db.commit()
+
+    updated = SimpleNamespace(
+        id=booking.id,
+        pickup_address=booking.pickup_address,
+        pickup_lat=booking.pickup_lat,
+        pickup_lng=booking.pickup_lng,
+        drop_address=booking.drop_address,
+        drop_lat=booking.drop_lat,
+        drop_lng=booking.drop_lng,
+    )
     magic_link = create_or_refresh_magic_link(
         db,
         booking=updated,
-        aggregator_id=current_user.aggregator_profile.id if current_user.aggregator_profile else None,
+        aggregator_id=provider.id,
         itinerary_stops=body.itinerary_stops,
     )
     return {
-        "booking": serialize_booking(updated),
+        "booking_id": booking_id,
         "magic_link": {
             "token": magic_link.token,
             "path": f"/magic-link/{magic_link.token}",

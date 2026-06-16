@@ -7,12 +7,15 @@ from datetime import datetime, date
 from app.db.session import get_db
 from app.db.models.aggregator_profile import AggregatorProfile
 from app.db.models.cab_booking import CabBooking, BookingStatus
+from app.db.models.driver_magic_link import DriverMagicLink
 from app.db.models.driver import Driver
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.pricing_controls import PricingDuration, PricingRideType, PricingRule, PricingVehicleCategory
+from app.db.models.booking_timeline import BookingTimeline, TimelineEventType
 from app.api.v1.routes_auth import get_current_user
 from app.db.models.user import User
 from pydantic import BaseModel, EmailStr
+from app.services.timeline_service import create_timeline_event
 
 router = APIRouter()
 
@@ -45,6 +48,7 @@ class BookingDashboardOut(BaseModel):
     scheduled_time: Optional[datetime]
     driver_name: Optional[str]
     num_passengers: int
+    magic_link_path: Optional[str] = None
 
 class AggregatorDashboardData(BaseModel):
     stats: Dict[str, int]
@@ -277,10 +281,12 @@ def get_aggregator_dashboard(
             CabBooking.provider_id,
             CabBooking.aggregator_id,
             CabBooking.port,
+            DriverMagicLink.token.label("magic_token"),
             CrewProfile.full_name.label("crew_name"),
             CrewProfile.hpid.label("crew_hpid"),
             CrewProfile.vessel.label("crew_vessel"),
         )
+        .outerjoin(DriverMagicLink, DriverMagicLink.booking_id == CabBooking.id)
         .outerjoin(CrewProfile, CabBooking.crew_id == CrewProfile.id)
         .filter(
             or_(
@@ -289,13 +295,31 @@ def get_aggregator_dashboard(
                 and_(
                     CabBooking.provider_id.is_(None),
                     CabBooking.aggregator_id.is_(None),
-                    cast(CabBooking.status, String) == "pending_provider_response",
+                    func.lower(cast(CabBooking.status, String)) == "pending_provider_response",
                 ),
             )
         )
         .order_by(CabBooking.created_at.desc())
         .all()
     )
+
+    visible_booking_ids = [row.id for row in rows]
+    declined_by_me: set[int] = set()
+    if visible_booking_ids:
+        declined_by_me = {
+            booking_id
+            for (booking_id,) in (
+                db.query(BookingTimeline.booking_id)
+                .filter(
+                    BookingTimeline.booking_id.in_(visible_booking_ids),
+                    BookingTimeline.actor_type == "provider",
+                    BookingTimeline.actor_id == agg_profile.id,
+                    func.upper(BookingTimeline.event_type) == TimelineEventType.PROVIDER_REJECTED.value,
+                )
+                .distinct()
+                .all()
+            )
+        }
 
     def normalized_status(row: Any) -> str:
         return (row.status or "").lower()
@@ -324,6 +348,7 @@ def get_aggregator_dashboard(
             scheduled_time=row.scheduled_time,
             driver_name=row.driver_name,
             num_passengers=row.num_passengers,
+            magic_link_path=f"/magic-link/{row.magic_token}" if row.magic_token else None,
         )
 
     def row_visible_to_provider(row: Any) -> bool:
@@ -335,6 +360,8 @@ def get_aggregator_dashboard(
         if normalized_status(row) != "pending_provider_response":
             return False
         if row.provider_id is not None or row.aggregator_id is not None:
+            return False
+        if row.id in declined_by_me:
             return False
         return True
 
@@ -424,8 +451,56 @@ def decline_ride(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    from app.services.booking_service import get_booking_by_identifier, reject_booking, serialize_booking
+    if current_user.role != "aggregator":
+        raise HTTPException(status_code=403, detail="Only fleet providers can perform this action")
 
-    booking = get_booking_by_identifier(db, booking_id)
-    updated = reject_booking(db, booking, current_user)
-    return {"message": "Ride declined successfully", "booking": serialize_booking(updated)}
+    profile = current_user.aggregator_profile
+    if not profile:
+        raise HTTPException(status_code=404, detail="Fleet provider profile not found")
+
+    booking_query = db.query(
+        CabBooking.id,
+        CabBooking.provider_id,
+        CabBooking.aggregator_id,
+        cast(CabBooking.status, String).label("status"),
+    )
+    if booking_id.isdigit():
+        booking = booking_query.filter(CabBooking.id == int(booking_id)).first()
+    else:
+        booking = booking_query.filter(CabBooking.booking_id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    assigned_provider_id = booking.provider_id or booking.aggregator_id
+    if assigned_provider_id is not None and assigned_provider_id != profile.id:
+        raise HTTPException(status_code=403, detail="Booking not assigned to your provider account")
+
+    if (booking.status or "").lower() != BookingStatus.PENDING_PROVIDER_RESPONSE.value:
+        raise HTTPException(status_code=400, detail="Booking is not awaiting provider response")
+
+    already_declined = (
+        db.query(BookingTimeline.id)
+        .filter(
+            BookingTimeline.booking_id == booking.id,
+            BookingTimeline.actor_type == "provider",
+            BookingTimeline.actor_id == profile.id,
+            func.upper(BookingTimeline.event_type) == TimelineEventType.PROVIDER_REJECTED.value,
+        )
+        .first()
+    )
+    if already_declined:
+        return {"message": "Ride already declined by this provider", "booking_id": booking_id}
+
+    create_timeline_event(
+        db,
+        booking_db_id=booking.id,
+        event_type=TimelineEventType.PROVIDER_REJECTED,
+        actor_id=profile.id,
+        actor_type="provider",
+        metadata={"provider_name": profile.company_name},
+    )
+    db.commit()
+    return {
+        "message": "Ride declined for this provider; still available to others",
+        "booking_id": booking_id,
+    }

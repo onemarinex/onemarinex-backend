@@ -6,6 +6,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
 import logging
+import re
 
 from app.db.session import get_db
 from app.db.models.user import User
@@ -23,6 +24,7 @@ from app.db.models.incident import Incident
 from app.db.models.port_service_request import PortServiceRequest
 from app.db.models.contact_message import ContactMessage
 from app.db.models.driver_magic_link import DriverMagicLink, DriverMagicLinkReachEvent
+from app.db.models.vendor_tag import VendorTag
 from app.api.v1.routes_auth import get_current_user
 
 router = APIRouter()
@@ -97,7 +99,7 @@ class VendorCreationBase(BaseModel):
     distance_from_port: float
     lat: float
     lng: float   
-    port_id: int
+    port_id: Optional[int] = None
 
 class VendorCreate(VendorCreationBase):
     # Optional at creation
@@ -110,20 +112,20 @@ class VendorCreate(VendorCreationBase):
     
 
 class VendorUpdate(BaseModel):
-    name: Optional[str]
-    category: Optional[str]
-    location_name: Optional[str]
-    distance_from_port: Optional[float]
-    lat: Optional[float]
-    lng: Optional[float]
-    rating: Optional[float]
-    phone: Optional[str]
-    email: Optional[str]
-    documents: Optional[List[str]]
-    images: Optional[List[str]]
-    other_information: Optional[Dict[str, Any]]
-    port_id: Optional[int]
-    status: Optional[str]
+    name: Optional[str] = None
+    category: Optional[str] = None
+    location_name: Optional[str] = None
+    distance_from_port: Optional[float] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    rating: Optional[float] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    documents: Optional[List[str]] = None
+    images: Optional[List[str]] = None
+    other_information: Optional[Dict[str, Any]] = None
+    port_id: Optional[int] = None
+    status: Optional[str] = None
 
 
 
@@ -144,6 +146,25 @@ class VendorOut(BaseModel):
     other_information: Optional[Dict[str, Any]]
     created_at: datetime
     updated_at: datetime    
+
+
+class VendorTagIn(BaseModel):
+    name: str
+    slug: Optional[str] = None
+    image_url: Optional[str] = None
+    is_active: bool = True
+    sort_order: int = 0
+
+
+class VendorTagOut(BaseModel):
+    id: int
+    name: str
+    slug: str
+    image_url: Optional[str]
+    is_active: bool
+    sort_order: int
+    created_at: datetime
+    updated_at: datetime
     
 # --- Helpers ---
 
@@ -153,6 +174,17 @@ def verify_superadmin(current_user: User):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only superadmins can access this resource"
         )
+
+
+def slugify_tag(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", (value or "").strip().lower())
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return slug
+
+
+def ensure_vendor_tags_table(db: Session) -> None:
+    # Lets existing environments start using tags without waiting for migrations.
+    VendorTag.__table__.create(bind=db.get_bind(), checkfirst=True)
 
 # --- Routes ---
 
@@ -829,10 +861,115 @@ def list_contact_messages(
     return query.order_by(ContactMessage.created_at.desc()).all()
 
 
+@router.get("/vendor-tags", response_model=List[VendorTagOut])
+def list_vendor_tags(
+    include_inactive: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    verify_superadmin(current_user)
+    ensure_vendor_tags_table(db)
+    query = db.query(VendorTag)
+    if not include_inactive:
+        query = query.filter(VendorTag.is_active.is_(True))
+    return query.order_by(VendorTag.sort_order.asc(), VendorTag.name.asc()).all()
+
+
+@router.post("/vendor-tags", response_model=VendorTagOut)
+def create_vendor_tag(
+    payload: VendorTagIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    verify_superadmin(current_user)
+    ensure_vendor_tags_table(db)
+    slug = slugify_tag(payload.slug or payload.name)
+    if not slug:
+        raise HTTPException(status_code=400, detail="Tag slug cannot be empty")
+    exists = db.query(VendorTag).filter(VendorTag.slug == slug).first()
+    if exists:
+        raise HTTPException(status_code=409, detail="Tag already exists")
+    tag = VendorTag(
+        name=payload.name.strip(),
+        slug=slug,
+        image_url=(payload.image_url or "").strip() or None,
+        is_active=payload.is_active,
+        sort_order=payload.sort_order,
+    )
+    db.add(tag)
+    db.commit()
+    db.refresh(tag)
+    return tag
+
+
+@router.put("/vendor-tags/{tag_id}", response_model=VendorTagOut)
+def update_vendor_tag(
+    tag_id: int,
+    payload: VendorTagIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    verify_superadmin(current_user)
+    ensure_vendor_tags_table(db)
+    tag = db.query(VendorTag).filter(VendorTag.id == tag_id).first()
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    next_slug = slugify_tag(payload.slug or payload.name)
+    if not next_slug:
+        raise HTTPException(status_code=400, detail="Tag slug cannot be empty")
+    dup = db.query(VendorTag).filter(VendorTag.slug == next_slug, VendorTag.id != tag_id).first()
+    if dup:
+        raise HTTPException(status_code=409, detail="Tag slug already in use")
+    tag.name = payload.name.strip()
+    tag.slug = next_slug
+    tag.image_url = (payload.image_url or "").strip() or None
+    tag.is_active = payload.is_active
+    tag.sort_order = payload.sort_order
+    db.commit()
+    db.refresh(tag)
+    return tag
+
+
+@router.delete("/vendor-tags/{tag_id}")
+def delete_vendor_tag(
+    tag_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    verify_superadmin(current_user)
+    ensure_vendor_tags_table(db)
+    tag = db.query(VendorTag).filter(VendorTag.id == tag_id).first()
+    if not tag:
+        raise HTTPException(status_code=404, detail="Tag not found")
+    db.delete(tag)
+    db.commit()
+    return {"ok": True}
+
+
 @router.post("/vendors", response_model=VendorOut)
 def create_place(payload: VendorCreate, db: Session = Depends(get_db),current_user: User = Depends(get_current_user)):
     verify_superadmin(current_user)
-    vendor = Vendors(**payload.dict())
+    data = payload.model_dump()
+
+    raw_category = str(data.get("category") or "").strip().lower()
+    if raw_category not in {"restaurant", "pub", "hotel", "sightseeing"}:
+        raise HTTPException(status_code=400, detail="Invalid category")
+
+    port_id = data.get("port_id")
+    if port_id is not None:
+        if port_id <= 0:
+            raise HTTPException(status_code=400, detail="port_id must be a valid port")
+        port = db.query(Port).filter(Port.id == port_id).first()
+        if not port:
+            raise HTTPException(status_code=400, detail=f"Port with ID {port_id} does not exist")
+
+    data["category"] = raw_category
+    data["phone"] = (data.get("phone") or "").strip()
+    data["email"] = (data.get("email") or "").strip()
+    if not data["phone"] or not data["email"]:
+        raise HTTPException(status_code=400, detail="Phone and email are required")
+
+    vendor = Vendors(**data)
     
     db.add(vendor)
     db.commit()
@@ -847,7 +984,9 @@ def get_vendors(
     category: Optional[str] = None,
     search : Optional[str]=None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
+    verify_superadmin(current_user)
     from sqlalchemy.orm import joinedload
 
     query = db.query(Vendors).options(joinedload(Vendors.port))
@@ -858,7 +997,7 @@ def get_vendors(
         query = query.filter(Vendors.id == vendor_id)
 
     if category is not None:
-        query = query.filter(Vendors.category == category)
+        query = query.filter(Vendors.category == category.strip().lower())
 
     if search is not None:
         query = query.filter(Vendors.name.ilike(f"%{search}%"))     
@@ -866,14 +1005,36 @@ def get_vendors(
     return query.all()
 
 @router.put("/vendors/{vendor_id}", response_model=VendorOut)
-def update_place(vendor_id: int, payload: VendorUpdate, db: Session = Depends(get_db)):
+def update_place(
+    vendor_id: int,
+    payload: VendorUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    verify_superadmin(current_user)
 
     vendor = db.query(Vendors).filter(Vendors.id == vendor_id).first()
 
     if not vendor:
         raise HTTPException(status_code=404, detail="Vendor not found")
 
-    for key, value in payload.dict(exclude_unset=True).items():
+    patch = payload.model_dump(exclude_unset=True)
+    if "category" in patch and patch["category"] is not None:
+        patch["category"] = str(patch["category"]).strip().lower()
+        if patch["category"] not in {"restaurant", "pub", "hotel", "sightseeing"}:
+            raise HTTPException(status_code=400, detail="Invalid category")
+    if "phone" in patch and patch["phone"] is None:
+        patch["phone"] = ""
+    if "email" in patch and patch["email"] is None:
+        patch["email"] = ""
+    if "port_id" in patch and patch["port_id"] is not None:
+        if patch["port_id"] <= 0:
+            raise HTTPException(status_code=400, detail="port_id must be a valid port")
+        port = db.query(Port).filter(Port.id == patch["port_id"]).first()
+        if not port:
+            raise HTTPException(status_code=400, detail=f"Port with ID {patch['port_id']} does not exist")
+
+    for key, value in patch.items():
         setattr(vendor, key, value)
 
     db.commit()

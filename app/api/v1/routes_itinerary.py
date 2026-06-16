@@ -43,25 +43,23 @@ from sqlalchemy.orm import Session
 
 from app.db.models.vendors import PlaceCategory, Vendors
 from app.db.models.port import Port
+from app.db.models.vendor_tag import VendorTag
 from app.db.session import get_db
 
 router = APIRouter()
 
 # ── constants ────────────────────────────────────────────────────────────────
 
-# Map the user-facing tag names to the PlaceCategory values they cover.
-TAG_TO_CATEGORIES: Dict[str, List[PlaceCategory]] = {
-    "food":        [PlaceCategory.restaurant],
-    "pubs":        [PlaceCategory.pub],
-    "sightseeing": [PlaceCategory.sightseeing],
-    "nightlife":   [PlaceCategory.pub],
-    "relax":       [PlaceCategory.hotel, PlaceCategory.sightseeing],
-    "shopping":    [PlaceCategory.sightseeing],   # sightseeing covers market/mall venues
-    "sim_card":    [PlaceCategory.sightseeing],   # vendors tagged "sim_card" stored as sightseeing
-    "currency":    [PlaceCategory.sightseeing],   # vendors tagged "currency" stored as sightseeing
-}
-
-ALL_VALID_TAGS = list(TAG_TO_CATEGORIES.keys())
+FALLBACK_VALID_TAGS = [
+    "food",
+    "pubs",
+    "sightseeing",
+    "shopping",
+    "relax",
+    "nightlife",
+    "sim_card",
+    "currency",
+]
 
 # Fallback time (hours) to budget for a stop when no avg_time_spent_hours is set.
 DEFAULT_TIME_BY_CATEGORY: Dict[PlaceCategory, float] = {
@@ -120,6 +118,21 @@ class ItinerarySuggestOut(BaseModel):
     fallback_used: bool   # True when we fell back to untagged/default fills
 
 
+class ItineraryTagOut(BaseModel):
+    id: int
+    name: str
+    slug: str
+    image_url: Optional[str]
+    sort_order: int
+
+
+class ItineraryCatalogOut(BaseModel):
+    port_id: Optional[int]
+    port_name: Optional[str]
+    total: int
+    vendors: List[ItineraryStop]
+
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def _resolve_port(db: Session, port_id: Optional[int], port: Optional[str]) -> Optional[Port]:
@@ -137,11 +150,27 @@ def _resolve_port(db: Session, port_id: Optional[int], port: Optional[str]) -> O
     return None
 
 
+def _get_active_tag_slugs(db: Session) -> List[str]:
+    try:
+        VendorTag.__table__.create(bind=db.get_bind(), checkfirst=True)
+        tags = (
+            db.query(VendorTag)
+            .filter(VendorTag.is_active.is_(True))
+            .order_by(VendorTag.sort_order.asc(), VendorTag.name.asc())
+            .all()
+        )
+        values = [str(item.slug or "").strip().lower() for item in tags if item.slug]
+        return [item for item in values if item]
+    except Exception:
+        return FALLBACK_VALID_TAGS
+
+
 def _vendor_to_stop(v: Vendors) -> ItineraryStop:
     other = v.other_information or {}
     raw_tags = other.get("tags") or []
     if isinstance(raw_tags, str):
         raw_tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
+    raw_tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()]
 
     avg_time = other.get("avg_time_spent_hours")
     if avg_time is None:
@@ -182,9 +211,19 @@ def _vendor_to_stop(v: Vendors) -> ItineraryStop:
     )
 
 
+def _normalize_tag(value: str) -> str:
+    tag = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    while "__" in tag:
+        tag = tag.replace("__", "_")
+    # Handle common singular/plural variance (restaurant/restaurants, pub/pubs)
+    if len(tag) > 3 and tag.endswith("s"):
+        tag = tag[:-1]
+    return tag
+
+
 def _tags_overlap(vendor_tags: List[str], requested_tags: List[str]) -> bool:
-    vt = {t.strip().lower() for t in vendor_tags}
-    rt = {t.strip().lower() for t in requested_tags}
+    vt = {_normalize_tag(t) for t in vendor_tags}
+    rt = {_normalize_tag(t) for t in requested_tags}
     return bool(vt & rt)
 
 
@@ -245,25 +284,22 @@ def suggest_itinerary(
     If port is not supplied or not found, results are returned without
     port filtering (all-port pool).
     """
-    requested_tags = [t.strip().lower() for t in body.tags if t.strip().lower() in ALL_VALID_TAGS]
+
+    print("Received itinerary suggestion request:", body)
+    # Accept user-provided tags as-is and normalize at overlap checks so
+    # singular/plural naming differences don't collapse suggestions.
+    requested_tags = [t.strip().lower() for t in body.tags if t.strip()]
     if not requested_tags:
         raise HTTPException(
             status_code=422,
-            detail=f"No valid tags provided. Valid tags: {ALL_VALID_TAGS}",
+            detail="No tags provided",
         )
 
     resolved_port = _resolve_port(db, body.port_id, body.port)
 
-    # ── 1. Collect relevant categories ───────────────────────────────────────
-    relevant_categories: set[PlaceCategory] = set()
-    for tag in requested_tags:
-        for cat in TAG_TO_CATEGORIES.get(tag, []):
-            relevant_categories.add(cat)
-
-    # ── 2. Query vendors for this port + relevant categories ─────────────────
+    # ── 1. Query vendors for this port ───────────────────────────────────────
     query = db.query(Vendors).filter(
         Vendors.status == "Active",
-        Vendors.category.in_(list(relevant_categories)),
     )
     if resolved_port:
         query = query.filter(Vendors.port_id == resolved_port.id)
@@ -305,7 +341,7 @@ def suggest_itinerary(
         total_h = round(sum(s.avg_time_hours for s in stops), 2)
         highlights = list({tag for s in stops for tag in s.tags if tag in requested_tags})
         if not highlights:
-            highlights = list(relevant_categories)[:3]
+            highlights = requested_tags[:3]
 
         itineraries.append(
             ItineraryOption(
@@ -317,6 +353,7 @@ def suggest_itinerary(
                 stops=stops,
             )
         )
+        print(f"Built itinerary option {len(itineraries)} with offset {offset} and combo {combo_key}")
 
     return ItinerarySuggestOut(
         port_id=resolved_port.id if resolved_port else None,
@@ -325,4 +362,68 @@ def suggest_itinerary(
         requested_tags=requested_tags,
         itineraries=itineraries,
         fallback_used=fallback_used,
+    )
+
+
+@router.get("/tags", response_model=List[ItineraryTagOut])
+def list_itinerary_tags(db: Session = Depends(get_db)):
+    try:
+        VendorTag.__table__.create(bind=db.get_bind(), checkfirst=True)
+        rows = (
+            db.query(VendorTag)
+            .filter(VendorTag.is_active.is_(True))
+            .order_by(VendorTag.sort_order.asc(), VendorTag.name.asc())
+            .all()
+        )
+        return [
+            ItineraryTagOut(
+                id=item.id,
+                name=item.name,
+                slug=item.slug,
+                image_url=item.image_url,
+                sort_order=item.sort_order,
+            )
+            for item in rows
+        ]
+    except Exception:
+        return [
+            ItineraryTagOut(
+                id=index + 1,
+                name=slug.replace("_", " ").title(),
+                slug=slug,
+                image_url=None,
+                sort_order=index,
+            )
+            for index, slug in enumerate(FALLBACK_VALID_TAGS)
+        ]
+
+
+@router.get("/catalog", response_model=ItineraryCatalogOut)
+def itinerary_catalog(
+    port_id: Optional[int] = None,
+    port: Optional[str] = None,
+    tags: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    resolved_port = _resolve_port(db, port_id, port)
+    requested_tags = {
+        item.strip().lower()
+        for item in (tags or "").split(",")
+        if item.strip()
+    }
+
+    query = db.query(Vendors).filter(Vendors.status == "Active")
+    if resolved_port:
+        query = query.filter(Vendors.port_id == resolved_port.id)
+
+    vendors = query.order_by(Vendors.rating.desc()).all()
+    stops = [_vendor_to_stop(item) for item in vendors]
+    if requested_tags:
+        stops = [item for item in stops if _tags_overlap(item.tags, list(requested_tags))]
+
+    return ItineraryCatalogOut(
+        port_id=resolved_port.id if resolved_port else None,
+        port_name=resolved_port.name if resolved_port else None,
+        total=len(stops),
+        vendors=stops,
     )

@@ -4,6 +4,8 @@ from sqlalchemy import cast, String, func
 from typing import List, Optional
 from datetime import date, datetime, timedelta
 import uuid
+import json
+import urllib.request
 
 from app.db.session import get_db
 from app.db.models.user import User
@@ -16,13 +18,55 @@ from app.db.models.notification import Notification
 from app.db.models.crew_sos import CrewSos
 from app.db.models.port import Port
 from app.db.models.aggregator_profile import AggregatorProfile
-from app.db.models.pricing_controls import PricingRideType, PricingRule, PricingVehicleCategory
+from app.db.models.pricing_controls import (
+    PricingDuration,
+    PricingDurationVisibility,
+    PricingRideType,
+    PricingRule,
+    PricingVehicleCategory,
+    PricingVehicleVisibility,
+)
 from app.api.v1.routes_auth import get_current_user
 from app.services.crew_service import generate_hpid
 from app.services.booking_service import vehicle_category_matches
 from pydantic import BaseModel
 
 router = APIRouter()
+
+
+def _fallback_straight_line_distance_km(
+    pickup_lat: float,
+    pickup_lng: float,
+    drop_lat: float,
+    drop_lng: float,
+) -> float:
+    return ((pickup_lat - drop_lat) ** 2 + (pickup_lng - drop_lng) ** 2) ** 0.5 * 111
+
+
+def _compute_route_distance_km(
+    pickup_lat: float,
+    pickup_lng: float,
+    drop_lat: float,
+    drop_lng: float,
+) -> float:
+    # Prefer routed distance over straight line so fare uses realistic road travel.
+    url = (
+        "https://router.project-osrm.org/route/v1/driving/"
+        f"{pickup_lng},{pickup_lat};{drop_lng},{drop_lat}"
+        "?overview=false&alternatives=false"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "OneMarinex/1.0"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+            routes = payload.get("routes") or []
+            first = routes[0] if routes else None
+            meters = float((first or {}).get("distance") or 0)
+            if meters > 0:
+                return meters / 1000.0
+    except Exception:
+        pass
+    return _fallback_straight_line_distance_km(pickup_lat, pickup_lng, drop_lat, drop_lng)
 
 class ProfileUpdateIn(BaseModel):
     full_name: Optional[str] = None
@@ -136,6 +180,7 @@ class CabBookingDetailsOut(BaseModel):
     provider_response_at: Optional[datetime] = None
     trip_started_at: Optional[datetime] = None
     trip_completed_at: Optional[datetime] = None
+    distance_km: Optional[float] = None
     created_at: datetime
 
     class Config:
@@ -941,6 +986,8 @@ def _build_cab_options_for_provider(
     pricing_provider_type: str,   # key used in PricingRule.provider_type  e.g. "partner_drivers"
     booking_ride_type: str,        # value to put in CabVehiclePricing.ride_type e.g. "flexible_ride"
     distance_km: float,
+    duration_minutes: Optional[int] = None,
+    estimate_minutes: Optional[float] = None,
 ) -> List[CabVehiclePricing]:
     """
     Return one CabVehiclePricing per vehicle for the given provider type and port.
@@ -959,7 +1006,62 @@ def _build_cab_options_for_provider(
     if not _has_active_provider_for_port(db, port_id, booking_provider_type):
         return []
 
-    rules = (
+    selected_duration: Optional[PricingDuration] = None
+    duration_is_visible = True
+    vehicle_visibility_by_id: dict[int, bool] = {}
+    duration_minutes_value = duration_minutes if duration_minutes and duration_minutes > 0 else None
+    if bool(getattr(ride_type_obj, "supports_duration", False)):
+        if duration_minutes_value is None:
+            return []
+        durations = (
+            db.query(PricingDuration)
+            .filter(
+                PricingDuration.port_id == port_id,
+                PricingDuration.ride_type_id == ride_type_obj.id,
+                PricingDuration.is_active.is_(True),
+            )
+            .all()
+        )
+        if not durations:
+            return []
+        selected_duration = min(
+            durations,
+            key=lambda d: abs((d.duration_minutes or 0) - duration_minutes_value),
+        )
+
+        duration_visibility = (
+            db.query(PricingDurationVisibility)
+            .filter(
+                PricingDurationVisibility.port_id == port_id,
+                PricingDurationVisibility.ride_type_id == ride_type_obj.id,
+                PricingDurationVisibility.provider_type == pricing_provider_type,
+                PricingDurationVisibility.duration_id == selected_duration.id,
+            )
+            .first()
+        )
+        # If a row exists, honor it. If no row exists, default to visible for
+        # backward compatibility on ports that have not configured visibility yet.
+        if duration_visibility is not None:
+            duration_is_visible = bool(duration_visibility.is_visible)
+        if not duration_is_visible:
+            return []
+
+        vehicle_visibility_rows = (
+            db.query(PricingVehicleVisibility)
+            .filter(
+                PricingVehicleVisibility.port_id == port_id,
+                PricingVehicleVisibility.ride_type_id == ride_type_obj.id,
+                PricingVehicleVisibility.provider_type == pricing_provider_type,
+                PricingVehicleVisibility.duration_id == selected_duration.id,
+            )
+            .all()
+        )
+        vehicle_visibility_by_id = {
+            row.vehicle_category_id: bool(row.is_visible)
+            for row in vehicle_visibility_rows
+        }
+
+    rules_query = (
         db.query(PricingRule, PricingVehicleCategory)
         .join(PricingVehicleCategory, PricingVehicleCategory.id == PricingRule.vehicle_category_id)
         .filter(
@@ -968,16 +1070,31 @@ def _build_cab_options_for_provider(
             PricingRule.provider_type == pricing_provider_type,
             PricingRule.is_active.is_(True),
             PricingRule.is_archived.is_(False),
-            PricingRule.duration_id.is_(None),
             PricingVehicleCategory.is_active.is_(True),
         )
-        .all()
     )
+    if selected_duration:
+        rules_query = rules_query.filter(PricingRule.duration_id == selected_duration.id)
+    else:
+        rules_query = rules_query.filter(PricingRule.duration_id.is_(None))
+
+    rules = rules_query.all()
 
     # Keep cheapest rule per vehicle category
     best: dict[int, tuple] = {}
     for rule, vehicle in rules:
-        subtotal = (rule.base_fare or 0) + (distance_km * (rule.price_per_km or 0))
+        applied_minutes = float(estimate_minutes if estimate_minutes is not None else (duration_minutes_value or 0))
+        subtotal = (
+            (rule.base_fare or 0)
+            + (distance_km * (rule.price_per_km or 0))
+            + (applied_minutes * (rule.price_per_minute or 0))
+        )
+        if rule.included_km is not None and rule.price_per_extra_km:
+            extra_km = max(0.0, distance_km - float(rule.included_km or 0))
+            subtotal += extra_km * float(rule.price_per_extra_km or 0)
+        if selected_duration and rule.price_per_extra_minute:
+            extra_minutes = max(0.0, applied_minutes - float(selected_duration.duration_minutes or 0))
+            subtotal += extra_minutes * float(rule.price_per_extra_minute or 0)
         subtotal = max(subtotal, rule.minimum_fare or 0)
         multiplier = 1.0
         for adj in rule.adjustments or []:
@@ -990,6 +1107,9 @@ def _build_cab_options_for_provider(
 
     result = []
     for final_price, rule, vehicle in sorted(best.values(), key=lambda x: x[0]):
+        if selected_duration and vehicle_visibility_by_id:
+            if vehicle_visibility_by_id.get(vehicle.id) is False:
+                continue
         # Per-vehicle availability: only include if a matching driver exists at this port
         if not _vehicle_has_provider(db, port_id, booking_provider_type, vehicle.code, vehicle.name):
             continue
@@ -1033,7 +1153,7 @@ def _resolve_server_side_fare(
     vehicle_type: str,
     vehicle_name: str,
 ) -> tuple[Optional[float], float]:
-    distance_km = ((pickup_lat - drop_lat) ** 2 + (pickup_lng - drop_lng) ** 2) ** 0.5 * 111
+    distance_km = _compute_route_distance_km(pickup_lat, pickup_lng, drop_lat, drop_lng)
     resolved_port = resolve_port_for_pricing(db, port_value)
     if not resolved_port:
         return None, round(distance_km, 2)
@@ -1089,11 +1209,14 @@ def _resolve_server_side_fare(
 
 @router.get("/cab/options", response_model=CabOptionsResponse)
 def get_cab_options(
-    pickup_lat: float,
-    pickup_lng: float,
-    drop_lat: float,
-    drop_lng: float,
+    pickup_lat: Optional[float] = None,
+    pickup_lng: Optional[float] = None,
+    drop_lat: Optional[float] = None,
+    drop_lng: Optional[float] = None,
     port: Optional[str] = None,
+    ride_type_code: str = "coordinated_transfer",
+    duration_hours: Optional[float] = None,
+    distance_km_override: Optional[float] = None,
     db: Session = Depends(get_db),
 ):
     """
@@ -1113,7 +1236,14 @@ def get_cab_options(
 
     Port accepts: port name (e.g. "Mumbai Port"), port code, or numeric port ID.
     """
-    distance_km = ((pickup_lat - drop_lat) ** 2 + (pickup_lng - drop_lng) ** 2) ** 0.5 * 111
+    if distance_km_override is not None and distance_km_override >= 0:
+        distance_km = float(distance_km_override)
+    else:
+        if None in (pickup_lat, pickup_lng, drop_lat, drop_lng):
+            raise HTTPException(status_code=400, detail="pickup/drop coordinates or distance_km_override are required")
+        distance_km = _compute_route_distance_km(float(pickup_lat), float(pickup_lng), float(drop_lat), float(drop_lng))
+
+    duration_minutes = int(round(duration_hours * 60)) if duration_hours and duration_hours > 0 else None
 
     resolved_port = resolve_port_for_pricing(db, port)
     if not resolved_port:
@@ -1127,7 +1257,7 @@ def get_cab_options(
 
     ride_type_obj = (
         db.query(PricingRideType)
-        .filter(PricingRideType.code == "coordinated_transfer")
+        .filter(PricingRideType.code == ride_type_code)
         .first()
     )
     if not ride_type_obj:
@@ -1148,6 +1278,8 @@ def get_cab_options(
         pricing_provider_type="partner_drivers",
         booking_ride_type=BookingRideType.FLEXIBLE_RIDE.value,
         distance_km=distance_km,
+        duration_minutes=duration_minutes,
+        estimate_minutes=duration_minutes,
     )
     aggregator_cabs = _build_cab_options_for_provider(
         db,
@@ -1156,6 +1288,8 @@ def get_cab_options(
         pricing_provider_type="aggregators",
         booking_ride_type=BookingRideType.GUARANTEED_COORDINATED_RIDE.value,
         distance_km=distance_km,
+        duration_minutes=duration_minutes,
+        estimate_minutes=duration_minutes,
     )
 
     return CabOptionsResponse(
@@ -1333,9 +1467,7 @@ def get_cab_estimates(
     ride_type: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    # Mock distance calculation (Euclidean * 111 for rough km)
-    # Ideally replace this with a call to Ola Maps Directions API
-    distance = ((pickup_lat - drop_lat)**2 + (pickup_lng - drop_lng)**2)**0.5 * 111
+    distance = _compute_route_distance_km(pickup_lat, pickup_lng, drop_lat, drop_lng)
 
     dynamic_estimates = get_dynamic_cab_estimates(db, distance, port)
     if dynamic_estimates:
@@ -1424,6 +1556,7 @@ def get_booking_details(
         provider_response_at=serialized.get("provider_response_at"),
         trip_started_at=serialized.get("trip_started_at"),
         trip_completed_at=serialized.get("trip_completed_at"),
+        distance_km=float(booking.distance_km or 0),
         created_at=booking.created_at
     )
 

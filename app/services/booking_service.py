@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
-from sqlalchemy import or_, func, cast, String
+from sqlalchemy import or_, and_, func, cast, String
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.models.aggregator_profile import AggregatorProfile
@@ -469,13 +469,24 @@ def accept_booking(db: Session, booking: CabBooking, user: User) -> CabBooking:
         raise HTTPException(status_code=404, detail="Fleet provider profile not found")
 
     now = datetime.utcnow()
+    pending_status = BookingStatus.PENDING_PROVIDER_RESPONSE.value
+    rejected_status = BookingStatus.PROVIDER_REJECTED.value
     updated_rows = (
         db.query(CabBooking)
         .filter(
             CabBooking.id == booking.id,
-            cast(CabBooking.status, String) == BookingStatus.PENDING_PROVIDER_RESPONSE.value,
-            CabBooking.provider_id.is_(None),
-            CabBooking.aggregator_id.is_(None),
+            or_(
+                and_(
+                    func.lower(cast(CabBooking.status, String)) == pending_status,
+                    CabBooking.provider_id.is_(None),
+                    CabBooking.aggregator_id.is_(None),
+                ),
+                and_(
+                    func.lower(cast(CabBooking.status, String)) == rejected_status,
+                    CabBooking.driver_id.is_(None),
+                    CabBooking.assigned_driver_id.is_(None),
+                ),
+            ),
         )
         .update(
             {
@@ -502,7 +513,11 @@ def accept_booking(db: Session, booking: CabBooking, user: User) -> CabBooking:
         )
         if latest and (latest.provider_id or latest.aggregator_id):
             raise HTTPException(status_code=409, detail="Booking already accepted by another provider")
-        raise HTTPException(status_code=400, detail="Booking is not awaiting provider response")
+        status_value = ((latest.status or "") if latest else "").lower()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Booking cannot be accepted in current state: status={status_value or 'unknown'}",
+        )
 
     create_timeline_event(
         db,

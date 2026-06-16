@@ -93,7 +93,7 @@ class CabBooking(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
 
     status = Column(
-        SQLEnum(BookingStatus),
+        SQLEnum(BookingStatus, values_callable=lambda enum_cls: [item.value for item in enum_cls]),
         default=BookingStatus.PENDING_PROVIDER_RESPONSE,
         nullable=False,
     )

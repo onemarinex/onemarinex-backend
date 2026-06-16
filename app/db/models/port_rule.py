@@ -8,6 +8,7 @@ class PortRule(Base):
     port_name = Column(String(128), unique=True, index=True, nullable=False)
     # rules: List of {title, description, icon_type}
     rules = Column(JSON, nullable=True)
+    closing_time = Column(String(8), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

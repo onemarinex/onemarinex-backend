@@ -31,11 +31,13 @@ class RuleItem(BaseModel):
     icon_type: str # e.g., 'time', 'policy', 'doc', 'alert'
 
 class PortRulesIn(BaseModel):
-    rules: List[RuleItem]
+    rules: Optional[List[RuleItem]] = None
+    closing_time: Optional[str] = None
 
 class PortRulesOut(BaseModel):
     port_name: str
     rules: List[RuleItem]
+    closing_time: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -56,11 +58,26 @@ def get_ports(db: Session = Depends(get_db)):
 
 @router.get("/{port_name}/rules", response_model=PortRulesOut)
 def get_port_rules(port_name: str, db: Session = Depends(get_db)):
-    rules = db.query(PortRule).filter(PortRule.port_name == port_name).first()
+    port = (
+        db.query(Port)
+        .filter((Port.code == port_name) | (Port.name == port_name))
+        .first()
+    )
+    candidates = [port.code, port.name, port_name] if port else [port_name]
+    candidates = [item for item in candidates if item]
+    rules = (
+        db.query(PortRule)
+        .filter(PortRule.port_name.in_(candidates))
+        .first()
+    )
     if not rules:
         # Return empty rules instead of 404 to simplify frontend
-        return {"port_name": port_name, "rules": []}
-    return rules
+        return {"port_name": port.code if port else port_name, "rules": [], "closing_time": None}
+    return {
+        "port_name": rules.port_name,
+        "rules": rules.rules or [],
+        "closing_time": rules.closing_time,
+    }
 
 @router.post("/{port_name}/rules", response_model=PortRulesOut)
 def update_port_rules(
@@ -69,19 +86,40 @@ def update_port_rules(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.role not in ["agent", "aggregator"]:
-        raise HTTPException(status_code=403, detail="Only agents can update port rules")
+    if current_user.role not in ["agent", "aggregator", "superadmin"]:
+        raise HTTPException(status_code=403, detail="Only port operators can update port rules")
 
     # In a real scenario, we'd also check if the agent belongs to this port
-    
-    port_rules = db.query(PortRule).filter(PortRule.port_name == port_name).first()
-    
-    rule_data = [item.model_dump() for item in body.rules]
+    port = (
+        db.query(Port)
+        .filter((Port.code == port_name) | (Port.name == port_name))
+        .first()
+    )
+    canonical_port_name = port.code if port else port_name
+
+    port_rules = (
+        db.query(PortRule)
+        .filter(
+            PortRule.port_name.in_(
+                [item for item in [canonical_port_name, port_name, port.name if port else None] if item]
+            )
+        )
+        .first()
+    )
+
+    rule_data = [item.model_dump() for item in body.rules] if body.rules is not None else None
     
     if port_rules:
-        port_rules.rules = rule_data
+        if rule_data is not None:
+            port_rules.rules = rule_data
+        if body.closing_time is not None:
+            port_rules.closing_time = body.closing_time
     else:
-        port_rules = PortRule(port_name=port_name, rules=rule_data)
+        port_rules = PortRule(
+            port_name=canonical_port_name,
+            rules=rule_data or [],
+            closing_time=body.closing_time,
+        )
         db.add(port_rules)
     
     try:
@@ -90,8 +128,12 @@ def update_port_rules(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-    
-    return port_rules
+
+    return {
+        "port_name": port_rules.port_name,
+        "rules": port_rules.rules or [],
+        "closing_time": port_rules.closing_time,
+    }
 
 
 @router.post("/{port_code}/service-request", response_model=ServiceRequestOut)

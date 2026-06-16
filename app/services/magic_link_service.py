@@ -144,6 +144,7 @@ def serialize_magic_link_public_payload(magic_link: DriverMagicLink) -> Dict[str
 
     return {
         "booking_id": booking.booking_id,
+        "booking_status": booking.status.value if booking.status else None,
         "magic_token": magic_link.token,
         "crew": {
             "name": booking.crew.full_name if booking.crew else None,
@@ -213,3 +214,30 @@ def mark_stop_reached(
     db.commit()
     db.refresh(event)
     return event
+
+
+def add_stop_to_magic_link(
+    db: Session,
+    magic_link: DriverMagicLink,
+    *,
+    name: str,
+    address: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    stop_type: str = "facility",
+) -> DriverMagicLink:
+    existing = list(magic_link.itinerary_stops or [])
+    stop_id = f"stop_{len(existing) + 1}"
+    new_stop = {
+        "id": stop_id,
+        "name": name.strip(),
+        "address": (address or "").strip() or None,
+        "lat": latitude,
+        "lng": longitude,
+        "type": (stop_type or "facility").strip().lower(),
+    }
+    existing.append(new_stop)
+    magic_link.itinerary_stops = _normalize_itinerary_stops(magic_link.booking, existing)
+    db.commit()
+    db.refresh(magic_link)
+    return magic_link
