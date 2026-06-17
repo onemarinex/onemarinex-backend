@@ -6,7 +6,7 @@ from datetime import datetime, date
 
 from app.db.session import get_db
 from app.db.models.aggregator_profile import AggregatorProfile
-from app.db.models.cab_booking import CabBooking, BookingStatus
+from app.db.models.cab_booking import CabBooking, BookingStatus, RideType
 from app.db.models.driver_magic_link import DriverMagicLink
 from app.db.models.driver import Driver
 from app.db.models.crew_profile import CrewProfile
@@ -16,6 +16,7 @@ from app.api.v1.routes_auth import get_current_user
 from app.db.models.user import User
 from pydantic import BaseModel, EmailStr
 from app.services.timeline_service import create_timeline_event
+from app.services.booking_service import get_eligible_providers_for_ride
 
 router = APIRouter()
 
@@ -363,7 +364,21 @@ def get_aggregator_dashboard(
             return False
         if row.id in declined_by_me:
             return False
-        return True
+
+        ride_type_value = (row.ride_type or "").lower()
+        try:
+            ride_type_enum = RideType(ride_type_value)
+        except Exception:
+            return False
+
+        eligible_providers = get_eligible_providers_for_ride(
+            db,
+            ride_type_enum,
+            row.port,
+            (row.vehicle_type or "ac"),
+            (row.vehicle_name or ""),
+        )
+        return any(provider.id == agg_profile.id for provider in eligible_providers)
 
     visible_rows = [row for row in rows if row_visible_to_provider(row)]
 

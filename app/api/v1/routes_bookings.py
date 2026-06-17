@@ -12,6 +12,7 @@ from app.api.v1.routes_auth import get_current_user
 from app.db.models.booking_timeline import BookingTimeline, TimelineEventType
 from app.db.models.cab_booking import CabBooking, BookingStatus
 from app.db.models.driver import Driver
+from app.db.models.driver_magic_link import DriverMagicLinkReachEvent
 from app.db.models.user import User
 from app.db.session import get_db
 from app.services.booking_service import (
@@ -102,6 +103,12 @@ class AddMagicStopIn(BaseModel):
     type: Optional[str] = Field(default="facility", max_length=32)
 
 
+class CompleteRideIn(BaseModel):
+    latitude: float
+    longitude: float
+    notes: Optional[str] = Field(default=None, max_length=500)
+
+
 class BookingListOut(BaseModel):
     bookings: List[dict]
     total: int
@@ -177,6 +184,7 @@ def add_magic_link_stop(
 @router.post("/magic/{token}/complete-ride")
 def complete_magic_link_ride(
     token: str,
+    body: CompleteRideIn,
     db: Session = Depends(get_db),
 ):
     magic_link = get_magic_link_by_token(db, token)
@@ -184,7 +192,39 @@ def complete_magic_link_ride(
     if not booking:
         raise HTTPException(status_code=404, detail="Linked booking not found")
 
+    trip_end_stop = None
+    for stop in magic_link.itinerary_stops or []:
+        stop_type = str(stop.get("type") or "").strip().lower()
+        stop_id = str(stop.get("id") or "").strip().lower()
+        if stop_type == "trip_end" or stop_id == "trip_end":
+            trip_end_stop = stop
+            break
+    if not trip_end_stop:
+        trip_end_stop = {
+            "id": "trip_end",
+            "name": "Trip End (Port)",
+            "address": booking.pickup_address,
+            "lat": booking.pickup_lat,
+            "lng": booking.pickup_lng,
+            "type": "trip_end",
+        }
+        itinerary = list(magic_link.itinerary_stops or [])
+        itinerary.append(trip_end_stop)
+        magic_link.itinerary_stops = itinerary
+
     now = datetime.utcnow()
+
+    db.add(
+        DriverMagicLinkReachEvent(
+            magic_link_id=magic_link.id,
+            stop_id=str(trip_end_stop.get("id") or "trip_end"),
+            stop_name=str(trip_end_stop.get("name") or "Trip End (Port)"),
+            latitude=body.latitude,
+            longitude=body.longitude,
+            notes=body.notes,
+        )
+    )
+
     db.query(CabBooking).filter(CabBooking.id == booking.id).update(
         {
             CabBooking.status: BookingStatus.COMPLETED,

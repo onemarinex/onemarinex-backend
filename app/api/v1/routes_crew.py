@@ -28,8 +28,11 @@ from app.db.models.pricing_controls import (
 )
 from app.api.v1.routes_auth import get_current_user
 from app.services.crew_service import generate_hpid
-from app.services.booking_service import vehicle_category_matches
-from pydantic import BaseModel
+from app.services.booking_service import (
+    get_eligible_providers_for_ride,
+    vehicle_category_matches,
+)
+from pydantic import BaseModel, Field
 
 router = APIRouter()
 
@@ -185,6 +188,10 @@ class CabBookingDetailsOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class BookingFareUpdateIn(BaseModel):
+    estimated_price: float = Field(ge=0)
 
 class CabBookingOut(BaseModel):
     id: int
@@ -1217,6 +1224,7 @@ def get_cab_options(
     ride_type_code: str = "coordinated_transfer",
     duration_hours: Optional[float] = None,
     distance_km_override: Optional[float] = None,
+    num_passengers: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
     """
@@ -1292,6 +1300,10 @@ def get_cab_options(
         estimate_minutes=duration_minutes,
     )
 
+    if num_passengers and num_passengers > 0:
+        flexible_cabs = [cab for cab in flexible_cabs if (cab.seating_capacity or 0) >= num_passengers]
+        aggregator_cabs = [cab for cab in aggregator_cabs if (cab.seating_capacity or 0) >= num_passengers]
+
     return CabOptionsResponse(
         port_id=resolved_port.id,
         port_name=resolved_port.name,
@@ -1351,13 +1363,15 @@ def book_cab(
     ):
         raise HTTPException(status_code=400, detail="Selected ride type is not available for this port")
 
-    broadcast_providers = (
-        db.query(AggregatorProfile)
-        .filter(func.lower(func.coalesce(AggregatorProfile.status, "")) == "active")
-        .all()
+    broadcast_providers = get_eligible_providers_for_ride(
+        db,
+        ride_type,
+        port_value,
+        resolved_vehicle_type,
+        body.vehicle_name,
     )
     if not broadcast_providers:
-        raise HTTPException(status_code=400, detail="No active providers available")
+        raise HTTPException(status_code=400, detail="No eligible providers available for this ride type and port")
 
     resolved_price, resolved_distance = _resolve_server_side_fare(
         db,
@@ -1559,6 +1573,38 @@ def get_booking_details(
         distance_km=float(booking.distance_km or 0),
         created_at=booking.created_at
     )
+
+
+@router.patch("/cab/bookings/{booking_id}/fare")
+def update_booking_fare(
+    booking_id: str,
+    body: BookingFareUpdateIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update the final fare for a crew booking."""
+    if current_user.role != "crew":
+        raise HTTPException(status_code=403, detail="Only crew can update booking fare")
+
+    profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Crew profile not found")
+
+    booking = db.query(CabBooking).filter(
+        CabBooking.booking_id == booking_id,
+        CabBooking.crew_id == profile.id,
+    ).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    booking.estimated_price = round(float(body.estimated_price), 2)
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update fare: {str(exc)}")
+
+    return {"booking_id": booking.booking_id, "estimated_price": float(booking.estimated_price)}
 
 @router.put("/cab/bookings/{booking_id}/cancel")
 def cancel_booking(

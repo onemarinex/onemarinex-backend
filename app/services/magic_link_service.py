@@ -1,4 +1,5 @@
 import secrets
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
@@ -6,6 +7,16 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.db.models.cab_booking import CabBooking
 from app.db.models.driver_magic_link import DriverMagicLink, DriverMagicLinkReachEvent
+
+
+_STOP_SPLIT_REGEX = re.compile(r"\s*(?:->|→)\s*")
+
+
+def _split_compound_stop_parts(name: str, address: str) -> List[str]:
+    source = name if re.search(r"->|→", name) else address if re.search(r"->|→", address) else ""
+    if not source:
+        return []
+    return [part.strip() for part in _STOP_SPLIT_REGEX.split(source) if part and part.strip()]
 
 
 def _default_itinerary_stops(booking: CabBooking) -> List[Dict[str, Any]]:
@@ -26,6 +37,14 @@ def _default_itinerary_stops(booking: CabBooking) -> List[Dict[str, Any]]:
             "lng": booking.drop_lng,
             "type": "drop",
         },
+        {
+            "id": "trip_end",
+            "name": "Trip End (Port)",
+            "address": booking.pickup_address,
+            "lat": booking.pickup_lat,
+            "lng": booking.pickup_lng,
+            "type": "trip_end",
+        },
     ]
 
 
@@ -37,26 +56,83 @@ def _normalize_itinerary_stops(
         return _default_itinerary_stops(booking)
 
     normalized: List[Dict[str, Any]] = []
+    used_ids: set[str] = set()
     for idx, stop in enumerate(itinerary_stops):
         if not isinstance(stop, dict):
             continue
         stop_name = str(stop.get("name") or stop.get("address") or f"Stop {idx + 1}").strip()
-        stop_id = str(stop.get("id") or f"stop_{idx + 1}").strip()
-        if not stop_id:
-            stop_id = f"stop_{idx + 1}"
+        stop_address = str(stop.get("address") or "").strip() or None
+        stop_type = str(stop.get("type") or "facility").strip().lower()
+        stop_id = str(stop.get("id") or f"stop_{idx + 1}").strip() or f"stop_{idx + 1}"
+
+        split_parts = _split_compound_stop_parts(stop_name, stop_address or "")
+        if len(split_parts) > 1:
+            generic_name = bool(re.match(r"^(drop|stop|destination)$", stop_name, flags=re.IGNORECASE))
+            for part_idx, part in enumerate(split_parts):
+                split_id = f"{stop_id}__{part_idx + 1}"
+                while split_id in used_ids:
+                    split_id = f"{split_id}_x"
+                used_ids.add(split_id)
+                normalized.append(
+                    {
+                        "id": split_id,
+                        "name": "Stop" if generic_name else part,
+                        "address": part,
+                        "lat": stop.get("lat"),
+                        "lng": stop.get("lng"),
+                        "type": stop_type,
+                    }
+                )
+            continue
+
+        while stop_id in used_ids:
+            stop_id = f"{stop_id}_x"
+        used_ids.add(stop_id)
         normalized.append(
             {
                 "id": stop_id,
                 "name": stop_name,
-                "address": str(stop.get("address") or "").strip() or None,
+                "address": stop_address,
                 "lat": stop.get("lat"),
                 "lng": stop.get("lng"),
-                "type": str(stop.get("type") or "facility").strip().lower(),
+                "type": stop_type,
             }
         )
 
     if not normalized:
         return _default_itinerary_stops(booking)
+
+    has_pickup = any(str(stop.get("type") or "").strip().lower() == "pickup" for stop in normalized)
+    if not has_pickup:
+        normalized.insert(
+            0,
+            {
+                "id": "pickup",
+                "name": "Pickup",
+                "address": booking.pickup_address,
+                "lat": booking.pickup_lat,
+                "lng": booking.pickup_lng,
+                "type": "pickup",
+            },
+        )
+
+    has_trip_end = any(
+        str(stop.get("type") or "").strip().lower() == "trip_end"
+        or str(stop.get("id") or "").strip().lower() == "trip_end"
+        for stop in normalized
+    )
+    if not has_trip_end:
+        normalized.append(
+            {
+                "id": "trip_end",
+                "name": "Trip End (Port)",
+                "address": booking.pickup_address,
+                "lat": booking.pickup_lat,
+                "lng": booking.pickup_lng,
+                "type": "trip_end",
+            }
+        )
+
     return normalized
 
 
@@ -102,6 +178,19 @@ def get_magic_link_by_token(db: Session, token: str) -> DriverMagicLink:
     )
     if not magic_link:
         raise HTTPException(status_code=404, detail="Magic link not found")
+
+    # Backfill older links that stored clubbed stop strings so each stop can
+    # be marked independently with a real stop id.
+    if magic_link.booking:
+        normalized = _normalize_itinerary_stops(
+            magic_link.booking,
+            magic_link.itinerary_stops,
+        )
+        if normalized != (magic_link.itinerary_stops or []):
+            magic_link.itinerary_stops = normalized
+            db.commit()
+            db.refresh(magic_link)
+
     return magic_link
 
 
