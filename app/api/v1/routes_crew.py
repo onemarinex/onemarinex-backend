@@ -21,6 +21,7 @@ from app.db.models.aggregator_profile import AggregatorProfile
 from app.db.models.pricing_controls import (
     PricingDuration,
     PricingDurationVisibility,
+    PricingProviderSetting,
     PricingRideType,
     PricingRule,
     PricingVehicleCategory,
@@ -35,6 +36,7 @@ from app.services.booking_service import (
 from pydantic import BaseModel, Field
 
 router = APIRouter()
+DEFAULT_TRIP_SPEED_KMPH = 28.0
 
 
 def _fallback_straight_line_distance_km(
@@ -52,6 +54,26 @@ def _compute_route_distance_km(
     drop_lat: float,
     drop_lng: float,
 ) -> float:
+    distance_km, _duration_minutes = _compute_route_metrics(
+        pickup_lat,
+        pickup_lng,
+        drop_lat,
+        drop_lng,
+    )
+    return distance_km
+
+
+def _estimate_minutes_from_distance(distance_km: float) -> float:
+    speed = max(5.0, DEFAULT_TRIP_SPEED_KMPH)
+    return max(1.0, (max(0.0, distance_km) / speed) * 60.0)
+
+
+def _compute_route_metrics(
+    pickup_lat: float,
+    pickup_lng: float,
+    drop_lat: float,
+    drop_lng: float,
+) -> tuple[float, float]:
     # Prefer routed distance over straight line so fare uses realistic road travel.
     url = (
         "https://router.project-osrm.org/route/v1/driving/"
@@ -65,11 +87,16 @@ def _compute_route_distance_km(
             routes = payload.get("routes") or []
             first = routes[0] if routes else None
             meters = float((first or {}).get("distance") or 0)
+            seconds = float((first or {}).get("duration") or 0)
             if meters > 0:
-                return meters / 1000.0
+                distance_km = meters / 1000.0
+                if seconds > 0:
+                    return distance_km, max(1.0, seconds / 60.0)
+                return distance_km, _estimate_minutes_from_distance(distance_km)
     except Exception:
         pass
-    return _fallback_straight_line_distance_km(pickup_lat, pickup_lng, drop_lat, drop_lng)
+    fallback_distance = _fallback_straight_line_distance_km(pickup_lat, pickup_lng, drop_lat, drop_lng)
+    return fallback_distance, _estimate_minutes_from_distance(fallback_distance)
 
 class ProfileUpdateIn(BaseModel):
     full_name: Optional[str] = None
@@ -288,7 +315,12 @@ def map_dynamic_vehicle_type(vehicle_type: str, vehicle_name: str, passenger_cou
     return "premium"
 
 
-def get_dynamic_cab_estimates(db: Session, distance: float, port_value: Optional[str]) -> List[CabEstimate]:
+def get_dynamic_cab_estimates(
+    db: Session,
+    distance: float,
+    port_value: Optional[str],
+    estimate_minutes: Optional[float] = None,
+) -> List[CabEstimate]:
     port = resolve_port_for_pricing(db, port_value)
     if not port:
         return []
@@ -316,8 +348,13 @@ def get_dynamic_cab_estimates(db: Session, distance: float, port_value: Optional
     )
 
     cheapest_by_vehicle: dict[int, CabEstimate] = {}
+    applied_minutes = float(estimate_minutes if estimate_minutes is not None else _estimate_minutes_from_distance(distance))
     for rule, vehicle in rules:
-        subtotal = (rule.base_fare or 0) + (distance * (rule.price_per_km or 0))
+        subtotal = (
+            (rule.base_fare or 0)
+            + (distance * (rule.price_per_km or 0))
+            + (applied_minutes * (rule.price_per_minute or 0))
+        )
         subtotal = max(subtotal, rule.minimum_fare or 0)
         adjustment_multiplier = 1.0
         for adjustment in rule.adjustments or []:
@@ -1008,9 +1045,34 @@ def _build_cab_options_for_provider(
        (provider has matching vehicle type on any active driver).
     """
     booking_provider_type = _PRICING_TYPE_TO_BOOKING.get(pricing_provider_type, pricing_provider_type)
+    is_package_trip = (getattr(ride_type_obj, "code", "") or "") == "package_trip"
 
-    # Fast port+provider check — skip all DB work if nobody is serving this port
-    if not _has_active_provider_for_port(db, port_id, booking_provider_type):
+    provider_setting = (
+        db.query(PricingProviderSetting)
+        .filter(
+            PricingProviderSetting.port_id == port_id,
+            PricingProviderSetting.ride_type_id == ride_type_obj.id,
+            PricingProviderSetting.provider_type == pricing_provider_type,
+        )
+        .first()
+    )
+    if provider_setting is not None:
+        if not bool(provider_setting.is_active):
+            return []
+        # Superadmin minimum duration guard for this provider type.
+        if duration_minutes and provider_setting.minimum_bookable_hours:
+            min_minutes = int(round(float(provider_setting.minimum_bookable_hours) * 60))
+            if duration_minutes < min_minutes:
+                return []
+        cfg = provider_setting.config or {}
+        if isinstance(cfg, dict):
+            allow_package = cfg.get("allow_package_trips")
+            if allow_package is False:
+                return []
+
+    # For coordinated transfers we require an active serving provider; package cards
+    # should still be shown from superadmin pricing settings even before driver assignment.
+    if not is_package_trip and not _has_active_provider_for_port(db, port_id, booking_provider_type):
         return []
 
     selected_duration: Optional[PricingDuration] = None
@@ -1081,27 +1143,45 @@ def _build_cab_options_for_provider(
         )
     )
     if selected_duration:
-        rules_query = rules_query.filter(PricingRule.duration_id == selected_duration.id)
+        rules = rules_query.filter(PricingRule.duration_id == selected_duration.id).all()
+        # Backward compatibility: if this duration has no explicit rules,
+        # fall back to generic (duration_id is NULL) rules.
+        if not rules:
+            rules = rules_query.filter(PricingRule.duration_id.is_(None)).all()
     else:
-        rules_query = rules_query.filter(PricingRule.duration_id.is_(None))
-
-    rules = rules_query.all()
+        rules = rules_query.filter(PricingRule.duration_id.is_(None)).all()
 
     # Keep cheapest rule per vehicle category
     best: dict[int, tuple] = {}
     for rule, vehicle in rules:
         applied_minutes = float(estimate_minutes if estimate_minutes is not None else (duration_minutes_value or 0))
-        subtotal = (
-            (rule.base_fare or 0)
-            + (distance_km * (rule.price_per_km or 0))
-            + (applied_minutes * (rule.price_per_minute or 0))
-        )
-        if rule.included_km is not None and rule.price_per_extra_km:
-            extra_km = max(0.0, distance_km - float(rule.included_km or 0))
-            subtotal += extra_km * float(rule.price_per_extra_km or 0)
-        if selected_duration and rule.price_per_extra_minute:
-            extra_minutes = max(0.0, applied_minutes - float(selected_duration.duration_minutes or 0))
-            subtotal += extra_minutes * float(rule.price_per_extra_minute or 0)
+        if (ride_type_obj.pricing_mode or "").lower() == "package":
+            subtotal = float(rule.base_fare or 0)
+            if rule.included_km is not None and rule.price_per_extra_km:
+                extra_km = max(0.0, distance_km - float(rule.included_km or 0))
+                subtotal += extra_km * float(rule.price_per_extra_km or 0)
+            elif rule.price_per_km:
+                # Backward-compatible fallback for ports that still use per-km package rules.
+                subtotal += distance_km * float(rule.price_per_km or 0)
+
+            if selected_duration and rule.price_per_extra_minute:
+                extra_minutes = max(0.0, applied_minutes - float(selected_duration.duration_minutes or 0))
+                subtotal += extra_minutes * float(rule.price_per_extra_minute or 0)
+            elif rule.price_per_minute:
+                # Backward-compatible fallback when package extra-minute config is not set.
+                subtotal += applied_minutes * float(rule.price_per_minute or 0)
+        else:
+            subtotal = (
+                float(rule.base_fare or 0)
+                + (distance_km * float(rule.price_per_km or 0))
+                + (applied_minutes * float(rule.price_per_minute or 0))
+            )
+            if rule.included_km is not None and rule.price_per_extra_km:
+                extra_km = max(0.0, distance_km - float(rule.included_km or 0))
+                subtotal += extra_km * float(rule.price_per_extra_km or 0)
+            if selected_duration and rule.price_per_extra_minute:
+                extra_minutes = max(0.0, applied_minutes - float(selected_duration.duration_minutes or 0))
+                subtotal += extra_minutes * float(rule.price_per_extra_minute or 0)
         subtotal = max(subtotal, rule.minimum_fare or 0)
         multiplier = 1.0
         for adj in rule.adjustments or []:
@@ -1118,7 +1198,7 @@ def _build_cab_options_for_provider(
             if vehicle_visibility_by_id.get(vehicle.id) is False:
                 continue
         # Per-vehicle availability: only include if a matching driver exists at this port
-        if not _vehicle_has_provider(db, port_id, booking_provider_type, vehicle.code, vehicle.name):
+        if not is_package_trip and not _vehicle_has_provider(db, port_id, booking_provider_type, vehicle.code, vehicle.name):
             continue
         result.append(
             CabVehiclePricing(
@@ -1160,7 +1240,7 @@ def _resolve_server_side_fare(
     vehicle_type: str,
     vehicle_name: str,
 ) -> tuple[Optional[float], float]:
-    distance_km = _compute_route_distance_km(pickup_lat, pickup_lng, drop_lat, drop_lng)
+    distance_km, estimated_minutes = _compute_route_metrics(pickup_lat, pickup_lng, drop_lat, drop_lng)
     resolved_port = resolve_port_for_pricing(db, port_value)
     if not resolved_port:
         return None, round(distance_km, 2)
@@ -1184,6 +1264,7 @@ def _resolve_server_side_fare(
         pricing_provider_type=pricing_provider_type,
         booking_ride_type=booking_ride_type,
         distance_km=distance_km,
+        estimate_minutes=estimated_minutes,
     )
     if not options:
         return None, round(distance_km, 2)
@@ -1246,12 +1327,19 @@ def get_cab_options(
     """
     if distance_km_override is not None and distance_km_override >= 0:
         distance_km = float(distance_km_override)
+        route_minutes = _estimate_minutes_from_distance(distance_km)
     else:
         if None in (pickup_lat, pickup_lng, drop_lat, drop_lng):
             raise HTTPException(status_code=400, detail="pickup/drop coordinates or distance_km_override are required")
-        distance_km = _compute_route_distance_km(float(pickup_lat), float(pickup_lng), float(drop_lat), float(drop_lng))
+        distance_km, route_minutes = _compute_route_metrics(
+            float(pickup_lat),
+            float(pickup_lng),
+            float(drop_lat),
+            float(drop_lng),
+        )
 
     duration_minutes = int(round(duration_hours * 60)) if duration_hours and duration_hours > 0 else None
+    effective_estimate_minutes = float(duration_minutes if duration_minutes is not None else route_minutes)
 
     resolved_port = resolve_port_for_pricing(db, port)
     if not resolved_port:
@@ -1287,7 +1375,7 @@ def get_cab_options(
         booking_ride_type=BookingRideType.FLEXIBLE_RIDE.value,
         distance_km=distance_km,
         duration_minutes=duration_minutes,
-        estimate_minutes=duration_minutes,
+        estimate_minutes=effective_estimate_minutes,
     )
     aggregator_cabs = _build_cab_options_for_provider(
         db,
@@ -1297,7 +1385,7 @@ def get_cab_options(
         booking_ride_type=BookingRideType.GUARANTEED_COORDINATED_RIDE.value,
         distance_km=distance_km,
         duration_minutes=duration_minutes,
-        estimate_minutes=duration_minutes,
+        estimate_minutes=effective_estimate_minutes,
     )
 
     if num_passengers and num_passengers > 0:
@@ -1481,9 +1569,9 @@ def get_cab_estimates(
     ride_type: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    distance = _compute_route_distance_km(pickup_lat, pickup_lng, drop_lat, drop_lng)
+    distance, route_minutes = _compute_route_metrics(pickup_lat, pickup_lng, drop_lat, drop_lng)
 
-    dynamic_estimates = get_dynamic_cab_estimates(db, distance, port)
+    dynamic_estimates = get_dynamic_cab_estimates(db, distance, port, estimate_minutes=route_minutes)
     if dynamic_estimates:
         return filter_estimates_for_ride_type(db, dynamic_estimates, ride_type, port)
     

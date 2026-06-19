@@ -34,7 +34,7 @@ Itinerary building:
 
 from __future__ import annotations
 
-import random
+import math
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -43,6 +43,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models.vendors import PlaceCategory, Vendors
 from app.db.models.port import Port
+from app.db.models.pricing_controls import PricingDuration, PricingRideType, PricingRule
 from app.db.models.vendor_tag import VendorTag
 from app.db.session import get_db
 
@@ -71,6 +72,7 @@ DEFAULT_TIME_BY_CATEGORY: Dict[PlaceCategory, float] = {
 
 MAX_ITINERARIES = 6
 MAX_STOPS_PER_ITINERARY = 8
+DEFAULT_TRAVEL_SPEED_KMPH = 24.0
 
 
 # ── schemas ──────────────────────────────────────────────────────────────────
@@ -104,6 +106,8 @@ class ItineraryOption(BaseModel):
     itinerary_number: int
     label: str
     total_hours: float
+    total_distance_km: float
+    estimated_travel_minutes: float
     total_stops: int
     highlights: List[str]         # tag names covered by this itinerary
     stops: List[ItineraryStop]
@@ -192,13 +196,18 @@ def _vendor_to_stop(v: Vendors) -> ItineraryStop:
     if v.images and len(v.images) > 0:
         image_url = v.images[0]
 
+    try:
+        distance_from_port = float(v.distance_from_port or 0.0)
+    except (TypeError, ValueError):
+        distance_from_port = 0.0
+
     return ItineraryStop(
         vendor_id=v.id,
         name=v.name,
         category=v.category.value,
         tags=raw_tags,
-        avg_time_hours=avg_time,
-        distance_from_port=v.distance_from_port,
+        avg_time_hours=max(0.25, float(avg_time or 1.0)),
+        distance_from_port=max(0.0, distance_from_port),
         rating=v.rating or 0.0,
         price_per_person=price,
         address=v.location_name,
@@ -227,34 +236,175 @@ def _tags_overlap(vendor_tags: List[str], requested_tags: List[str]) -> bool:
     return bool(vt & rt)
 
 
+def _tag_overlap_score(vendor_tags: List[str], requested_tags: List[str]) -> int:
+    vt = {_normalize_tag(t) for t in vendor_tags}
+    rt = {_normalize_tag(t) for t in requested_tags}
+    return len(vt & rt)
+
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    r = 6371.0
+    d_lat = math.radians(lat2 - lat1)
+    d_lng = math.radians(lng2 - lng1)
+    a = (
+        math.sin(d_lat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(d_lng / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return r * c
+
+
+def _safe_port_distance_km(stop: ItineraryStop, fallback_km: float) -> float:
+    value = float(stop.distance_from_port or 0.0)
+    if value > 0:
+        return value
+    return fallback_km
+
+
+def _leg_distance_km(a: ItineraryStop, b: ItineraryStop, fallback_km: float) -> float:
+    if a.lat is not None and a.lng is not None and b.lat is not None and b.lng is not None:
+        direct = _haversine_km(float(a.lat), float(a.lng), float(b.lat), float(b.lng))
+        if direct > 0:
+            return direct
+    a_port = _safe_port_distance_km(a, fallback_km)
+    b_port = _safe_port_distance_km(b, fallback_km)
+    # Approximate inter-stop road leg when geocoordinates are unavailable.
+    return max(0.5, abs(a_port - b_port) + (min(a_port, b_port) * 0.35))
+
+
+def _route_distance_km(stops: List[ItineraryStop], fallback_km: float) -> float:
+    if not stops:
+        return 0.0
+    total = _safe_port_distance_km(stops[0], fallback_km)
+    for idx in range(1, len(stops)):
+        total += _leg_distance_km(stops[idx - 1], stops[idx], fallback_km)
+    total += _safe_port_distance_km(stops[-1], fallback_km)
+    return total
+
+
+def _max_repeats_for_category(hours_budget: float, category: str) -> int:
+    normalized = (category or "").strip().lower()
+    if hours_budget < 6:
+        return 1
+    if normalized in {"restaurant", "pub", "sightseeing"}:
+        return 2
+    return 1
+
+
+def _resolve_package_constraints(
+    db: Session,
+    port_id: Optional[int],
+    requested_hours: float,
+) -> tuple[Optional[float], float]:
+    if not port_id:
+        return None, DEFAULT_TRAVEL_SPEED_KMPH
+
+    ride_type = (
+        db.query(PricingRideType)
+        .filter(PricingRideType.code == "package_trip")
+        .first()
+    )
+    if not ride_type:
+        return None, DEFAULT_TRAVEL_SPEED_KMPH
+
+    durations = (
+        db.query(PricingDuration)
+        .filter(
+            PricingDuration.port_id == port_id,
+            PricingDuration.ride_type_id == ride_type.id,
+            PricingDuration.is_active.is_(True),
+        )
+        .all()
+    )
+    if not durations:
+        return None, DEFAULT_TRAVEL_SPEED_KMPH
+
+    requested_minutes = int(round(requested_hours * 60))
+    selected = min(durations, key=lambda d: abs((d.duration_minutes or 0) - requested_minutes))
+
+    rules = (
+        db.query(PricingRule)
+        .filter(
+            PricingRule.port_id == port_id,
+            PricingRule.ride_type_id == ride_type.id,
+            PricingRule.duration_id == selected.id,
+            PricingRule.is_active.is_(True),
+            PricingRule.is_archived.is_(False),
+        )
+        .all()
+    )
+
+    km_limits = [float(rule.included_km) for rule in rules if rule.included_km is not None and rule.included_km > 0]
+    km_cap = min(km_limits) if km_limits else None
+
+    speed_candidates: List[float] = []
+    for rule in rules:
+        metadata = rule.pricing_metadata or {}
+        if not isinstance(metadata, dict):
+            continue
+        for key in ("speed_kmph", "avg_speed_kmph", "assumed_speed_kmph"):
+            value = metadata.get(key)
+            try:
+                parsed = float(value)
+                if parsed > 0:
+                    speed_candidates.append(parsed)
+            except (TypeError, ValueError):
+                continue
+    speed_kmph = min(speed_candidates) if speed_candidates else DEFAULT_TRAVEL_SPEED_KMPH
+    return km_cap, speed_kmph
+
+
 def _build_itinerary(
     candidates: List[ItineraryStop],
     hours_budget: float,
+    km_budget: Optional[float],
+    speed_kmph: float,
+    fallback_port_distance_km: float,
     seed_offset: int = 0,
-) -> Optional[List[ItineraryStop]]:
+) -> Optional[tuple[List[ItineraryStop], float, float]]:
     """
     Greedy pack: start from seed_offset in the (already-sorted) candidate list,
     wrap around, pick stops until the budget is consumed or list exhausted.
     Returns None if nothing fits.
     """
     stops: List[ItineraryStop] = []
-    total = 0.0
+    dwell_hours = 0.0
     n = len(candidates)
     seen_ids: set[int] = set()
+    category_counts: Dict[str, int] = {}
+    effective_speed = max(5.0, speed_kmph)
 
     for i in range(n):
         idx = (i + seed_offset) % n
         stop = candidates[idx]
         if stop.vendor_id in seen_ids:
             continue
-        if total + stop.avg_time_hours <= hours_budget + 0.25:  # 15-min tolerance
-            stops.append(stop)
-            total += stop.avg_time_hours
+        category_key = (stop.category or "").strip().lower()
+        if category_counts.get(category_key, 0) >= _max_repeats_for_category(hours_budget, stop.category):
+            continue
+
+        proposed_stops = stops + [stop]
+        route_km = _route_distance_km(proposed_stops, fallback_port_distance_km)
+        travel_hours = route_km / effective_speed
+        proposed_total_hours = dwell_hours + stop.avg_time_hours + travel_hours
+
+        if km_budget is not None and route_km > (km_budget + 0.1):
+            continue
+        if proposed_total_hours <= hours_budget + 0.05:
+            stops = proposed_stops
+            dwell_hours += stop.avg_time_hours
             seen_ids.add(stop.vendor_id)
+            category_counts[category_key] = category_counts.get(category_key, 0) + 1
         if len(stops) >= MAX_STOPS_PER_ITINERARY:
             break
 
-    return stops if stops else None
+    if not stops:
+        return None
+    total_km = _route_distance_km(stops, fallback_port_distance_km)
+    travel_minutes = (total_km / effective_speed) * 60.0
+    return stops, total_km, travel_minutes
 
 
 def _itinerary_label(stops: List[ItineraryStop], idx: int) -> str:
@@ -296,6 +446,11 @@ def suggest_itinerary(
         )
 
     resolved_port = _resolve_port(db, body.port_id, body.port)
+    km_cap, configured_speed_kmph = _resolve_package_constraints(
+        db,
+        resolved_port.id if resolved_port else None,
+        body.hours,
+    )
 
     # ── 1. Query vendors for this port ───────────────────────────────────────
     query = db.query(Vendors).filter(
@@ -320,8 +475,14 @@ def suggest_itinerary(
     else:
         candidates = tag_matched
 
-    # Sort by rating desc
-    candidates.sort(key=lambda s: s.rating, reverse=True)
+    # Prefer vendors that match more requested tags, then rating.
+    candidates.sort(
+        key=lambda s: (_tag_overlap_score(s.tags, requested_tags), s.rating),
+        reverse=True,
+    )
+
+    positive_distances = [float(item.distance_from_port) for item in all_stops if (item.distance_from_port or 0) > 0]
+    fallback_port_distance_km = sum(positive_distances) / len(positive_distances) if positive_distances else 3.0
 
     # ── 4. Build up to MAX_ITINERARIES by rotating the start index ────────────
     itineraries: List[ItineraryOption] = []
@@ -330,15 +491,23 @@ def suggest_itinerary(
     for offset in range(len(candidates)):
         if len(itineraries) >= MAX_ITINERARIES:
             break
-        stops = _build_itinerary(candidates, body.hours, seed_offset=offset)
-        if not stops:
+        built = _build_itinerary(
+            candidates,
+            body.hours,
+            km_budget=km_cap,
+            speed_kmph=configured_speed_kmph,
+            fallback_port_distance_km=fallback_port_distance_km,
+            seed_offset=offset,
+        )
+        if not built:
             continue
+        stops, total_km, travel_minutes = built
         combo_key = tuple(sorted(s.vendor_id for s in stops))
         if combo_key in used_combos:
             continue
         used_combos.add(combo_key)
 
-        total_h = round(sum(s.avg_time_hours for s in stops), 2)
+        total_h = round(sum(s.avg_time_hours for s in stops) + (travel_minutes / 60.0), 2)
         highlights = list({tag for s in stops for tag in s.tags if tag in requested_tags})
         if not highlights:
             highlights = requested_tags[:3]
@@ -348,6 +517,8 @@ def suggest_itinerary(
                 itinerary_number=len(itineraries) + 1,
                 label=_itinerary_label(stops, len(itineraries) + 1),
                 total_hours=total_h,
+                total_distance_km=round(total_km, 2),
+                estimated_travel_minutes=round(travel_minutes, 1),
                 total_stops=len(stops),
                 highlights=highlights,
                 stops=stops,
