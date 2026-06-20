@@ -75,7 +75,8 @@ MAX_STOPS_PER_ITINERARY = 8
 DEFAULT_TRAVEL_SPEED_KMPH = 24.0
 MAX_STOP_DWELL_HOURS = 4.0
 MULTI_VISIT_TAGS = {"sightseeing", "adventure", "funzone"}
-FOOD_BUCKET_TAGS = {"food", "restaurant", "pub", "bar", "cafe"}
+FOOD_BUCKET_TAGS = {"food", "restaurant", "cafe", "dining"}
+NIGHTLIFE_BUCKET_TAGS = {"pub", "bar", "nightlife"}
 SPA_BUCKET_TAGS = {"relax", "spa", "wellness"}
 CURRENCY_BUCKET_TAGS = {"currency", "currency_exchange", "forex"}
 SIM_BUCKET_TAGS = {"sim_card", "sim"}
@@ -457,16 +458,31 @@ def _max_repeats_for_category(hours_budget: float, category: str, tags: Optional
 def _category_bucket_key(category: str, tags: Optional[List[str]] = None) -> str:
     normalized_category = _normalize_tag(category or "")
     normalized_tags = {_normalize_tag(tag) for tag in (tags or []) if tag}
-    all_keys = {normalized_category} | normalized_tags
-
-    if all_keys & FOOD_BUCKET_TAGS:
+    # Prioritize primary category to avoid multi-tag rows collapsing everything
+    # into one bucket (for example, a sightseeing place tagged with "food").
+    if normalized_category in FOOD_BUCKET_TAGS:
         return "bucket_food"
-    if all_keys & SPA_BUCKET_TAGS:
+    if normalized_category in NIGHTLIFE_BUCKET_TAGS:
+        return "bucket_nightlife"
+    if normalized_category in SPA_BUCKET_TAGS:
         return "bucket_spa"
-    if all_keys & CURRENCY_BUCKET_TAGS:
+    if normalized_category in CURRENCY_BUCKET_TAGS:
         return "bucket_currency"
-    if all_keys & SIM_BUCKET_TAGS:
+    if normalized_category in SIM_BUCKET_TAGS:
         return "bucket_sim"
+
+    # Fallback to tags when category is unknown or generic.
+    if normalized_tags & FOOD_BUCKET_TAGS:
+        return "bucket_food"
+    if normalized_tags & NIGHTLIFE_BUCKET_TAGS:
+        return "bucket_nightlife"
+    if normalized_tags & SPA_BUCKET_TAGS:
+        return "bucket_spa"
+    if normalized_tags & CURRENCY_BUCKET_TAGS:
+        return "bucket_currency"
+    if normalized_tags & SIM_BUCKET_TAGS:
+        return "bucket_sim"
+
     return normalized_category or "bucket_misc"
 
 
