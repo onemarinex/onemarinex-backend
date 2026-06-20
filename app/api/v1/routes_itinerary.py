@@ -106,6 +106,8 @@ class ItineraryStop(BaseModel):
     lat: Optional[float]
     lng: Optional[float]
     description: Optional[str]
+    travel_minutes_from_prev: Optional[float] = None
+    travel_minutes_to_port: Optional[float] = None
 
 
 class ItineraryOption(BaseModel):
@@ -223,6 +225,8 @@ def _vendor_to_stop(v: Vendors) -> ItineraryStop:
         lat=v.lat,
         lng=v.lng,
         description=other.get("about") or other.get("description"),
+        travel_minutes_from_prev=None,
+        travel_minutes_to_port=None,
     )
 
 
@@ -354,6 +358,88 @@ def _stretch_stop_durations(
         if not progressed:
             break
     return grown
+
+
+def _annotate_leg_travel_minutes(
+    stops: List[ItineraryStop],
+    fallback_port_distance_km: float,
+    speed_kmph: float,
+) -> tuple[List[ItineraryStop], float, float]:
+    if not stops:
+        return [], 0.0, 0.0
+
+    effective_speed = max(5.0, speed_kmph)
+    annotated: List[ItineraryStop] = [
+        (s.model_copy(deep=True) if hasattr(s, "model_copy") else s.copy(deep=True))
+        for s in stops
+    ]
+
+    total_km = 0.0
+    total_travel_minutes = 0.0
+
+    first_leg_km = _safe_port_distance_km(annotated[0], fallback_port_distance_km)
+    first_leg_minutes = max(3.0, (first_leg_km / effective_speed) * 60.0)
+    annotated[0].travel_minutes_from_prev = round(first_leg_minutes, 1)
+    total_km += first_leg_km
+    total_travel_minutes += first_leg_minutes
+
+    for idx in range(1, len(annotated)):
+        leg_km = _leg_distance_km(annotated[idx - 1], annotated[idx], fallback_port_distance_km)
+        leg_minutes = max(3.0, (leg_km / effective_speed) * 60.0)
+        annotated[idx].travel_minutes_from_prev = round(leg_minutes, 1)
+        total_km += leg_km
+        total_travel_minutes += leg_minutes
+
+    return_km = _safe_port_distance_km(annotated[-1], fallback_port_distance_km)
+    return_minutes = max(3.0, (return_km / effective_speed) * 60.0)
+    annotated[-1].travel_minutes_to_port = round(return_minutes, 1)
+    total_km += return_km
+    total_travel_minutes += return_minutes
+    return annotated, total_km, total_travel_minutes
+
+
+def _trim_stop_durations_to_budget(
+    stops: List[ItineraryStop],
+    target_hours: float,
+    travel_minutes: float,
+) -> List[ItineraryStop]:
+    if not stops:
+        return stops
+
+    budget_minutes = max(0.0, target_hours * 60.0)
+    dwell_minutes = sum(float(stop.avg_time_hours or 0.0) * 60.0 for stop in stops)
+    overflow = (dwell_minutes + travel_minutes) - budget_minutes
+    if overflow <= 0.1:
+        return stops
+
+    trimmed: List[ItineraryStop] = [
+        (s.model_copy(deep=True) if hasattr(s, "model_copy") else s.copy(deep=True))
+        for s in stops
+    ]
+
+    while overflow > 0.1:
+        adjustable = [
+            idx
+            for idx, stop in enumerate(trimmed)
+            if float(stop.avg_time_hours or 0.0) * 60.0 > 15.0
+        ]
+        if not adjustable:
+            break
+        reduce_each = overflow / len(adjustable)
+        progressed = False
+        for idx in adjustable:
+            current_minutes = float(trimmed[idx].avg_time_hours or 0.0) * 60.0
+            reducible = max(0.0, current_minutes - 15.0)
+            reduction = min(reducible, reduce_each)
+            if reduction <= 0:
+                continue
+            trimmed[idx].avg_time_hours = round((current_minutes - reduction) / 60.0, 2)
+            overflow -= reduction
+            progressed = True
+        if not progressed:
+            break
+
+    return trimmed
 
 
 def _max_repeats_for_category(hours_budget: float, category: str, tags: Optional[List[str]] = None) -> int:
@@ -496,7 +582,13 @@ def _build_itinerary(
     total_km = _route_distance_km(stops, fallback_port_distance_km)
     travel_minutes = (total_km / effective_speed) * 60.0
     stretched = _stretch_stop_durations(stops, hours_budget, travel_minutes / 60.0)
-    return stretched, total_km, travel_minutes
+    annotated, total_km, travel_minutes = _annotate_leg_travel_minutes(
+        stretched,
+        fallback_port_distance_km,
+        effective_speed,
+    )
+    trimmed = _trim_stop_durations_to_budget(annotated, hours_budget, travel_minutes)
+    return trimmed, total_km, travel_minutes
 
 
 def _itinerary_label(stops: List[ItineraryStop], idx: int) -> str:
