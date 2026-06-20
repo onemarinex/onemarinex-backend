@@ -74,7 +74,7 @@ MAX_ITINERARIES = 6
 MAX_STOPS_PER_ITINERARY = 8
 DEFAULT_TRAVEL_SPEED_KMPH = 24.0
 MAX_STOP_DWELL_HOURS = 4.0
-MULTI_VISIT_TAGS = {"sightseeing", "adventure", "funzone"}
+MULTI_VISIT_TAGS = {"fun_zone", "explore_places"}
 FOOD_BUCKET_TAGS = {"food", "restaurant", "cafe", "dining"}
 NIGHTLIFE_BUCKET_TAGS = {"pub", "bar", "nightlife"}
 SPA_BUCKET_TAGS = {"relax", "spa", "wellness"}
@@ -235,6 +235,10 @@ def _normalize_tag(value: str) -> str:
     tag = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
     while "__" in tag:
         tag = tag.replace("__", "_")
+    if tag in {"funzone"}:
+        tag = "fun_zone"
+    if tag in {"exploreplaces", "explore_place"}:
+        tag = "explore_places"
     # Handle common singular/plural variance (restaurant/restaurants, pub/pubs)
     if len(tag) > 3 and tag.endswith("s"):
         tag = tag[:-1]
@@ -455,6 +459,24 @@ def _max_repeats_for_category(hours_budget: float, category: str, tags: Optional
     return 1
 
 
+def _repeat_bucket_key_for_stop(stop: ItineraryStop, requested_tags: Optional[List[str]]) -> str:
+    requested = {_normalize_tag(tag) for tag in (requested_tags or []) if tag}
+    stop_tags = [_normalize_tag(tag) for tag in (stop.tags or []) if tag]
+    matched_tags = sorted({tag for tag in stop_tags if tag in requested})
+    if matched_tags:
+        return f"tag:{matched_tags[0]}"
+    # If no requested tag matched, fall back to normalized category bucket.
+    return f"category:{_category_bucket_key(stop.category, None)}"
+
+
+def _max_repeats_for_bucket(bucket_key: str, hours_budget: float, stop: ItineraryStop) -> int:
+    if bucket_key.startswith("tag:"):
+        tag = bucket_key.split(":", 1)[1]
+        if tag in MULTI_VISIT_TAGS:
+            return MAX_STOPS_PER_ITINERARY
+    return _max_repeats_for_category(hours_budget, stop.category, stop.tags)
+
+
 def _category_bucket_key(category: str, tags: Optional[List[str]] = None) -> str:
     normalized_category = _normalize_tag(category or "")
     normalized_tags = {_normalize_tag(tag) for tag in (tags or []) if tag}
@@ -555,6 +577,7 @@ def _build_itinerary(
     km_budget: Optional[float],
     speed_kmph: float,
     fallback_port_distance_km: float,
+    requested_tags: Optional[List[str]] = None,
     seed_offset: int = 0,
 ) -> Optional[tuple[List[ItineraryStop], float, float]]:
     """
@@ -566,7 +589,7 @@ def _build_itinerary(
     dwell_hours = 0.0
     n = len(candidates)
     seen_ids: set[int] = set()
-    category_counts: Dict[str, int] = {}
+    bucket_counts: Dict[str, int] = {}
     effective_speed = max(5.0, speed_kmph)
 
     for i in range(n):
@@ -574,8 +597,8 @@ def _build_itinerary(
         stop = candidates[idx]
         if stop.vendor_id in seen_ids:
             continue
-        category_key = _category_bucket_key(stop.category, stop.tags)
-        if category_counts.get(category_key, 0) >= _max_repeats_for_category(hours_budget, stop.category, stop.tags):
+        bucket_key = _repeat_bucket_key_for_stop(stop, requested_tags)
+        if bucket_counts.get(bucket_key, 0) >= _max_repeats_for_bucket(bucket_key, hours_budget, stop):
             continue
 
         proposed_stops = stops + [stop]
@@ -589,7 +612,7 @@ def _build_itinerary(
             stops = proposed_stops
             dwell_hours += stop.avg_time_hours
             seen_ids.add(stop.vendor_id)
-            category_counts[category_key] = category_counts.get(category_key, 0) + 1
+            bucket_counts[bucket_key] = bucket_counts.get(bucket_key, 0) + 1
         if len(stops) >= MAX_STOPS_PER_ITINERARY:
             break
 
@@ -699,6 +722,7 @@ def suggest_itinerary(
             km_budget=km_cap,
             speed_kmph=configured_speed_kmph,
             fallback_port_distance_km=fallback_port_distance_km,
+            requested_tags=requested_tags,
             seed_offset=offset,
         )
         if not built:
