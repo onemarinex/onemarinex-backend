@@ -73,6 +73,8 @@ DEFAULT_TIME_BY_CATEGORY: Dict[PlaceCategory, float] = {
 MAX_ITINERARIES = 6
 MAX_STOPS_PER_ITINERARY = 8
 DEFAULT_TRAVEL_SPEED_KMPH = 24.0
+MAX_STOP_DWELL_HOURS = 4.0
+MULTI_VISIT_TAGS = {"sightseeing", "adventure", "funzone"}
 
 
 # ── schemas ──────────────────────────────────────────────────────────────────
@@ -284,12 +286,79 @@ def _route_distance_km(stops: List[ItineraryStop], fallback_km: float) -> float:
     return total
 
 
-def _max_repeats_for_category(hours_budget: float, category: str) -> int:
+def _stop_dedupe_key(stop: ItineraryStop) -> tuple:
+    if stop.vendor_id:
+        return ("id", int(stop.vendor_id))
+    name_key = (stop.name or "").strip().lower()
+    addr_key = (stop.address or "").strip().lower()
+    return ("name_addr", name_key, addr_key)
+
+
+def _dedupe_stops(stops: List[ItineraryStop]) -> List[ItineraryStop]:
+    seen: set[tuple] = set()
+    result: List[ItineraryStop] = []
+    for stop in stops:
+        key = _stop_dedupe_key(stop)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(stop)
+    return result
+
+
+def _stretch_stop_durations(
+    stops: List[ItineraryStop],
+    target_hours: float,
+    travel_hours: float,
+) -> List[ItineraryStop]:
+    if not stops:
+        return stops
+
+    current_dwell = sum(float(s.avg_time_hours or 0.0) for s in stops)
+    target_dwell = max(current_dwell, target_hours - max(0.0, travel_hours))
+    total_capacity = sum(max(0.0, MAX_STOP_DWELL_HOURS - float(s.avg_time_hours or 0.0)) for s in stops)
+    slack = min(max(0.0, target_dwell - current_dwell), total_capacity)
+    if slack <= 0:
+        return stops
+
+    grown: List[ItineraryStop] = [
+        (s.model_copy(deep=True) if hasattr(s, "model_copy") else s.copy(deep=True))
+        for s in stops
+    ]
+    remaining = slack
+    while remaining > 0.001:
+        growable = [
+            idx
+            for idx, stop in enumerate(grown)
+            if float(stop.avg_time_hours or 0.0) < MAX_STOP_DWELL_HOURS - 0.001
+        ]
+        if not growable:
+            break
+        add_each = remaining / len(growable)
+        progressed = False
+        for idx in growable:
+            current = float(grown[idx].avg_time_hours or 0.0)
+            cap = max(0.0, MAX_STOP_DWELL_HOURS - current)
+            add = min(cap, add_each)
+            if add <= 0:
+                continue
+            grown[idx].avg_time_hours = round(current + add, 2)
+            remaining -= add
+            progressed = True
+        if not progressed:
+            break
+    return grown
+
+
+def _max_repeats_for_category(hours_budget: float, category: str, tags: Optional[List[str]] = None) -> int:
+    _ = hours_budget
     normalized = (category or "").strip().lower()
-    if hours_budget < 6:
-        return 1
-    if normalized in {"restaurant", "pub", "sightseeing"}:
-        return 2
+    if _normalize_tag(normalized) in MULTI_VISIT_TAGS:
+        return MAX_STOPS_PER_ITINERARY
+    if tags:
+        normalized_tags = {_normalize_tag(tag) for tag in tags if tag}
+        if normalized_tags & MULTI_VISIT_TAGS:
+            return MAX_STOPS_PER_ITINERARY
     return 1
 
 
@@ -382,7 +451,7 @@ def _build_itinerary(
         if stop.vendor_id in seen_ids:
             continue
         category_key = (stop.category or "").strip().lower()
-        if category_counts.get(category_key, 0) >= _max_repeats_for_category(hours_budget, stop.category):
+        if category_counts.get(category_key, 0) >= _max_repeats_for_category(hours_budget, stop.category, stop.tags):
             continue
 
         proposed_stops = stops + [stop]
@@ -404,7 +473,8 @@ def _build_itinerary(
         return None
     total_km = _route_distance_km(stops, fallback_port_distance_km)
     travel_minutes = (total_km / effective_speed) * 60.0
-    return stops, total_km, travel_minutes
+    stretched = _stretch_stop_durations(stops, hours_budget, travel_minutes / 60.0)
+    return stretched, total_km, travel_minutes
 
 
 def _itinerary_label(stops: List[ItineraryStop], idx: int) -> str:
@@ -462,7 +532,7 @@ def suggest_itinerary(
     vendors = query.order_by(Vendors.rating.desc()).all()
 
     # ── 3. Convert to stops and split into tag-matched vs fallback ────────────
-    all_stops: List[ItineraryStop] = [_vendor_to_stop(v) for v in vendors]
+    all_stops: List[ItineraryStop] = _dedupe_stops([_vendor_to_stop(v) for v in vendors])
     tag_matched   = [s for s in all_stops if _tags_overlap(s.tags, requested_tags)]
     untagged_fill = [s for s in all_stops if s not in tag_matched]
 
@@ -474,6 +544,8 @@ def suggest_itinerary(
         candidates = all_stops  # use everything
     else:
         candidates = tag_matched
+
+    candidates = _dedupe_stops(candidates)
 
     # Prefer vendors that match more requested tags, then rating.
     candidates.sort(
