@@ -41,7 +41,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.db.models.vendors import PlaceCategory, Vendors
+from app.db.models.vendors import Vendors
 from app.db.models.port import Port
 from app.db.models.pricing_controls import PricingDuration, PricingRideType, PricingRule
 from app.db.models.vendor_tag import VendorTag
@@ -63,11 +63,11 @@ FALLBACK_VALID_TAGS = [
 ]
 
 # Fallback time (hours) to budget for a stop when no avg_time_spent_hours is set.
-DEFAULT_TIME_BY_CATEGORY: Dict[PlaceCategory, float] = {
-    PlaceCategory.restaurant: 1.0,
-    PlaceCategory.pub:        1.5,
-    PlaceCategory.hotel:      2.0,
-    PlaceCategory.sightseeing: 1.0,
+DEFAULT_TIME_BY_CATEGORY: Dict[str, float] = {
+    "restaurant": 1.0,
+    "pub": 1.5,
+    "hotel": 2.0,
+    "sightseeing": 1.0,
 }
 
 MAX_ITINERARIES = 6
@@ -187,12 +187,12 @@ def _vendor_to_stop(v: Vendors) -> ItineraryStop:
 
     avg_time = other.get("avg_time_spent_hours")
     if avg_time is None:
-        avg_time = DEFAULT_TIME_BY_CATEGORY.get(v.category, 1.0)
+        avg_time = DEFAULT_TIME_BY_CATEGORY.get(str(v.category or "").strip().lower(), 1.0)
     else:
         try:
             avg_time = float(avg_time)
         except (TypeError, ValueError):
-            avg_time = DEFAULT_TIME_BY_CATEGORY.get(v.category, 1.0)
+            avg_time = DEFAULT_TIME_BY_CATEGORY.get(str(v.category or "").strip().lower(), 1.0)
 
     price = other.get("price_per_person")
     if price is not None:
@@ -213,7 +213,7 @@ def _vendor_to_stop(v: Vendors) -> ItineraryStop:
     return ItineraryStop(
         vendor_id=v.id,
         name=v.name,
-        category=v.category.value,
+        category=str(v.category or ""),
         tags=raw_tags,
         avg_time_hours=max(0.25, float(avg_time or 1.0)),
         distance_from_port=max(0.0, distance_from_port),

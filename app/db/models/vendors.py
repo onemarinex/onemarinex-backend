@@ -1,16 +1,8 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, ForeignKey,Enum
+from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
 from app.db.base import Base
-import enum
-
-
-class PlaceCategory(enum.Enum):
-    restaurant = "restaurant"
-    pub = "pub"
-    hotel = "hotel"
-    sightseeing = "sightseeing"
 
 
 class Vendors(Base):
@@ -31,7 +23,7 @@ class Vendors(Base):
     documents = Column(JSONB, nullable=True)
     images = Column(JSONB, nullable=True)
     other_information = Column(JSONB, nullable=True)    # service type,price,timings
-    category = Column(Enum(PlaceCategory), nullable=False)
+    category = Column(String(64), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

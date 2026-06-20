@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from app.db.session import get_db
-from app.db.models.vendors import Vendors, PlaceCategory
+from app.db.models.vendors import Vendors
 from typing import List, Optional
 
 router = APIRouter()
@@ -35,7 +35,7 @@ def get_sightseeing(
     search: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    query = db.query(Vendors).filter(Vendors.category == PlaceCategory.sightseeing, Vendors.status == "Active")
+    query = db.query(Vendors).filter(Vendors.category.ilike("sightseeing"), Vendors.status == "Active")
     if port_id is not None:
         query = query.filter(Vendors.port_id == port_id)
     if max_dist is not None:
@@ -85,7 +85,7 @@ def get_sightseeing_by_filters(
     min_rating: Optional[float] = None,
     db: Session = Depends(get_db)
 ):
-    query = db.query(Vendors).filter(Vendors.category == PlaceCategory.sightseeing, Vendors.status == "Active")
+    query = db.query(Vendors).filter(Vendors.category.ilike("sightseeing"), Vendors.status == "Active")
     if port_id is not None:
         query = query.filter(Vendors.port_id == port_id)
     if max_dist is not None:
@@ -128,7 +128,7 @@ def get_sightseeing_by_filters(
 # Get sightseeing by id
 @router.get("/{id}")
 def get_single_sightseeing(id: int, db: Session = Depends(get_db)):
-    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category == PlaceCategory.sightseeing).first()
+    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category.ilike("sightseeing")).first()
     if not v:
         raise HTTPException(status_code=404, detail="Sightseeing not found")
     other = v.other_information or {}
@@ -156,7 +156,7 @@ def get_single_sightseeing(id: int, db: Session = Depends(get_db)):
 # Generate QR code for a sightseeing location
 @router.get("/{id}/qr")
 def get_sightseeing_qr(id: int, db: Session = Depends(get_db)):
-    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category == PlaceCategory.sightseeing).first()
+    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category.ilike("sightseeing")).first()
     if not v:
         raise HTTPException(status_code=404, detail="Sightseeing not found")
 

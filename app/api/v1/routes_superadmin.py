@@ -207,7 +207,7 @@ def get_dashboard_stats(
 
     # 🔹 Convert to dict
     category_counts = {
-    row.category.value: row.count for row in results
+        str(row.category or "").strip().lower(): row.count for row in results
     }
     # 🔹 Crew logic (unchanged)
     query_crew = db.query(CrewProfile)

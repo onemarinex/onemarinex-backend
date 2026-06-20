@@ -6,7 +6,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from app.db.session import get_db
-from app.db.models.vendors import Vendors, PlaceCategory
+from app.db.models.vendors import Vendors
 
 router = APIRouter()
 
@@ -33,7 +33,7 @@ def get_restaurants(
     search: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    query = db.query(Vendors).filter(Vendors.category == PlaceCategory.restaurant, Vendors.status == "Active")
+    query = db.query(Vendors).filter(Vendors.category.ilike("restaurant"), Vendors.status == "Active")
     if port_id is not None:
         query = query.filter(Vendors.port_id == port_id)
     if max_dist is not None:
@@ -74,7 +74,7 @@ def get_restaurants(
 
 @router.get("/{id}")
 def get_restaurant(id: int, db: Session = Depends(get_db)):
-    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category == PlaceCategory.restaurant).first()
+    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category.ilike("restaurant")).first()
     if not v:
         raise HTTPException(status_code=404, detail="Restaurant not found")
     other = v.other_information or {}
@@ -103,7 +103,7 @@ def get_restaurant(id: int, db: Session = Depends(get_db)):
 # Generate QR code for a restaurant
 @router.get("/{id}/qr")
 def get_restaurant_qr(id: int, db: Session = Depends(get_db)):
-    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category == PlaceCategory.restaurant).first()
+    v = db.query(Vendors).filter(Vendors.id == id, Vendors.category.ilike("restaurant")).first()
     if not v:
         raise HTTPException(status_code=404, detail="Restaurant not found")
 
