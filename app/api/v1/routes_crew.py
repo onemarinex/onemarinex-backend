@@ -1151,6 +1151,17 @@ def _build_cab_options_for_provider(
     else:
         rules = rules_query.filter(PricingRule.duration_id.is_(None)).all()
 
+    def _apply_platform_commission(amount: float, pct: Optional[float]) -> float:
+        if pct is None:
+            return amount
+        try:
+            commission_pct = float(pct)
+        except (TypeError, ValueError):
+            return amount
+        if commission_pct <= 0:
+            return amount
+        return amount * (1.0 + (commission_pct / 100.0))
+
     # Keep cheapest rule per vehicle category
     best: dict[int, tuple] = {}
     for rule, vehicle in rules:
@@ -1187,7 +1198,7 @@ def _build_cab_options_for_provider(
         for adj in rule.adjustments or []:
             if adj.get("is_active", True) and "multiplier" in adj.get("code", ""):
                 multiplier *= float(adj.get("value", 1.0))
-        final = round(subtotal * multiplier, 2)
+        final = round(_apply_platform_commission(subtotal * multiplier, rule.platform_commission_pct), 2)
         existing = best.get(vehicle.id)
         if existing is None or final < existing[0]:
             best[vehicle.id] = (final, rule, vehicle)

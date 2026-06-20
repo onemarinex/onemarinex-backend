@@ -75,6 +75,10 @@ MAX_STOPS_PER_ITINERARY = 8
 DEFAULT_TRAVEL_SPEED_KMPH = 24.0
 MAX_STOP_DWELL_HOURS = 4.0
 MULTI_VISIT_TAGS = {"sightseeing", "adventure", "funzone"}
+FOOD_BUCKET_TAGS = {"food", "restaurant", "pub", "bar", "cafe"}
+SPA_BUCKET_TAGS = {"relax", "spa", "wellness"}
+CURRENCY_BUCKET_TAGS = {"currency", "currency_exchange", "forex"}
+SIM_BUCKET_TAGS = {"sim_card", "sim"}
 
 
 # ── schemas ──────────────────────────────────────────────────────────────────
@@ -287,11 +291,13 @@ def _route_distance_km(stops: List[ItineraryStop], fallback_km: float) -> float:
 
 
 def _stop_dedupe_key(stop: ItineraryStop) -> tuple:
-    if stop.vendor_id:
-        return ("id", int(stop.vendor_id))
     name_key = (stop.name or "").strip().lower()
     addr_key = (stop.address or "").strip().lower()
-    return ("name_addr", name_key, addr_key)
+    if name_key or addr_key:
+        return ("name_addr", name_key, addr_key)
+    if stop.vendor_id:
+        return ("id", int(stop.vendor_id))
+    return ("raw", id(stop))
 
 
 def _dedupe_stops(stops: List[ItineraryStop]) -> List[ItineraryStop]:
@@ -352,14 +358,30 @@ def _stretch_stop_durations(
 
 def _max_repeats_for_category(hours_budget: float, category: str, tags: Optional[List[str]] = None) -> int:
     _ = hours_budget
-    normalized = (category or "").strip().lower()
-    if _normalize_tag(normalized) in MULTI_VISIT_TAGS:
+    normalized = _normalize_tag((category or "").strip().lower())
+    if normalized in MULTI_VISIT_TAGS:
         return MAX_STOPS_PER_ITINERARY
     if tags:
         normalized_tags = {_normalize_tag(tag) for tag in tags if tag}
         if normalized_tags & MULTI_VISIT_TAGS:
             return MAX_STOPS_PER_ITINERARY
     return 1
+
+
+def _category_bucket_key(category: str, tags: Optional[List[str]] = None) -> str:
+    normalized_category = _normalize_tag(category or "")
+    normalized_tags = {_normalize_tag(tag) for tag in (tags or []) if tag}
+    all_keys = {normalized_category} | normalized_tags
+
+    if all_keys & FOOD_BUCKET_TAGS:
+        return "bucket_food"
+    if all_keys & SPA_BUCKET_TAGS:
+        return "bucket_spa"
+    if all_keys & CURRENCY_BUCKET_TAGS:
+        return "bucket_currency"
+    if all_keys & SIM_BUCKET_TAGS:
+        return "bucket_sim"
+    return normalized_category or "bucket_misc"
 
 
 def _resolve_package_constraints(
@@ -450,7 +472,7 @@ def _build_itinerary(
         stop = candidates[idx]
         if stop.vendor_id in seen_ids:
             continue
-        category_key = (stop.category or "").strip().lower()
+        category_key = _category_bucket_key(stop.category, stop.tags)
         if category_counts.get(category_key, 0) >= _max_repeats_for_category(hours_budget, stop.category, stop.tags):
             continue
 
