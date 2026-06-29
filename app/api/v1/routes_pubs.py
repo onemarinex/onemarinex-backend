@@ -49,8 +49,26 @@ class PubBase(BaseModel):
     facilities: Optional[List[str]] = None
     about: Optional[str] = None
 
-class PubOut(PubBase):
+class PubOut(BaseModel):
     id: int
+    name: str
+    location_name: str
+    distance_from_port: float
+    rating: float
+    price_per_person: float
+    timings: str
+    service_type: str
+    popular_for: Optional[List[str]] = None
+    phone: Optional[str] = None
+    lat: float
+    lng: float
+    image_url: List[str] = []
+    description: Optional[str] = None
+    pub_type: Optional[str] = None
+    category: Optional[str] = None
+    best_for: Optional[str] = None
+    facilities: Optional[List[str]] = None
+    about: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -81,7 +99,7 @@ def get_pubs(
             phone=v.phone,
             lat=v.lat,
             lng=v.lng,
-            image_url=v.images[0] if (v.images and len(v.images) > 0) else "https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=400&q=80",
+            image_url=v.images if (v.images and len(v.images) > 0) else ["https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=400&q=80"],
             description=other.get("about") or other.get("description") or "",
             pub_type=other.get("pub_type", ""),
             category=other.get("category", ""),
@@ -114,7 +132,7 @@ def get_pub_details(
         phone=v.phone,
         lat=v.lat,
         lng=v.lng,
-        image_url=v.images[0] if (v.images and len(v.images) > 0) else "https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=400&q=80",
+        image_url=v.images if (v.images and len(v.images) > 0) else ["https://images.unsplash.com/photo-1514933651103-005eec06c04b?auto=format&fit=crop&w=400&q=80"],
         description=other.get("about") or other.get("description") or "",
         pub_type=other.get("pub_type", ""),
         category=other.get("category", ""),

@@ -48,7 +48,7 @@ def get_restaurants(
         price = other.get("price_per_person", 0.0)
         if max_price is not None and price > max_price:
             continue
-            
+        
         results.append({
             "id": v.id,
             "port_id": v.port_id,
@@ -63,11 +63,12 @@ def get_restaurants(
             "phone": v.phone,
             "lat": v.lat,
             "lng": v.lng,
-            "image_url": v.images[0] if (v.images and len(v.images) > 0) else "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?q=80&w=2070&auto=format&fit=crop",
+            "image_url": v.images if (v.images and len(v.images) > 0) else ["https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?q=80&w=2070&auto=format&fit=crop"],
             "description": other.get("about") or other.get("description") or "",
             "about": other.get("about") or other.get("description") or "",
             "facilities": other.get("facilities", []),
             "address": v.location_name,
+            
         })
     return results
 
@@ -92,7 +93,7 @@ def get_restaurant(id: int, db: Session = Depends(get_db)):
         "phone": v.phone,
         "lat": v.lat,
         "lng": v.lng,
-        "image_url": v.images[0] if (v.images and len(v.images) > 0) else "https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?q=80&w=2070&auto=format&fit=crop",
+        "image_url": v.images if (v.images and len(v.images) > 0) else ["https://images.unsplash.com/photo-1517248135467-4c7edcad34c4?q=80&w=2070&auto=format&fit=crop"],
         "description": other.get("about") or other.get("description") or "",
         "about": other.get("about") or other.get("description") or "",
         "facilities": other.get("facilities", []),
