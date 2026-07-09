@@ -17,6 +17,7 @@ class AgentProfile(Base):
     status = Column(String(32), server_default="Active") # Active, Inactive
     profile_image = Column(String(512), nullable=True) # URL to image
     agent_identifier = Column(String(64), nullable=True)  # e.g., "12287-28792-87258"
+    auth_document_url = Column(String(512), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

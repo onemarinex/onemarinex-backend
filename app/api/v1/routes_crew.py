@@ -141,6 +141,8 @@ class CrewProfileOut(BaseModel):
     vessel_status: Optional[str] = None
     expiry_date: Optional[date] = None
     mapping_status: Optional[str] = None
+    shore_pass_eligible: Optional[bool] = None
+    agency_name: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -572,6 +574,15 @@ def get_crew_profile(
     profile.vessel_status = vessel.status if vessel else None
     profile.expiry_date = v_crew.expiry_date if v_crew else None
     profile.mapping_status = v_crew.status if v_crew else "Unmapped"
+    profile.shore_pass_eligible = v_crew.shore_pass_eligible if v_crew else False
+    
+    agency_name = None
+    if vessel:
+        from app.db.models.agent_profile import AgentProfile
+        agent_prof = db.query(AgentProfile).filter(AgentProfile.user_id == vessel.agent_id).first()
+        if agent_prof:
+            agency_name = agent_prof.agency_name
+    profile.agency_name = agency_name
     
     return profile
 

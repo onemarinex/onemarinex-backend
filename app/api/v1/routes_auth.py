@@ -80,6 +80,7 @@ class AuthOut(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     role: str
+    must_change_password: Optional[bool] = False
 
 class RefreshIn(BaseModel):
     refresh_token: str
@@ -133,7 +134,12 @@ def login(body: LoginIn, db: Session = Depends(get_db)):
         subject=user.email,
         expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
     )
-    return AuthOut(access_token=token, refresh_token=refresh_token, role=user.role)
+    return AuthOut(
+        access_token=token,
+        refresh_token=refresh_token,
+        role=user.role,
+        must_change_password=user.must_change_password
+    )
 
 @router.post("/refresh", response_model=AuthOut)
 def refresh_token(body: RefreshIn, db: Session = Depends(get_db)):
@@ -154,3 +160,21 @@ def refresh_token(body: RefreshIn, db: Session = Depends(get_db)):
         expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
     )
     return AuthOut(access_token=access_token, refresh_token=refresh_token, role=user.role)
+
+class ChangePasswordIn(BaseModel):
+    old_password: str
+    new_password: str
+
+@router.post("/change-password")
+def change_password(
+    body: ChangePasswordIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if not verify_password(body.old_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Incorrect old password")
+        
+    current_user.hashed_password = get_password_hash(body.new_password)
+    current_user.must_change_password = False
+    db.commit()
+    return {"message": "Password updated successfully"}

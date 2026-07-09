@@ -36,6 +36,7 @@ class AgentProfileOut(BaseModel):
     status: str
     profile_image: Optional[str]
     agent_identifier: Optional[str]
+    auth_document_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -66,6 +67,9 @@ class DashboardVessel(BaseModel):
     name: str
     imo_number: str
     status: str
+    ongoing_trips_count: int
+    crew_ashore_count: int
+    incidents_count: int
 
 class DashboardTrip(BaseModel):
     id: int
@@ -110,7 +114,8 @@ def get_agent_profile(
         "license_number": agent_profile.license_number,
         "status": agent_profile.status,
         "profile_image": agent_profile.profile_image,
-        "agent_identifier": agent_profile.agent_identifier
+        "agent_identifier": agent_profile.agent_identifier,
+        "auth_document_url": agent_profile.auth_document_url
     }
 
 @router.patch("/profile", response_model=AgentProfileOut)
@@ -226,23 +231,55 @@ def get_dashboard_data(
         closed_incidents=closed_incidents
     )
 
+    vessels_data = []
+    for v in active_vessels_list:
+        # Get crew HPIDs for this vessel
+        crew_hpids = [c.hp_id for c in db.query(VesselCrew).filter(VesselCrew.vessel_id == v.id).all() if c.hp_id]
+        
+        # 1. Ongoing Trips
+        ongoing_trips = 0
+        if crew_hpids:
+            crew_profile_ids = [cp.id for cp in db.query(CrewProfile).filter(CrewProfile.hpid.in_(crew_hpids)).all()]
+            if crew_profile_ids:
+                ongoing_trips = db.query(CabBooking).filter(
+                    CabBooking.crew_id.in_(crew_profile_ids),
+                    CabBooking.status.in_([BookingStatus.IN_PROGRESS, BookingStatus.DRIVER_ASSIGNED, BookingStatus.DRIVER_ARRIVED])
+                ).count()
+        
+        # 2. Crew Ashore
+        crew_ashore = 0
+        if crew_hpids:
+            crew_profile_ids = [cp.id for cp in db.query(CrewProfile).filter(CrewProfile.hpid.in_(crew_hpids)).all()]
+            if crew_profile_ids:
+                crew_ashore = db.query(ShorePass).filter(
+                    ShorePass.crew_profile_id.in_(crew_profile_ids),
+                    ShorePass.in_time.is_(None)
+                ).count()
+                
+        # 3. SOS/Incidents of ship
+        incidents = 0
+        if crew_hpids:
+            incidents = db.query(Incident).filter(
+                Incident.reporter_id.in_(crew_hpids),
+                Incident.status.in_([IncidentStatus.ACTIVE, IncidentStatus.INVESTIGATING])
+            ).count()
+            
+        vessels_data.append(
+            DashboardVessel(
+                id=v.id,
+                name=v.name,
+                imo_number=v.imo_number,
+                status=v.status,
+                ongoing_trips_count=ongoing_trips,
+                crew_ashore_count=crew_ashore,
+                incidents_count=incidents
+            )
+        )
+
     return DashboardData(
         stats=stats,
-        active_vessels=[
-            DashboardVessel(id=v.id, name=v.name, imo_number=v.imo_number, status=v.status)
-            for v in active_vessels_list
-        ],
-        live_trips=[
-            DashboardTrip(
-                id=t.id,
-                crew_name=t.crew.full_name,
-                vessel_name=t.vehicle_name, # or t.vessel field if added to CabBooking
-                from_loc=t.pickup_address,
-                to_loc=t.drop_address,
-                status="Active" if t.status == BookingStatus.IN_PROGRESS else "Pending"
-            )
-            for t in live_trips_data
-        ]
+        active_vessels=vessels_data,
+        live_trips=[]
     )
 
 @router.get("/shore-pass-requests", response_model=List[ShorePassOut])

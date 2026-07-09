@@ -134,33 +134,44 @@ def list_notifications_for_crew(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "crew":
-        raise HTTPException(status_code=403, detail="Only crew can view notifications")
+    if current_user.role not in ["crew", "agent"]:
+        raise HTTPException(status_code=403, detail="Only crew or agents can view notifications")
 
-    profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
-    if not profile:
-        return []
+    port_name = None
+    vessel_name = None
+
+    if current_user.role == "crew":
+        profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+        if profile:
+            port_name = profile.current_port
+            vessel_name = profile.vessel
+    elif current_user.role == "agent":
+        from app.db.models.agent_profile import AgentProfile
+        profile = db.query(AgentProfile).filter(AgentProfile.user_id == current_user.id).first()
+        if profile:
+            port_name = profile.assigned_port
 
     query = db.query(Notification)
-    query = query.filter(
-        ~and_(
-            Notification.sos_id.isnot(None),
-            Notification.created_by == current_user.id,
+    if current_user.role == "crew":
+        query = query.filter(
+            ~and_(
+                Notification.sos_id.isnot(None),
+                Notification.created_by == current_user.id,
+            )
         )
-    )
 
     # Match port/vessel: null acts like "all"
-    if profile.current_port:
+    if port_name:
         query = query.filter(
             (Notification.port_name.is_(None))
-            | (Notification.port_name == profile.current_port)
+            | (Notification.port_name == port_name)
         )
     else:
         query = query.filter(Notification.port_name.is_(None))
 
-    if profile.vessel:
+    if current_user.role == "crew" and vessel_name:
         query = query.filter(
-            (Notification.vessel.is_(None)) | (Notification.vessel == profile.vessel)
+            (Notification.vessel.is_(None)) | (Notification.vessel == vessel_name)
         )
     else:
         query = query.filter(Notification.vessel.is_(None))
@@ -206,31 +217,42 @@ def get_unread_count(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "crew":
-        raise HTTPException(status_code=403, detail="Only crew can view notifications")
+    if current_user.role not in ["crew", "agent"]:
+        raise HTTPException(status_code=403, detail="Only crew or agents can view notifications")
 
-    profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
-    if not profile:
-        return {"count": 0}
+    port_name = None
+    vessel_name = None
+
+    if current_user.role == "crew":
+        profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+        if profile:
+            port_name = profile.current_port
+            vessel_name = profile.vessel
+    elif current_user.role == "agent":
+        from app.db.models.agent_profile import AgentProfile
+        profile = db.query(AgentProfile).filter(AgentProfile.user_id == current_user.id).first()
+        if profile:
+            port_name = profile.assigned_port
 
     query = db.query(Notification.id)
-    query = query.filter(
-        ~and_(
-            Notification.sos_id.isnot(None),
-            Notification.created_by == current_user.id,
+    if current_user.role == "crew":
+        query = query.filter(
+            ~and_(
+                Notification.sos_id.isnot(None),
+                Notification.created_by == current_user.id,
+            )
         )
-    )
-    if profile.current_port:
+    if port_name:
         query = query.filter(
             (Notification.port_name.is_(None))
-            | (Notification.port_name == profile.current_port)
+            | (Notification.port_name == port_name)
         )
     else:
         query = query.filter(Notification.port_name.is_(None))
 
-    if profile.vessel:
+    if current_user.role == "crew" and vessel_name:
         query = query.filter(
-            (Notification.vessel.is_(None)) | (Notification.vessel == profile.vessel)
+            (Notification.vessel.is_(None)) | (Notification.vessel == vessel_name)
         )
     else:
         query = query.filter(Notification.vessel.is_(None))
@@ -253,8 +275,8 @@ def mark_notification_read(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "crew":
-        raise HTTPException(status_code=403, detail="Only crew can mark notifications")
+    if current_user.role not in ["crew", "agent"]:
+        raise HTTPException(status_code=403, detail="Only crew or agents can mark notifications")
 
     existing = db.query(NotificationRead).filter(
         NotificationRead.notification_id == notification_id,

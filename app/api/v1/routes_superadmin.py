@@ -1,5 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
 from fastapi.encoders import jsonable_encoder
+import os
+import shutil
+import uuid
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, cast, String
 from typing import List, Optional, Dict, Any
@@ -1041,3 +1044,203 @@ def update_place(
     db.refresh(vendor)
 
     return vendor
+
+# --- Super Admin Agent and Vessel Management ---
+from pydantic import EmailStr, Field
+import random
+import string
+from app.db.models.agent_profile import AgentProfile
+from app.db.models.vessel import Vessel
+from app.services.auth import get_password_hash
+
+class SuperAdminAgentCreate(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=6)
+    full_name: str
+    mobile_number: str
+    agency_name: str
+    location: str
+    assigned_port: Optional[str] = None
+
+class SuperAdminAgentOut(BaseModel):
+    id: int
+    name: str
+    email: str
+    mobile_number: Optional[str]
+    agency_name: str
+    location: str
+    agent_identifier: str
+    assigned_port: Optional[str] = None
+    license_number: Optional[str] = None
+    auth_document_url: Optional[str] = None
+
+@router.get("/agents", response_model=List[SuperAdminAgentOut])
+def list_agents_superadmin(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    verify_superadmin(current_user)
+    agents = db.query(User).filter(User.role == "agent").all()
+    out = []
+    for u in agents:
+        prof = db.query(AgentProfile).filter(AgentProfile.user_id == u.id).first()
+        out.append({
+            "id": u.id,
+            "name": u.name,
+            "email": u.email,
+            "mobile_number": u.mobile_number,
+            "agency_name": prof.agency_name if prof else "",
+            "location": prof.location if prof else "",
+            "agent_identifier": prof.agent_identifier if prof else "",
+            "assigned_port": prof.assigned_port if prof else None,
+            "license_number": prof.license_number if prof else None,
+            "auth_document_url": prof.auth_document_url if prof else None
+        })
+    return out
+
+@router.post("/agents", response_model=SuperAdminAgentOut, status_code=status.HTTP_201_CREATED)
+def create_agent_superadmin(
+    email: str = Form(...),
+    password: str = Form(...),
+    full_name: str = Form(...),
+    mobile_number: str = Form(...),
+    agency_name: str = Form(...),
+    location: str = Form(...),
+    assigned_port: Optional[str] = Form(None),
+    license_number: Optional[str] = Form(None),
+    auth_document: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    verify_superadmin(current_user)
+    email = email.lower().strip()
+
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=409, detail="Email already registered")
+
+    if mobile_number and db.query(User).filter(User.mobile_number == mobile_number).first():
+        raise HTTPException(status_code=409, detail="Mobile number already registered")
+
+    # Handle File Upload
+    document_url = None
+    if auth_document:
+        os.makedirs("uploads", exist_ok=True)
+        ext = os.path.splitext(auth_document.filename)[1]
+        filename = f"agent_doc_{uuid.uuid4().hex}{ext}"
+        filepath = os.path.join("uploads", filename)
+        with open(filepath, "wb") as buffer:
+            shutil.copyfileobj(auth_document.file, buffer)
+        document_url = f"/uploads/{filename}"
+
+    # 1. Create User
+    user = User(
+        name=full_name,
+        email=email,
+        mobile_number=mobile_number,
+        hashed_password=get_password_hash(password),
+        role="agent",
+        must_change_password=True
+    )
+    db.add(user)
+    db.flush()
+
+    # 2. Create Agent Profile
+    rand_part = ''.join(random.choices(string.digits, k=4))
+    agent_id = f"AGT-{random.randint(10000, 99999)}-{rand_part}"
+
+    agent_profile = AgentProfile(
+        user_id=user.id,
+        agency_name=agency_name,
+        contact_person=full_name,
+        location=location,
+        agent_identifier=agent_id,
+        assigned_port=assigned_port,
+        license_number=license_number,
+        auth_document_url=document_url
+    )
+    db.add(agent_profile)
+    
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    db.refresh(user)
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "mobile_number": user.mobile_number,
+        "agency_name": agent_profile.agency_name,
+        "location": agent_profile.location,
+        "agent_identifier": agent_profile.agent_identifier,
+        "assigned_port": agent_profile.assigned_port,
+        "license_number": agent_profile.license_number,
+        "auth_document_url": agent_profile.auth_document_url
+    }
+
+class SuperAdminVesselCreate(BaseModel):
+    name: str
+    imo_number: str
+    vessel_type: str
+    berth_assignment: Optional[str] = None
+    flag: Optional[str] = None
+    crew_count: Optional[int] = 0
+    total_crew: Optional[int] = 0
+    eta: Optional[datetime] = None
+    etd: Optional[datetime] = None
+    status: Optional[str] = "Active"
+
+from app.api.v1.routes_vessels import VesselOut
+
+@router.post("/agents/{agent_id}/vessels", response_model=VesselOut, status_code=status.HTTP_201_CREATED)
+def create_vessel_under_agent(
+    agent_id: int,
+    body: SuperAdminVesselCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    verify_superadmin(current_user)
+    agent = db.query(User).filter(User.id == agent_id, User.role == "agent").first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent user not found")
+
+    c_count = body.crew_count if body.crew_count is not None else 0
+    if body.total_crew is not None:
+        c_count = body.total_crew
+
+    vessel = Vessel(
+        agent_id=agent.id,
+        name=body.name,
+        imo_number=body.imo_number,
+        vessel_type=body.vessel_type,
+        berth_assignment=body.berth_assignment,
+        flag=body.flag,
+        crew_count=c_count,
+        eta=body.eta,
+        etd=body.etd,
+        status=body.status
+    )
+    db.add(vessel)
+    try:
+        db.commit()
+        db.refresh(vessel)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Vessel IMO possibly already exists")
+    
+    return vessel
+
+@router.get("/agents/{agent_id}/vessels", response_model=List[VesselOut])
+def list_agent_vessels_superadmin(
+    agent_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    verify_superadmin(current_user)
+    agent = db.query(User).filter(User.id == agent_id, User.role == "agent").first()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent user not found")
+        
+    return db.query(Vessel).filter(Vessel.agent_id == agent.id).all()

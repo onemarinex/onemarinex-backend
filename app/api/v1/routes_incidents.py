@@ -10,6 +10,27 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
+def get_agent_incident_filters(agent_user_id: int, db: Session):
+    from app.db.models.vessel import Vessel
+    from app.db.models.vessel_crew import VesselCrew
+    from app.db.models.crew_profile import CrewProfile
+    from app.db.models.cab_booking import CabBooking
+
+    vessel_ids = [r[0] for r in db.query(Vessel.id).filter(Vessel.agent_id == agent_user_id).all()]
+    if not vessel_ids:
+        return None, None
+    
+    crew_hpids = [r[0] for r in db.query(VesselCrew.hp_id).filter(VesselCrew.vessel_id.in_(vessel_ids)).all() if r[0]]
+    if not crew_hpids:
+        return [], []
+    
+    crew_ids = [r[0] for r in db.query(CrewProfile.id).filter(CrewProfile.hpid.in_(crew_hpids)).all()]
+    trip_ids = []
+    if crew_ids:
+        trip_ids = [r[0] for r in db.query(CabBooking.booking_id).filter(CabBooking.crew_id.in_(crew_ids)).all() if r[0]]
+    
+    return crew_hpids, trip_ids
+
 class IncidentNoteBase(BaseModel):
     note: str
     author_name: Optional[str] = None
@@ -60,16 +81,21 @@ async def get_incident_monitoring(
         base_query = base_query.filter(Incident.aggregator_id == aggregator.id)
     
     elif current_user.role == "agent":
-        from app.db.models.agent_profile import AgentProfile
-        agent = db.query(AgentProfile).filter(AgentProfile.user_id == current_user.id).first()
-        if not agent or not agent.assigned_port:
+        crew_hpids, trip_ids = get_agent_incident_filters(current_user.id, db)
+        if crew_hpids is None:
             return {
                 "active_crew": 0,
                 "active_aggregator": 0,
                 "active_incidents": [],
                 "resolved_incidents": []
             }
-        base_query = base_query.filter(Incident.port_name == agent.assigned_port)
+        from sqlalchemy import or_
+        base_query = base_query.filter(
+            or_(
+                Incident.reporter_id.in_(crew_hpids),
+                Incident.trip_id.in_(trip_ids)
+            )
+        )
     
     else:
         raise HTTPException(status_code=403, detail="Not authorized")
@@ -103,11 +129,16 @@ async def get_incidents(
         return db.query(Incident).all()
     
     elif current_user.role == "agent":
-        from app.db.models.agent_profile import AgentProfile
-        agent = db.query(AgentProfile).filter(AgentProfile.user_id == current_user.id).first()
-        if not agent or not agent.assigned_port:
+        crew_hpids, trip_ids = get_agent_incident_filters(current_user.id, db)
+        if crew_hpids is None:
             return []
-        return db.query(Incident).filter(Incident.port_name == agent.assigned_port).all()
+        from sqlalchemy import or_
+        return db.query(Incident).filter(
+            or_(
+                Incident.reporter_id.in_(crew_hpids),
+                Incident.trip_id.in_(trip_ids)
+            )
+        ).all()
     
     else:
         raise HTTPException(status_code=403, detail="Not authorized to list incidents")
@@ -216,11 +247,16 @@ async def get_incident(
     elif current_user.role == "superadmin":
         incident = query.first()
     elif current_user.role == "agent":
-        from app.db.models.agent_profile import AgentProfile
-        agent = db.query(AgentProfile).filter(AgentProfile.user_id == current_user.id).first()
-        if not agent or not agent.assigned_port:
+        crew_hpids, trip_ids = get_agent_incident_filters(current_user.id, db)
+        if crew_hpids is None:
              raise HTTPException(status_code=403, detail="Not authorized")
-        incident = query.filter(Incident.port_name == agent.assigned_port).first()
+        from sqlalchemy import or_
+        incident = query.filter(
+            or_(
+                Incident.reporter_id.in_(crew_hpids),
+                Incident.trip_id.in_(trip_ids)
+            )
+        ).first()
     else:
         raise HTTPException(status_code=403, detail="Not authorized")
 

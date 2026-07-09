@@ -24,6 +24,8 @@ class CrewMemberIn(BaseModel):
     nationality: Optional[str] = None
     passport_number: str
     status: Optional[str] = "Pending"
+    shore_pass_eligible: Optional[bool] = False
+    shore_pass_valid_upto: Optional[datetime] = None
 
 class CrewMemberOut(BaseModel):
     id: int
@@ -33,9 +35,14 @@ class CrewMemberOut(BaseModel):
     hp_id: Optional[str] = None
     expiry_date: Optional[datetime] = None
     status: str
+    shore_pass_eligible: bool
+    shore_pass_valid_upto: Optional[datetime] = None
     
     class Config:
         from_attributes = True
+
+class EligibilityUpdateIn(BaseModel):
+    shore_pass_eligible: bool
 
 class CabBookingOut(BaseModel):
     id: int
@@ -63,7 +70,9 @@ class VesselIn(BaseModel):
     imo_number: str
     vessel_type: str
     berth_assignment: Optional[str] = None
+    flag: Optional[str] = None
     crew_count: Optional[int] = 0
+    total_crew: Optional[int] = 0
     eta: Optional[datetime] = None
     etd: Optional[datetime] = None
     status: Optional[str] = "Active"
@@ -108,7 +117,11 @@ class VesselOut(BaseModel):
     imo_number: str
     vessel_type: str
     berth_assignment: Optional[str] = None
+    flag: Optional[str] = None
     crew_count: int
+    total_crew: Optional[int] = 0
+    eligible_crew_count: Optional[int] = 0
+    crew_ashore_count: Optional[int] = 0
     eta: Optional[datetime] = None
     etd: Optional[datetime] = None
     status: str
@@ -120,16 +133,21 @@ class VesselOut(BaseModel):
 
 @router.post("/", response_model=VesselOut, status_code=status.HTTP_201_CREATED)
 def create_vessel(body: VesselIn, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.role != "agent":
-        raise HTTPException(status_code=403, detail="Only agents can create vessels")
+    if current_user.role not in ["agent", "superadmin"]:
+        raise HTTPException(status_code=403, detail="Only agents or superadmins can create vessels")
     
+    c_count = body.crew_count if body.crew_count is not None else 0
+    if body.total_crew is not None:
+        c_count = body.total_crew
+
     vessel = Vessel(
-        agent_id=current_user.id,
+        agent_id=current_user.id if current_user.role == "agent" else 1,
         name=body.name,
         imo_number=body.imo_number,
         vessel_type=body.vessel_type,
         berth_assignment=body.berth_assignment,
-        crew_count=body.crew_count,
+        flag=body.flag,
+        crew_count=c_count,
         eta=body.eta,
         etd=body.etd,
         status=body.status
@@ -142,6 +160,40 @@ def create_vessel(body: VesselIn, current_user: User = Depends(get_current_user)
         db.rollback()
         raise HTTPException(status_code=400, detail="Vessel IMO possibly already exists")
     
+    return vessel
+
+@router.patch("/{vessel_id}", response_model=VesselOut)
+def update_vessel(vessel_id: int, body: VesselIn, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    vessel = db.query(Vessel).filter(Vessel.id == vessel_id).first()
+    if not vessel:
+        raise HTTPException(status_code=404, detail="Vessel not found")
+    
+    if current_user.role == "agent" and vessel.agent_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to edit this vessel")
+        
+    vessel.name = body.name
+    vessel.imo_number = body.imo_number
+    vessel.vessel_type = body.vessel_type
+    vessel.berth_assignment = body.berth_assignment
+    vessel.flag = body.flag
+    
+    c_count = body.crew_count if body.crew_count is not None else 0
+    if body.total_crew is not None:
+        c_count = body.total_crew
+    vessel.crew_count = c_count
+    
+    vessel.eta = body.eta
+    vessel.etd = body.etd
+    if body.status:
+        vessel.status = body.status
+        
+    try:
+        db.commit()
+        db.refresh(vessel)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Vessel IMO possibly already exists")
+        
     return vessel
 
 @router.get("/", response_model=List[VesselOut])
@@ -184,7 +236,9 @@ def add_crew_member(vessel_id: int, body: CrewMemberIn, current_user: User = Dep
         rank=body.rank,
         nationality=body.nationality,
         hp_id=generated_hpid,
-        status=body.status
+        status=body.status,
+        shore_pass_eligible=body.shore_pass_eligible if body.shore_pass_eligible is not None else False,
+        shore_pass_valid_upto=body.shore_pass_valid_upto
     )
     db.add(crew)
     
@@ -213,6 +267,38 @@ def add_crew_member(vessel_id: int, body: CrewMemberIn, current_user: User = Dep
         db.add(new_pass)
         print(f"DEBUG: Automated ShorePass created for {body.name} (HPID: {generated_hpid})")
 
+    db.commit()
+    db.refresh(crew)
+    return crew
+
+@router.get("/public", response_model=List[VesselOut])
+def get_public_vessels(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return db.query(Vessel).all()
+
+@router.patch("/{vessel_id}/crew/{crew_id}/eligibility", response_model=CrewMemberOut)
+def update_crew_eligibility(
+    vessel_id: int, 
+    crew_id: int, 
+    body: EligibilityUpdateIn, 
+    current_user: User = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    if current_user.role == "agent":
+        vessel = db.query(Vessel).filter(Vessel.id == vessel_id, Vessel.agent_id == current_user.id).first()
+        if not vessel:
+            raise HTTPException(status_code=404, detail="Vessel not found or unauthorized")
+    elif current_user.role == "superadmin":
+        vessel = db.query(Vessel).filter(Vessel.id == vessel_id).first()
+        if not vessel:
+            raise HTTPException(status_code=404, detail="Vessel not found")
+    else:
+        raise HTTPException(status_code=403, detail="Only agents or superadmins can toggle eligibility")
+
+    crew = db.query(VesselCrew).filter(VesselCrew.id == crew_id, VesselCrew.vessel_id == vessel.id).first()
+    if not crew:
+        raise HTTPException(status_code=404, detail="Crew member not found on this vessel")
+    
+    crew.shore_pass_eligible = body.shore_pass_eligible
     db.commit()
     db.refresh(crew)
     return crew

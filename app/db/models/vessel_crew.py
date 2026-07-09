@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Date
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Date, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.db.base import Base
@@ -15,6 +15,8 @@ class VesselCrew(Base):
     hp_id = Column(String(100), nullable=True)
     expiry_date = Column(Date, nullable=True)
     status = Column(String(50), default="Pending") # Mapped, Pending
+    shore_pass_eligible = Column(Boolean, default=False, nullable=False, server_default="false")
+    shore_pass_valid_upto = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
