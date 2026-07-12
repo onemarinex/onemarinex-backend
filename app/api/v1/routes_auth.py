@@ -141,6 +141,56 @@ def login(body: LoginIn, db: Session = Depends(get_db)):
         must_change_password=user.must_change_password
     )
 
+@router.post("/login-unified")
+def login_unified(body: LoginIn, db: Session = Depends(get_db)):
+    """Unified login that checks both users table and drivers table."""
+    from app.db.models.driver import Driver
+
+    email = body.email.lower().strip()
+
+    # First, check the users table (crew, agent, aggregator, superadmin)
+    user = db.query(User).filter(User.email == email).first()
+    if user and verify_password(body.password, user.hashed_password):
+        token = create_access_token(
+            subject=user.email,
+            expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        )
+        refresh_token = create_refresh_token(
+            subject=user.email,
+            expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
+        )
+        return {
+            "access_token": token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "role": user.role,
+            "must_change_password": user.must_change_password,
+        }
+
+    # If not in users table, check the drivers table
+    driver = db.query(Driver).filter(Driver.email == email).first()
+    if driver and verify_password(body.password, driver.hashed_password):
+        token = create_access_token(
+            subject=driver.email,
+            expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        )
+        refresh_token = create_refresh_token(
+            subject=driver.email,
+            expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
+        )
+        return {
+            "access_token": token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "role": "driver",
+            "must_change_password": driver.is_temp_password == 1,
+            "name": driver.name,
+            "aggregator_name": driver.aggregator.company_name if driver.aggregator else None,
+        }
+
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+
 @router.post("/refresh", response_model=AuthOut)
 def refresh_token(body: RefreshIn, db: Session = Depends(get_db)):
     email = verify_refresh_token(body.refresh_token)

@@ -118,7 +118,7 @@ class VesselOut(BaseModel):
     vessel_type: str
     berth_assignment: Optional[str] = None
     flag: Optional[str] = None
-    crew_count: int
+    crew_count: Optional[int] = 0
     total_crew: Optional[int] = 0
     eligible_crew_count: Optional[int] = 0
     crew_ashore_count: Optional[int] = 0
@@ -126,6 +126,13 @@ class VesselOut(BaseModel):
     etd: Optional[datetime] = None
     status: str
     
+    class Config:
+        from_attributes = True
+
+class VesselPublicOut(BaseModel):
+    id: int
+    name: str
+
     class Config:
         from_attributes = True
 
@@ -203,6 +210,32 @@ def get_vessels(current_user: User = Depends(get_current_user), db: Session = De
     
     return db.query(Vessel).filter(Vessel.agent_id == current_user.id).all()
 
+@router.get("/public", response_model=List[VesselPublicOut])
+def get_public_vessels(
+    port_code: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.db.models.agent_profile import AgentProfile
+    from sqlalchemy import func, or_
+
+    query = db.query(Vessel)
+    if port_code:
+        # Normalize: strip "port_" prefix and compare case-insensitively
+        # to handle formats like "port_visakhapatnam", "Visakhapatnam", etc.
+        port_name = port_code.replace("port_", "").replace("_", " ").lower()
+        query = (
+            query.join(AgentProfile, Vessel.agent_id == AgentProfile.user_id)
+            .filter(
+                or_(
+                    func.lower(AgentProfile.assigned_port) == port_code.lower(),
+                    func.lower(func.replace(AgentProfile.assigned_port, "port_", "")) == port_name,
+                    func.lower(AgentProfile.assigned_port) == port_name,
+                )
+            )
+        )
+    return query.all()
+
 @router.get("/{vessel_id}", response_model=VesselOut)
 def get_vessel_details(vessel_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     vessel = db.query(Vessel).filter(Vessel.id == vessel_id, Vessel.agent_id == current_user.id).first()
@@ -270,10 +303,6 @@ def add_crew_member(vessel_id: int, body: CrewMemberIn, current_user: User = Dep
     db.commit()
     db.refresh(crew)
     return crew
-
-@router.get("/public", response_model=List[VesselOut])
-def get_public_vessels(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(Vessel).all()
 
 @router.patch("/{vessel_id}/crew/{crew_id}/eligibility", response_model=CrewMemberOut)
 def update_crew_eligibility(

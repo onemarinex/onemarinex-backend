@@ -1098,6 +1098,66 @@ def list_agents_superadmin(
         })
     return out
 
+class SuperAdminAgentUpdate(BaseModel):
+    full_name: Optional[str] = None
+    mobile_number: Optional[str] = None
+    agency_name: Optional[str] = None
+    location: Optional[str] = None
+    assigned_port: Optional[str] = None
+    license_number: Optional[str] = None
+
+@router.patch("/agents/{agent_id}", response_model=SuperAdminAgentOut)
+def update_agent_superadmin(
+    agent_id: int,
+    body: SuperAdminAgentUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    verify_superadmin(current_user)
+
+    user = db.query(User).filter(User.id == agent_id, User.role == "agent").first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    if body.full_name is not None:
+        user.name = body.full_name
+    if body.mobile_number is not None:
+        user.mobile_number = body.mobile_number
+
+    agent_profile = db.query(AgentProfile).filter(AgentProfile.user_id == agent_id).first()
+    if not agent_profile:
+        raise HTTPException(status_code=404, detail="Agent profile not found")
+
+    if body.agency_name is not None:
+        agent_profile.agency_name = body.agency_name
+    if body.location is not None:
+        agent_profile.location = body.location
+    if body.assigned_port is not None:
+        agent_profile.assigned_port = body.assigned_port
+    if body.license_number is not None:
+        agent_profile.license_number = body.license_number
+
+    try:
+        db.commit()
+        db.refresh(user)
+        db.refresh(agent_profile)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "mobile_number": user.mobile_number,
+        "agency_name": agent_profile.agency_name,
+        "location": agent_profile.location,
+        "agent_identifier": agent_profile.agent_identifier,
+        "assigned_port": agent_profile.assigned_port,
+        "license_number": agent_profile.license_number,
+        "auth_document_url": agent_profile.auth_document_url
+    }
+
 @router.post("/agents", response_model=SuperAdminAgentOut, status_code=status.HTTP_201_CREATED)
 def create_agent_superadmin(
     email: str = Form(...),

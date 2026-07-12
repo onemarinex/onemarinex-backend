@@ -438,7 +438,9 @@ def sync_crew_manifest_helper(profile: CrewProfile, db: Session):
         # Find vessel
         vessel = db.query(Vessel).filter(Vessel.id == v_crew.vessel_id).first()
         if vessel:
-            profile.vessel = vessel.name
+            # Only sync vessel name from manifest if crew hasn't set one yet
+            if not profile.vessel:
+                profile.vessel = vessel.name
             
             # Sync port from agent if available and crew doesn't have one set yet
             vessel_port = None

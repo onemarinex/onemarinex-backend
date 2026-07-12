@@ -33,24 +33,32 @@ class Vessel(Base):
 
     @property
     def eligible_crew_count(self) -> int:
-        return sum(1 for c in self.crew_manifest if c.shore_pass_eligible)
+        try:
+            if not self.crew_manifest:
+                return 0
+            return sum(1 for c in self.crew_manifest if c.shore_pass_eligible)
+        except Exception:
+            return 0
 
     @property
     def crew_ashore_count(self) -> int:
-        from sqlalchemy.orm import object_session
-        from app.db.models.crew_profile import CrewProfile
-        from app.db.models.shore_pass import ShorePass
-        
-        session = object_session(self)
-        if not session:
+        try:
+            from sqlalchemy.orm import object_session
+            from app.db.models.crew_profile import CrewProfile
+            from app.db.models.shore_pass import ShorePass
+            
+            session = object_session(self)
+            if not session:
+                return 0
+            crew_hpids = [c.hp_id for c in self.crew_manifest if c.hp_id]
+            if not crew_hpids:
+                return 0
+            crew_profile_ids = [cp.id for cp in session.query(CrewProfile).filter(CrewProfile.hpid.in_(crew_hpids)).all()]
+            if not crew_profile_ids:
+                return 0
+            return session.query(ShorePass).filter(
+                ShorePass.crew_profile_id.in_(crew_profile_ids),
+                ShorePass.in_time.is_(None)
+            ).count()
+        except Exception:
             return 0
-        crew_hpids = [c.hp_id for c in self.crew_manifest if c.hp_id]
-        if not crew_hpids:
-            return 0
-        crew_profile_ids = [cp.id for cp in session.query(CrewProfile).filter(CrewProfile.hpid.in_(crew_hpids)).all()]
-        if not crew_profile_ids:
-            return 0
-        return session.query(ShorePass).filter(
-            ShorePass.crew_profile_id.in_(crew_profile_ids),
-            ShorePass.in_time.is_(None)
-        ).count()

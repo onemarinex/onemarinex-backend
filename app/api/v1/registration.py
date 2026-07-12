@@ -49,6 +49,7 @@ class AgentRegistrationIn(BaseModel):
     # Profile fields
     agency_name: str
     location: str
+    assigned_port: Optional[str] = None
     agent_identifier: Optional[str] = None
 
 class AggregatorRegistrationIn(BaseModel):
@@ -177,7 +178,8 @@ def register_agent(body: AgentRegistrationIn, db: Session = Depends(get_db)):
         user_id=user.id,
         agency_name=body.agency_name,
         location=body.location,
-        agent_identifier=agent_id
+        agent_identifier=agent_id,
+        assigned_port=body.assigned_port
     )
     db.add(agent_profile)
     
