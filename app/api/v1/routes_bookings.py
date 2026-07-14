@@ -15,6 +15,9 @@ from app.db.models.driver import Driver
 from app.db.models.driver_magic_link import DriverMagicLinkReachEvent
 from app.db.models.user import User
 from app.db.session import get_db
+from app.db.models.vessel import Vessel
+from app.db.models.vessel_crew import VesselCrew
+from app.db.models.crew_profile import CrewProfile
 from app.services.booking_service import (
     accept_booking,
     assign_driver_to_booking,
@@ -304,6 +307,20 @@ def get_booking(
         provider_id = booking.provider_id or booking.aggregator_id
         if not provider or provider_id != provider.id:
             raise HTTPException(status_code=403, detail="Unauthorized")
+    elif current_user.role == "agent":
+        # Agent can view booking if crew is mapped under their vessels
+        agent_vessel_ids = [v.id for v in db.query(Vessel).filter(Vessel.agent_id == current_user.id).all()]
+        agent_crew_hpids = [
+            c.hp_id for c in db.query(VesselCrew).filter(
+                VesselCrew.vessel_id.in_(agent_vessel_ids),
+                VesselCrew.hp_id.isnot(None),
+            ).all() if c.hp_id
+        ] if agent_vessel_ids else []
+        agent_crew_ids = [
+            cp.id for cp in db.query(CrewProfile).filter(CrewProfile.hpid.in_(agent_crew_hpids)).all()
+        ] if agent_crew_hpids else []
+        if booking.crew_id not in agent_crew_ids:
+            raise HTTPException(status_code=403, detail="Unauthorized")
     elif current_user.role != "superadmin":
         raise HTTPException(status_code=403, detail="Unauthorized")
 
@@ -326,6 +343,19 @@ def get_timeline(
         provider = current_user.aggregator_profile
         provider_id = booking.provider_id or booking.aggregator_id
         if not provider or provider_id != provider.id:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+    elif current_user.role == "agent":
+        agent_vessel_ids = [v.id for v in db.query(Vessel).filter(Vessel.agent_id == current_user.id).all()]
+        agent_crew_hpids = [
+            c.hp_id for c in db.query(VesselCrew).filter(
+                VesselCrew.vessel_id.in_(agent_vessel_ids),
+                VesselCrew.hp_id.isnot(None),
+            ).all() if c.hp_id
+        ] if agent_vessel_ids else []
+        agent_crew_ids = [
+            cp.id for cp in db.query(CrewProfile).filter(CrewProfile.hpid.in_(agent_crew_hpids)).all()
+        ] if agent_crew_hpids else []
+        if booking.crew_id not in agent_crew_ids:
             raise HTTPException(status_code=403, detail="Unauthorized")
     elif current_user.role == "driver":
         raise HTTPException(status_code=403, detail="Drivers should use driver endpoints")

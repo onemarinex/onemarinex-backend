@@ -907,6 +907,47 @@ def get_current_shorepass(
     ).order_by(ShorePass.created_at.desc()).first()
     return last_pass
 
+@router.get("/shorepass/eligibility")
+def check_shorepass_eligibility(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Check if the crew member's vessel is managed by any agent.
+    Returns under_agent=true only if the vessel name AND the crew's HPID
+    are both found in some agent's vessel_crew mapping.
+    """
+    from app.db.models.vessel import Vessel
+    from app.db.models.vessel_crew import VesselCrew
+    from app.db.models.user import User as UserModel
+
+    if current_user.role != "crew":
+        return {"under_agent": False, "agent_name": None}
+
+    profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+    if not profile or not profile.vessel or not profile.hpid:
+        return {"under_agent": False, "agent_name": None}
+
+    # Check if this vessel name exists AND has a vessel_crew entry with matching hp_id
+    matching_vessel = (
+        db.query(Vessel)
+        .join(VesselCrew, VesselCrew.vessel_id == Vessel.id)
+        .filter(
+            Vessel.name.ilike(f"%{profile.vessel}%"),
+            VesselCrew.hp_id == profile.hpid,
+        )
+        .first()
+    )
+
+    if not matching_vessel:
+        return {"under_agent": False, "agent_name": None}
+
+    # Get the agent's name
+    agent_user = db.query(UserModel).filter(UserModel.id == matching_vessel.agent_id).first()
+    return {
+        "under_agent": True,
+        "agent_name": agent_user.name if agent_user else None,
+    }
+
 @router.post("/shorepass/{pass_id}/verify", response_model=ShorePassOut)
 def verify_shorepass(
     pass_id: int,
