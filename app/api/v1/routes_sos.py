@@ -46,10 +46,16 @@ def list_sos_requests(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="Only superadmins can view SOS")
+    if current_user.role not in {"superadmin", "agent"}:
+        raise HTTPException(status_code=403, detail="Only superadmins or agents can view SOS")
 
-    sos_list = db.query(CrewSos).order_by(CrewSos.created_at.desc()).all()
+    if current_user.role == "agent":
+        port = current_user.agent_profile.assigned_port if current_user.agent_profile else None
+        if not port:
+            return []
+        sos_list = db.query(CrewSos).filter(CrewSos.port_name == port).order_by(CrewSos.created_at.desc()).all()
+    else:
+        sos_list = db.query(CrewSos).order_by(CrewSos.created_at.desc()).all()
 
     return [
         {
@@ -74,12 +80,17 @@ def update_sos_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="Only superadmins can update SOS")
+    if current_user.role not in {"superadmin", "agent"}:
+        raise HTTPException(status_code=403, detail="Only superadmins or agents can update SOS")
 
     sos = db.query(CrewSos).filter(CrewSos.id == sos_id).first()
     if not sos:
         raise HTTPException(status_code=404, detail="SOS request not found")
+
+    if current_user.role == "agent":
+        port = current_user.agent_profile.assigned_port if current_user.agent_profile else None
+        if not port or sos.port_name != port:
+            raise HTTPException(status_code=403, detail="Not authorized to update SOS for this port")
 
     status_value = body.status.strip().upper()
     if status_value not in {"ACTIVE", "ACKNOWLEDGED", "CLOSED", "CANCELLED"}:

@@ -143,6 +143,7 @@ class CrewProfileOut(BaseModel):
     mapping_status: Optional[str] = None
     shore_pass_eligible: Optional[bool] = None
     agency_name: Optional[str] = None
+    vessel_exists: bool = False
 
     class Config:
         from_attributes = True
@@ -428,6 +429,9 @@ def sync_crew_manifest_helper(profile: CrewProfile, db: Session):
     
     v_crew = db.query(VesselCrew).filter(VesselCrew.hp_id == hpid).first()
     if not v_crew and profile.passport_number:
+        # Match by passport_number column directly
+        v_crew = db.query(VesselCrew).filter(VesselCrew.passport_number == profile.passport_number).first()
+    if not v_crew and profile.passport_number:
         # Fallback: search for VesselCrew by passport code in hp_id
         v_crew = db.query(VesselCrew).filter(VesselCrew.hp_id.like(f"HP-{profile.passport_number}-%")).first()
         
@@ -564,6 +568,8 @@ def get_crew_profile(
     from app.db.models.vessel import Vessel
     
     v_crew = db.query(VesselCrew).filter(VesselCrew.hp_id == profile.hpid).first()
+    if not v_crew and profile.passport_number:
+        v_crew = db.query(VesselCrew).filter(VesselCrew.passport_number == profile.passport_number).first()
     vessel = None
     if v_crew:
         vessel = db.query(Vessel).filter(Vessel.id == v_crew.vessel_id).first()
@@ -585,6 +591,11 @@ def get_crew_profile(
         if agent_prof:
             agency_name = agent_prof.agency_name
     profile.agency_name = agency_name
+    
+    vessel_exists = False
+    if profile.vessel:
+        vessel_exists = db.query(Vessel).filter(Vessel.name.ilike(profile.vessel.strip())).first() is not None
+    profile.vessel_exists = vessel_exists
     
     return profile
 

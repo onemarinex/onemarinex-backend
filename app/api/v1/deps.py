@@ -32,3 +32,14 @@ def get_current_driver(authorization: Optional[str] = Header(None), db: Session 
     if not driver:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Driver not found")
     return driver
+
+def require_roles(allowed_roles: list[str]):
+    from typing import List
+    def dependency(current_user: User = Depends(get_current_user)):
+        if current_user.role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied for role '{current_user.role}'"
+            )
+        return current_user
+    return dependency

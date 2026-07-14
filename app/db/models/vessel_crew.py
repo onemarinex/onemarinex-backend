@@ -13,6 +13,7 @@ class VesselCrew(Base):
     rank = Column(String(100), nullable=False)
     nationality = Column(String(100), nullable=True)
     hp_id = Column(String(100), nullable=True)
+    passport_number = Column(String(64), nullable=True)
     expiry_date = Column(Date, nullable=True)
     status = Column(String(50), default="Pending") # Mapped, Pending
     shore_pass_eligible = Column(Boolean, default=False, nullable=False, server_default="false")

@@ -55,13 +55,20 @@ def create_notification(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="Only superadmins can create notifications")
+    if current_user.role not in ["superadmin", "agent"]:
+        raise HTTPException(status_code=403, detail="Only superadmins or agents can create notifications")
+
+    port_to_set = body.port_name or None
+    if current_user.role == "agent":
+        assigned_port = current_user.agent_profile.assigned_port if current_user.agent_profile else None
+        if not assigned_port:
+            raise HTTPException(status_code=400, detail="Agent has no assigned port configuration.")
+        port_to_set = assigned_port
 
     notification = Notification(
         title=body.title.strip(),
         message=body.message.strip(),
-        port_name=(body.port_name or None),
+        port_name=port_to_set,
         vessel=(body.vessel or None),
         created_by=current_user.id,
     )
@@ -77,8 +84,16 @@ def list_notifications_admin(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="Only superadmins can view notifications")
+    if current_user.role not in ["superadmin", "agent"]:
+        raise HTTPException(status_code=403, detail="Only superadmins or agents can view notifications")
+
+    if current_user.role == "agent":
+        assigned_port = current_user.agent_profile.assigned_port if current_user.agent_profile else None
+        if not assigned_port:
+            return []
+        return db.query(Notification).filter(
+            (Notification.port_name == assigned_port) | (Notification.created_by == current_user.id)
+        ).order_by(Notification.created_at.desc()).all()
 
     return db.query(Notification).order_by(Notification.created_at.desc()).all()
 
@@ -90,19 +105,28 @@ def update_notification(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="Only superadmins can update notifications")
+    if current_user.role not in ["superadmin", "agent"]:
+        raise HTTPException(status_code=403, detail="Only superadmins or agents can update notifications")
 
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
+
+    if current_user.role == "agent":
+        assigned_port = current_user.agent_profile.assigned_port if current_user.agent_profile else None
+        if not assigned_port or (notification.port_name != assigned_port and notification.created_by != current_user.id):
+            raise HTTPException(status_code=403, detail="Not authorized to edit this notification")
 
     if body.title is not None:
         notification.title = body.title.strip()
     if body.message is not None:
         notification.message = body.message.strip()
     if body.port_name is not None:
-        notification.port_name = body.port_name or None
+        if current_user.role == "agent":
+            assigned_port = current_user.agent_profile.assigned_port if current_user.agent_profile else None
+            notification.port_name = assigned_port
+        else:
+            notification.port_name = body.port_name or None
     if body.vessel is not None:
         notification.vessel = body.vessel or None
 
@@ -117,12 +141,17 @@ def delete_notification(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="Only superadmins can delete notifications")
+    if current_user.role not in ["superadmin", "agent"]:
+        raise HTTPException(status_code=403, detail="Only superadmins or agents can delete notifications")
 
     notification = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notification:
         raise HTTPException(status_code=404, detail="Notification not found")
+
+    if current_user.role == "agent":
+        assigned_port = current_user.agent_profile.assigned_port if current_user.agent_profile else None
+        if not assigned_port or (notification.port_name != assigned_port and notification.created_by != current_user.id):
+            raise HTTPException(status_code=403, detail="Not authorized to delete this notification")
 
     db.delete(notification)
     db.commit()

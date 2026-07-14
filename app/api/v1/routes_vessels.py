@@ -33,6 +33,7 @@ class CrewMemberOut(BaseModel):
     rank: str
     nationality: Optional[str] = None
     hp_id: Optional[str] = None
+    passport_number: Optional[str] = None
     expiry_date: Optional[datetime] = None
     status: str
     shore_pass_eligible: bool
@@ -77,13 +78,148 @@ class VesselIn(BaseModel):
     etd: Optional[datetime] = None
     status: Optional[str] = "Active"
 
+import csv
+import io
+
 @router.post("/{vessel_id}/crew/upload")
 def upload_crew_manifest(vessel_id: int, file: UploadFile = File(...), current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     vessel = db.query(Vessel).filter(Vessel.id == vessel_id, Vessel.agent_id == current_user.id).first()
     if not vessel:
         raise HTTPException(status_code=404, detail="Vessel not found")
     
-    return {"message": f"Successfully received manifest for {vessel.name}", "filename": file.filename}
+    filename = file.filename.lower()
+    if not filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Only CSV manifest files are supported at this time.")
+        
+    try:
+        contents = file.file.read()
+        decoded = contents.decode('utf-8')
+    except UnicodeDecodeError:
+        try:
+            decoded = contents.decode('latin-1')
+        except Exception:
+            raise HTTPException(status_code=400, detail="Could not decode CSV file. Please ensure it is saved with UTF-8 encoding.")
+            
+    csv_file = io.StringIO(decoded)
+    reader = csv.reader(csv_file)
+    
+    try:
+        headers = next(reader)
+    except StopIteration:
+        raise HTTPException(status_code=400, detail="CSV file is empty")
+        
+    headers = [h.strip().lower() for h in headers]
+    
+    def find_col(possible_names):
+        for name in possible_names:
+            if name in headers:
+                return headers.index(name)
+        return -1
+        
+    name_idx = find_col(["name", "full name", "crew name", "member name"])
+    passport_idx = find_col(["passport number", "passport", "passport no", "passport_number", "passportno"])
+    rank_idx = find_col(["rank", "designation", "role"])
+    nat_idx = find_col(["nationality", "country", "nat"])
+    eligible_idx = find_col(["shore pass allowed or not?", "shore pass allowed", "eligible", "shore_pass_eligible", "allowed", "shore pass allowed or not", "shore pass allowed or not ?"])
+    valid_idx = find_col(["shore pass valid upto", "shore_pass_valid_upto", "valid upto", "validity", "expires", "valid until"])
+    
+    if name_idx == -1 or passport_idx == -1 or rank_idx == -1:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Required columns (Name, Passport number, Rank) not found in CSV. Found columns: {', '.join(headers)}"
+        )
+        
+    agent_profile = current_user.agent_profile
+    port = agent_profile.assigned_port if agent_profile else None
+    
+    added_count = 0
+    for row in reader:
+        if not row or len(row) <= max(name_idx, passport_idx, rank_idx):
+            continue
+            
+        name = row[name_idx].strip()
+        passport_number = row[passport_idx].strip().upper()
+        rank = row[rank_idx].strip()
+        
+        if not name or not passport_number or not rank:
+            continue
+            
+        nationality = row[nat_idx].strip() if nat_idx != -1 and len(row) > nat_idx else None
+        
+        eligible_val = row[eligible_idx].strip().lower() if eligible_idx != -1 and len(row) > eligible_idx else "false"
+        shore_pass_eligible = eligible_val in ["true", "1", "yes", "y", "checked"]
+        
+        shore_pass_valid_upto = None
+        if valid_idx != -1 and len(row) > valid_idx:
+            date_str = row[valid_idx].strip()
+            if date_str:
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d", "%d/%m/%Y %H:%M", "%d/%m/%Y"):
+                    try:
+                        shore_pass_valid_upto = datetime.strptime(date_str, fmt)
+                        break
+                    except ValueError:
+                        continue
+                        
+        generated_hpid = generate_hpid(passport_number, nationality, port)
+        
+        crew = db.query(VesselCrew).filter(
+            VesselCrew.vessel_id == vessel.id,
+            (VesselCrew.passport_number == passport_number) | (VesselCrew.hp_id == generated_hpid)
+        ).first()
+        
+        if not crew:
+            crew = VesselCrew(
+                vessel_id=vessel.id,
+                name=name,
+                rank=rank,
+                nationality=nationality,
+                hp_id=generated_hpid,
+                passport_number=passport_number,
+                status="Pending",
+                shore_pass_eligible=shore_pass_eligible,
+                shore_pass_valid_upto=shore_pass_valid_upto
+            )
+            db.add(crew)
+        else:
+            crew.name = name
+            crew.rank = rank
+            crew.nationality = nationality
+            crew.hp_id = generated_hpid
+            crew.passport_number = passport_number
+            crew.shore_pass_eligible = shore_pass_eligible
+            if shore_pass_valid_upto:
+                crew.shore_pass_valid_upto = shore_pass_valid_upto
+                
+        profile = db.query(CrewProfile).filter(CrewProfile.hpid == generated_hpid).first()
+        if profile:
+            crew.status = "Mapped"
+            existing_pass = db.query(ShorePass).filter(
+                ShorePass.crew_profile_id == profile.id,
+                ShorePass.port_name == port,
+                ShorePass.vessel_name == vessel.name
+            ).first()
+            if not existing_pass:
+                port_code = (port or "GEN").replace("port_", "")[:3].upper()
+                vessel_code = vessel.name.replace(" ", "")[:3].upper()
+                random_suffix = uuid.uuid4().hex[:4].upper()
+                shore_pass_id = f"SP-{port_code}-{vessel_code}-{random_suffix}"
+                port_display = (port or "General").replace("port_", "").replace("_", " ").title()
+                agent_name = f"{port_display} Port Authority"
+                
+                new_pass = ShorePass(
+                    crew_profile_id=profile.id,
+                    agent_name=agent_name,
+                    shore_pass_id=shore_pass_id,
+                    port_name=port,
+                    vessel_name=vessel.name,
+                    is_verified=False,
+                    status="pending"
+                )
+                db.add(new_pass)
+        added_count += 1
+        
+    db.commit()
+    return {"message": f"Successfully parsed and loaded {added_count} crew members.", "filename": file.filename}
 
 @router.get("/crew/{hp_id}/profile", response_model=CrewProfileOut)
 def get_crew_profile(hp_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -140,8 +276,8 @@ class VesselPublicOut(BaseModel):
 
 @router.post("/", response_model=VesselOut, status_code=status.HTTP_201_CREATED)
 def create_vessel(body: VesselIn, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.role not in ["agent", "superadmin"]:
-        raise HTTPException(status_code=403, detail="Only agents or superadmins can create vessels")
+    if current_user.role != "superadmin":
+        raise HTTPException(status_code=403, detail="Only superadmins can create vessels")
     
     c_count = body.crew_count if body.crew_count is not None else 0
     if body.total_crew is not None:
@@ -269,6 +405,7 @@ def add_crew_member(vessel_id: int, body: CrewMemberIn, current_user: User = Dep
         rank=body.rank,
         nationality=body.nationality,
         hp_id=generated_hpid,
+        passport_number=body.passport_number,
         status=body.status,
         shore_pass_eligible=body.shore_pass_eligible if body.shore_pass_eligible is not None else False,
         shore_pass_valid_upto=body.shore_pass_valid_upto
