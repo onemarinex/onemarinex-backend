@@ -468,3 +468,52 @@ def update_crew_eligibility(
     db.commit()
     db.refresh(crew)
     return crew
+
+class CrewMemberUpdate(BaseModel):
+    name: Optional[str] = None
+    rank: Optional[str] = None
+    nationality: Optional[str] = None
+    passport_number: Optional[str] = None
+    shore_pass_eligible: Optional[bool] = None
+    shore_pass_valid_upto: Optional[datetime] = None
+
+@router.patch("/{vessel_id}/crew/{crew_id}", response_model=CrewMemberOut)
+def update_crew_member(
+    vessel_id: int,
+    crew_id: int,
+    body: CrewMemberUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role == "agent":
+        vessel = db.query(Vessel).filter(Vessel.id == vessel_id, Vessel.agent_id == current_user.id).first()
+        if not vessel:
+            raise HTTPException(status_code=404, detail="Vessel not found or unauthorized")
+    elif current_user.role == "superadmin":
+        vessel = db.query(Vessel).filter(Vessel.id == vessel_id).first()
+        if not vessel:
+            raise HTTPException(status_code=404, detail="Vessel not found")
+    else:
+        raise HTTPException(status_code=403, detail="Only agents or superadmins can update crew members")
+
+    crew = db.query(VesselCrew).filter(VesselCrew.id == crew_id, VesselCrew.vessel_id == vessel.id).first()
+    if not crew:
+        raise HTTPException(status_code=404, detail="Crew member not found on this vessel")
+    
+    if body.name is not None:
+        crew.name = body.name
+    if body.rank is not None:
+        crew.rank = body.rank
+    if body.nationality is not None:
+        crew.nationality = body.nationality
+    if body.passport_number is not None:
+        crew.passport_number = body.passport_number.strip().upper()
+    if body.shore_pass_eligible is not None:
+        crew.shore_pass_eligible = body.shore_pass_eligible
+    if body.shore_pass_valid_upto is not None:
+        crew.shore_pass_valid_upto = body.shore_pass_valid_upto
+        
+    db.commit()
+    db.refresh(crew)
+    return crew
+
