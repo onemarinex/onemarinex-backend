@@ -2185,6 +2185,18 @@ def submit_booking_review(
         existing.review_text = body.review_text
         if body.facility_name:
             existing.facility_name = body.facility_name
+            
+        db.flush()
+        if body.review_type == "driver" and body.driver_id:
+            driver = db.query(Driver).filter(Driver.id == body.driver_id).first()
+            if driver:
+                avg = db.query(func.avg(BookingReview.rating)).filter(
+                    BookingReview.driver_id == body.driver_id,
+                    BookingReview.review_type == "driver",
+                ).scalar()
+                if avg is not None:
+                    driver.rating = round(float(avg), 2)
+
         db.commit()
         db.refresh(existing)
         return _serialize_review(existing, db)
@@ -2200,6 +2212,7 @@ def submit_booking_review(
         review_text=body.review_text,
     )
     db.add(review)
+    db.flush()
 
     if body.review_type == "driver" and body.driver_id:
         driver = db.query(Driver).filter(Driver.id == body.driver_id).first()

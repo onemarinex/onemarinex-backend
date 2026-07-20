@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, ForeignKey, ARRAY, DateTime, func
+from sqlalchemy import Column, Integer, String, Text, ForeignKey, JSON, DateTime, func
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 
@@ -14,8 +14,8 @@ class VendorProfile(Base):
     logo_url = Column(Text)
 
     # For Postgres text[]: ARRAY(String) is fine; defaults stay as empty arrays
-    ports_served = Column(ARRAY(String), server_default="{}")
-    categories_supplied = Column(ARRAY(String), server_default="{}")
+    ports_served = Column(JSON, server_default="[]")
+    categories_supplied = Column(JSON, server_default="[]")
 
     trade_license_url = Column(Text)
     gst_vat_url = Column(Text)

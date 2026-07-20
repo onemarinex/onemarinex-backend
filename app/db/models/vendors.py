@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, ForeignKey
 from sqlalchemy.orm import relationship
-from sqlalchemy.dialects.postgresql import JSONB
+# from sqlalchemy.dialects.postgresql import JSONB
 from datetime import datetime
 from app.db.base import Base
 
@@ -20,9 +20,9 @@ class Vendors(Base):
     phone = Column(String, nullable=False)
     email = Column(String,nullable=False)
     status = Column(String(32), server_default="Active") # Active, Inactive
-    documents = Column(JSONB, nullable=True)
-    images = Column(JSONB, nullable=True)
-    other_information = Column(JSONB, nullable=True)    # service type,price,timings
+    documents = Column(JSON, nullable=True)
+    images = Column(JSON, nullable=True)
+    other_information = Column(JSON, nullable=True)    # service type,price,timings
     category = Column(String(64), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

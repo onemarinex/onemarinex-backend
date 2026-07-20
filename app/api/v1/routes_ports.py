@@ -35,6 +35,9 @@ class PortRulesIn(BaseModel):
     opening_time: Optional[str] = None
     closing_time: Optional[str] = None
     working_days: Optional[List[str]] = None
+    advance_booking_buffer_minutes: Optional[int] = None
+    contact_email: Optional[str] = None
+    helpline_number: Optional[str] = None
 
 class PortRulesOut(BaseModel):
     port_name: str
@@ -42,6 +45,9 @@ class PortRulesOut(BaseModel):
     opening_time: Optional[str] = None
     closing_time: Optional[str] = None
     working_days: Optional[List[str]] = None
+    advance_booking_buffer_minutes: Optional[int] = 30
+    contact_email: Optional[str] = None
+    helpline_number: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -75,13 +81,16 @@ def get_port_rules(port_name: str, db: Session = Depends(get_db)):
         .first()
     )
     if not rules:
-        return {"port_name": port.code if port else port_name, "rules": [], "opening_time": None, "closing_time": None, "working_days": None}
+        return {"port_name": port.code if port else port_name, "rules": [], "opening_time": None, "closing_time": None, "working_days": None, "advance_booking_buffer_minutes": 30, "contact_email": None, "helpline_number": None}
     return {
         "port_name": rules.port_name,
         "rules": rules.rules or [],
         "opening_time": rules.opening_time,
         "closing_time": rules.closing_time,
         "working_days": rules.working_days,
+        "advance_booking_buffer_minutes": rules.advance_booking_buffer_minutes if hasattr(rules, 'advance_booking_buffer_minutes') else 30,
+        "contact_email": rules.contact_email if hasattr(rules, 'contact_email') else None,
+        "helpline_number": rules.helpline_number if hasattr(rules, 'helpline_number') else None,
     }
 
 @router.post("/{port_name}/rules", response_model=PortRulesOut)
@@ -122,6 +131,12 @@ def update_port_rules(
         if body.closing_time is not None:
             port_rules.closing_time = body.closing_time
         port_rules.working_days = body.working_days
+        if body.advance_booking_buffer_minutes is not None:
+            port_rules.advance_booking_buffer_minutes = body.advance_booking_buffer_minutes
+        if body.contact_email is not None:
+            port_rules.contact_email = body.contact_email
+        if body.helpline_number is not None:
+            port_rules.helpline_number = body.helpline_number
     else:
         port_rules = PortRule(
             port_name=canonical_port_name,
@@ -129,6 +144,9 @@ def update_port_rules(
             opening_time=body.opening_time,
             closing_time=body.closing_time,
             working_days=body.working_days,
+            advance_booking_buffer_minutes=body.advance_booking_buffer_minutes if body.advance_booking_buffer_minutes is not None else 30,
+            contact_email=body.contact_email,
+            helpline_number=body.helpline_number,
         )
         db.add(port_rules)
     
@@ -145,6 +163,9 @@ def update_port_rules(
         "opening_time": port_rules.opening_time,
         "closing_time": port_rules.closing_time,
         "working_days": port_rules.working_days,
+        "advance_booking_buffer_minutes": port_rules.advance_booking_buffer_minutes,
+        "contact_email": port_rules.contact_email,
+        "helpline_number": port_rules.helpline_number,
     }
 
 
