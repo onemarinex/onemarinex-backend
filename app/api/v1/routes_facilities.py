@@ -27,6 +27,9 @@ class FacilityOut(BaseModel):
     open_time: Optional[str] = None
     close_time: Optional[str] = None
     working_days: Optional[str] = None
+    facilities: Optional[List[str]] = None
+    best_for: Optional[str] = None
+    category: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -58,6 +61,9 @@ def _vendor_to_facility(v: Vendors) -> FacilityOut:
         open_time=other.get("open_time"),
         close_time=other.get("close_time"),
         working_days=other.get("working_days"),
+        facilities=other.get("facilities", []),
+        best_for=other.get("best_for", ""),
+        category=other.get("category", v.category),
     )
 
 
@@ -91,3 +97,19 @@ def get_shopping_utility(
         query = query.filter(Vendors.port_id == port_id)
     vendors = query.all()
     return [_vendor_to_facility(v) for v in vendors]
+
+
+@router.get("/{facility_id}", response_model=FacilityOut)
+def get_facility_by_id(
+    facility_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    vendor = db.query(Vendors).filter(
+        Vendors.id == facility_id,
+        Vendors.status == "Active",
+        Vendors.category.in_(["massage", "wellness", "shopping", "utility"]),
+    ).first()
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Facility not found")
+    return _vendor_to_facility(vendor)
