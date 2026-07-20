@@ -67,7 +67,6 @@ def _normalize_itinerary_stops(
 
         split_parts = _split_compound_stop_parts(stop_name, stop_address or "")
         if len(split_parts) > 1:
-            generic_name = bool(re.match(r"^(drop|stop|destination)$", stop_name, flags=re.IGNORECASE))
             for part_idx, part in enumerate(split_parts):
                 split_id = f"{stop_id}__{part_idx + 1}"
                 while split_id in used_ids:
@@ -76,11 +75,11 @@ def _normalize_itinerary_stops(
                 normalized.append(
                     {
                         "id": split_id,
-                        "name": "Stop" if generic_name else part,
+                        "name": part,
                         "address": part,
                         "lat": stop.get("lat"),
                         "lng": stop.get("lng"),
-                        "type": stop_type,
+                        "type": "facility" if stop_type in ("drop", "waypoint") else stop_type,
                     }
                 )
             continue

@@ -121,8 +121,7 @@ def update_port_rules(
             port_rules.opening_time = body.opening_time
         if body.closing_time is not None:
             port_rules.closing_time = body.closing_time
-        if body.working_days is not None:
-            port_rules.working_days = body.working_days
+        port_rules.working_days = body.working_days
     else:
         port_rules = PortRule(
             port_name=canonical_port_name,

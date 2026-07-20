@@ -513,6 +513,7 @@ def decline_ride(
         created_at=now,
     )
     db.add(rejection)
+    db.flush()
 
     create_timeline_event(
         db,

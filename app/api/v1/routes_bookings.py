@@ -491,6 +491,7 @@ def reject_booking_endpoint(
         created_at=now,
     )
     db.add(rejection)
+    db.flush()
 
     create_timeline_event(
         db,

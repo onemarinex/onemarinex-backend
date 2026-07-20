@@ -13,6 +13,7 @@ from app.db.models.crew_profile import CrewProfile
 from app.db.models.shore_pass import ShorePass
 from app.db.models.cab_booking import CabBooking
 from app.db.models.cab_pricing import CabPricing
+from app.db.models.driver import Driver
 from app.db.models.incident import Incident, IncidentStatus, IncidentType
 from app.db.models.notification import Notification
 from app.db.models.crew_sos import CrewSos
@@ -201,6 +202,7 @@ class CabBookingDetailsOut(BaseModel):
     num_passengers: int
     driver_name: Optional[str]
     driver_phone: Optional[str]
+    assigned_driver_id: Optional[int] = None
     otp: str
     agent_number: str
     helpline_number: Optional[str] = None
@@ -217,6 +219,7 @@ class CabBookingDetailsOut(BaseModel):
     distance_km: Optional[float] = None
     created_at: datetime
     is_owner: bool = True
+    itinerary_stops: Optional[list] = None
 
     class Config:
         from_attributes = True
@@ -1731,6 +1734,7 @@ def get_booking_details(
         num_passengers=booking.num_passengers,
         driver_name=serialized.get("driver_name") or "Not Yet Assigned",
         driver_phone=serialized.get("driver_phone") or "Not Yet Assigned",
+        assigned_driver_id=serialized.get("assigned_driver_id"),
         otp=booking.otp,
         agent_number=booking.agent_number,
         helpline_number=serialized.get("helpline_number"),
@@ -1747,6 +1751,7 @@ def get_booking_details(
         distance_km=float(booking.distance_km or 0),
         created_at=booking.created_at,
         is_owner=is_owner,
+        itinerary_stops=serialized.get("itinerary_stops"),
     )
 
 

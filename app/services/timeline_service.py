@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -77,7 +77,7 @@ def get_booking_timeline(db: Session, booking_db_id: int) -> List[Dict[str, Any]
         .first()
     )
     if magic_link and magic_link.itinerary_stops:
-        for stop in magic_link.itinerary_stops:
+        for stop_idx, stop in enumerate(magic_link.itinerary_stops):
             stop_type = (stop.get("type") or stop.get("stop_type") or "custom").lower()
             events.append({
                 "id": -(abs(hash(str(stop.get("name", "")) + str(stop.get("address", "")))) % 1000000),
@@ -95,7 +95,27 @@ def get_booking_timeline(db: Session, booking_db_id: int) -> List[Dict[str, Any]
                     "reached": stop.get("reached", False),
                 },
                 "created_at": stop.get("created_at"),
+                "_sort_order": 1000 + stop_idx,
             })
 
-    events.sort(key=lambda e: e.get("event_time") or e.get("created_at") or datetime.min, reverse=False)
+    def _to_naive(dt_val):
+        if dt_val is None:
+            return datetime.min
+        if isinstance(dt_val, str):
+            try:
+                dt_val = datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                return datetime.min
+        if isinstance(dt_val, datetime) and dt_val.tzinfo is not None:
+            return dt_val.replace(tzinfo=None)
+        if isinstance(dt_val, datetime):
+            return dt_val
+        return datetime.min
+
+    def _sort_key(e):
+        if "_sort_order" in e:
+            return (1, e["_sort_order"])
+        return (0, _to_naive(e.get("event_time") or e.get("created_at")))
+
+    events.sort(key=_sort_key, reverse=False)
     return events
