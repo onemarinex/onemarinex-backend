@@ -2145,7 +2145,8 @@ def submit_booking_review(
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
-    if booking.status != BookingStatus.COMPLETED:
+    raw_status = str(booking.status.value if hasattr(booking.status, 'value') else booking.status).lower()
+    if raw_status != "completed":
         raise HTTPException(status_code=400, detail="Can only review completed bookings")
 
     if body.review_type not in ("driver", "facility_stop"):

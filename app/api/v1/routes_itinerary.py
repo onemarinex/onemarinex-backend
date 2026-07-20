@@ -798,7 +798,7 @@ def suggest_itinerary(body: ItinerarySuggestIn, db: Session = Depends(get_db)):
     )
     
     # ── 4a. Filter out currently closed facilities ──
-    vendors = [v for v in vendors if vendor_is_currently_open(v.other_information)]
+    # vendors = [v for v in vendors if vendor_is_currently_open(v.other_information)]
     
     if not vendors:
         return ItinerarySuggestOut(
