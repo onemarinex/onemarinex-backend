@@ -6,9 +6,10 @@ class PortRule(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     port_name = Column(String(128), unique=True, index=True, nullable=False)
-    # rules: List of {title, description, icon_type}
     rules = Column(JSON, nullable=True)
+    opening_time = Column(String(8), nullable=True)
     closing_time = Column(String(8), nullable=True)
+    working_days = Column(JSON, nullable=True)  # List of weekday abbreviations: ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

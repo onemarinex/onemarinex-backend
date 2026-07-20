@@ -373,6 +373,23 @@ def serialize_booking(booking: CabBooking) -> Dict[str, Any]:
         booking.aggregator if booking.aggregator_id else None
     )
     driver = booking.assigned_driver
+
+    itinerary_stops = None
+    try:
+        from app.db.models.driver_magic_link import DriverMagicLink
+        magic_link = (
+            booking.magic_link if hasattr(booking, 'magic_link') and booking.magic_link
+            else None
+        )
+        if not magic_link and booking.id:
+            from sqlalchemy.orm import Session as _Session
+            # We can't easily get a session here, so we rely on the relationship
+            pass
+        if magic_link:
+            itinerary_stops = magic_link.itinerary_stops
+    except Exception:
+        pass
+
     return {
         "id": booking.id,
         "booking_id": booking.booking_id,
@@ -414,6 +431,7 @@ def serialize_booking(booking: CabBooking) -> Dict[str, Any]:
         "scheduled_time": booking.scheduled_time,
         "created_at": booking.created_at,
         "updated_at": booking.updated_at,
+        "itinerary_stops": itinerary_stops,
     }
 
 

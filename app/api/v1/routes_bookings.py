@@ -162,6 +162,20 @@ def verify_magic_link_otp(
     if body.otp != (crew_otp or "") and body.otp != (booking_otp or ""):
         raise HTTPException(status_code=400, detail="Invalid OTP")
 
+    now = datetime.utcnow()
+    if not booking.trip_started_at:
+        booking.trip_started_at = now
+    booking.status = BookingStatus.ON_TRIP
+
+    create_timeline_event(
+        db,
+        booking_db_id=booking.id,
+        event_type=TimelineEventType.TRIP_STARTED,
+        actor_type="driver",
+        metadata={"source": "magic_link_otp"},
+        event_time=now,
+    )
+    db.commit()
     return {"verified": True}
 
 
@@ -444,6 +458,8 @@ def reject_booking_endpoint(
     if not provider:
         raise HTTPException(status_code=404, detail="Fleet provider profile not found")
 
+    from app.db.models.booking_provider_rejection import BookingProviderRejection
+
     booking = _get_booking_action_row(db, booking_id)
     assigned_provider_id = booking.provider_id or booking.aggregator_id
     if assigned_provider_id is not None and assigned_provider_id != provider.id:
@@ -454,12 +470,10 @@ def reject_booking_endpoint(
         raise HTTPException(status_code=400, detail="Booking is not awaiting provider response")
 
     already_declined = (
-        db.query(BookingTimeline.id)
+        db.query(BookingProviderRejection.id)
         .filter(
-            BookingTimeline.booking_id == booking.id,
-            BookingTimeline.actor_type == "provider",
-            BookingTimeline.actor_id == provider.id,
-            func.upper(BookingTimeline.event_type) == TimelineEventType.PROVIDER_REJECTED.value,
+            BookingProviderRejection.booking_id == booking.id,
+            BookingProviderRejection.provider_id == provider.id,
         )
         .first()
     )
@@ -470,6 +484,14 @@ def reject_booking_endpoint(
         }
 
     now = datetime.utcnow()
+
+    rejection = BookingProviderRejection(
+        booking_id=booking.id,
+        provider_id=provider.id,
+        created_at=now,
+    )
+    db.add(rejection)
+
     create_timeline_event(
         db,
         booking_db_id=booking.id,
@@ -479,10 +501,38 @@ def reject_booking_endpoint(
         metadata={"provider_name": provider.company_name},
         event_time=now,
     )
+
+    from app.services.booking_service import get_eligible_providers_for_ride
+    full_booking = db.query(CabBooking).filter(CabBooking.id == booking.id).first()
+    ride_type = full_booking.ride_type
+    vehicle_type_val = full_booking.vehicle_type.value if full_booking.vehicle_type else ""
+    vehicle_name_val = full_booking.vehicle_name or ""
+    eligible_providers = get_eligible_providers_for_ride(db, ride_type, full_booking.port, vehicle_type_val, vehicle_name_val)
+    rejected_provider_ids = {
+        r.provider_id for r in
+        db.query(BookingProviderRejection.provider_id)
+        .filter(BookingProviderRejection.booking_id == booking.id)
+        .all()
+    }
+    remaining = [p for p in eligible_providers if p.id not in rejected_provider_ids]
+
+    if not remaining:
+        full_booking.status = BookingStatus.CANCELLED
+        create_timeline_event(
+            db,
+            booking_db_id=full_booking.id,
+            event_type=TimelineEventType.TRIP_CANCELLED,
+            actor_id=provider.id,
+            actor_type="provider",
+            metadata={"reason": "all_providers_rejected"},
+            event_time=now,
+        )
+
     db.commit()
     return {
-        "message": "Booking declined for this provider; still available to others",
+        "message": "Booking declined for this provider; still available to others" if remaining else "Booking cancelled — no eligible providers remaining",
         "booking_id": booking_id,
+        "cancelled": not remaining,
     }
 
 

@@ -307,15 +307,14 @@ def get_aggregator_dashboard(
     visible_booking_ids = [row.id for row in rows]
     declined_by_me: set[int] = set()
     if visible_booking_ids:
+        from app.db.models.booking_provider_rejection import BookingProviderRejection
         declined_by_me = {
             booking_id
             for (booking_id,) in (
-                db.query(BookingTimeline.booking_id)
+                db.query(BookingProviderRejection.booking_id)
                 .filter(
-                    BookingTimeline.booking_id.in_(visible_booking_ids),
-                    BookingTimeline.actor_type == "provider",
-                    BookingTimeline.actor_id == agg_profile.id,
-                    func.upper(BookingTimeline.event_type) == TimelineEventType.PROVIDER_REJECTED.value,
+                    BookingProviderRejection.booking_id.in_(visible_booking_ids),
+                    BookingProviderRejection.provider_id == agg_profile.id,
                 )
                 .distinct()
                 .all()
@@ -493,18 +492,27 @@ def decline_ride(
     if (booking.status or "").lower() != BookingStatus.PENDING_PROVIDER_RESPONSE.value:
         raise HTTPException(status_code=400, detail="Booking is not awaiting provider response")
 
+    from app.db.models.booking_provider_rejection import BookingProviderRejection
+
     already_declined = (
-        db.query(BookingTimeline.id)
+        db.query(BookingProviderRejection.id)
         .filter(
-            BookingTimeline.booking_id == booking.id,
-            BookingTimeline.actor_type == "provider",
-            BookingTimeline.actor_id == profile.id,
-            func.upper(BookingTimeline.event_type) == TimelineEventType.PROVIDER_REJECTED.value,
+            BookingProviderRejection.booking_id == booking.id,
+            BookingProviderRejection.provider_id == profile.id,
         )
         .first()
     )
     if already_declined:
         return {"message": "Ride already declined by this provider", "booking_id": booking_id}
+
+    now = datetime.utcnow()
+
+    rejection = BookingProviderRejection(
+        booking_id=booking.id,
+        provider_id=profile.id,
+        created_at=now,
+    )
+    db.add(rejection)
 
     create_timeline_event(
         db,
@@ -513,9 +521,38 @@ def decline_ride(
         actor_id=profile.id,
         actor_type="provider",
         metadata={"provider_name": profile.company_name},
+        event_time=now,
     )
+
+    from app.services.booking_service import get_eligible_providers_for_ride
+    full_booking = db.query(CabBooking).filter(CabBooking.id == booking.id).first()
+    ride_type = full_booking.ride_type
+    vehicle_type_val = full_booking.vehicle_type.value if full_booking.vehicle_type else ""
+    vehicle_name_val = full_booking.vehicle_name or ""
+    eligible_providers = get_eligible_providers_for_ride(db, ride_type, full_booking.port, vehicle_type_val, vehicle_name_val)
+    rejected_provider_ids = {
+        r.provider_id for r in
+        db.query(BookingProviderRejection.provider_id)
+        .filter(BookingProviderRejection.booking_id == booking.id)
+        .all()
+    }
+    remaining = [p for p in eligible_providers if p.id not in rejected_provider_ids]
+
+    if not remaining:
+        full_booking.status = BookingStatus.CANCELLED
+        create_timeline_event(
+            db,
+            booking_db_id=full_booking.id,
+            event_type=TimelineEventType.TRIP_CANCELLED,
+            actor_id=profile.id,
+            actor_type="provider",
+            metadata={"reason": "all_providers_rejected"},
+            event_time=now,
+        )
+
     db.commit()
     return {
-        "message": "Ride declined for this provider; still available to others",
+        "message": "Ride declined for this provider; still available to others" if remaining else "Booking cancelled — no eligible providers remaining",
         "booking_id": booking_id,
+        "cancelled": not remaining,
     }

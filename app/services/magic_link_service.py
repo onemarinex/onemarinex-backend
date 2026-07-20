@@ -235,6 +235,14 @@ def serialize_magic_link_public_payload(magic_link: DriverMagicLink) -> Dict[str
         "booking_id": booking.booking_id,
         "booking_status": booking.status.value if booking.status else None,
         "magic_token": magic_link.token,
+        "fare": {
+            "estimated_price": float(booking.estimated_price) if booking.estimated_price else None,
+            "distance_km": float(booking.distance_km) if booking.distance_km else None,
+            "vehicle_type": booking.vehicle_type.value if booking.vehicle_type else None,
+            "vehicle_name": booking.vehicle_name,
+            "ride_type": booking.ride_type.value if booking.ride_type else None,
+            "num_passengers": booking.num_passengers,
+        },
         "crew": {
             "name": booking.crew.full_name if booking.crew else None,
             "hp_id": booking.crew.hpid if booking.crew else None,

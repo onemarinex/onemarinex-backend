@@ -71,6 +71,9 @@ def get_sightseeing(
             "about": other.get("about") or other.get("description") or "",
             "facilities": other.get("facilities", []),
             "best_time_to_visit": other.get("best_time_to_visit", "Evening"),
+            "open_time": other.get("open_time"),
+            "close_time": other.get("close_time"),
+            "working_days": other.get("working_days"),
         })
     return results
 

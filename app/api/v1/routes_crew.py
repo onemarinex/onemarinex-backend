@@ -18,6 +18,7 @@ from app.db.models.notification import Notification
 from app.db.models.crew_sos import CrewSos
 from app.db.models.port import Port
 from app.db.models.aggregator_profile import AggregatorProfile
+from app.db.models.booking_invitation import BookingInvitation
 from app.db.models.pricing_controls import (
     PricingDuration,
     PricingDurationVisibility,
@@ -215,6 +216,7 @@ class CabBookingDetailsOut(BaseModel):
     trip_completed_at: Optional[datetime] = None
     distance_km: Optional[float] = None
     created_at: datetime
+    is_owner: bool = True
 
     class Config:
         from_attributes = True
@@ -234,7 +236,9 @@ class CabBookingOut(BaseModel):
     num_passengers: int
     status: str
     scheduled_time: Optional[datetime]
+    trip_started_at: Optional[datetime] = None
     created_at: datetime
+    is_owner: bool = True
 
     class Config:
         from_attributes = True
@@ -1695,7 +1699,7 @@ def get_booking_details(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get detailed information about a specific booking"""
+    """Get detailed information about a specific booking (owner or invited crew)"""
     if current_user.role != "crew":
         raise HTTPException(status_code=403, detail="Only crew can view bookings")
     
@@ -1703,15 +1707,21 @@ def get_booking_details(
     if not profile:
         raise HTTPException(status_code=404, detail="Crew profile not found")
     
-    booking = db.query(CabBooking).filter(
-        CabBooking.booking_id == booking_id,
-        CabBooking.crew_id == profile.id
-    ).first()
-    
+    booking = db.query(CabBooking).filter(CabBooking.booking_id == booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
     
-    from app.services.booking_service import RIDE_TYPE_LABELS, serialize_booking
+    is_owner = booking.crew_id == profile.id
+    if not is_owner:
+        inv = db.query(BookingInvitation).filter(
+            BookingInvitation.booking_id == booking.id,
+            BookingInvitation.invited_crew_id == profile.id,
+            BookingInvitation.status == "active",
+        ).first()
+        if not inv:
+            raise HTTPException(status_code=404, detail="Booking not found")
+    
+    from app.services.booking_service import serialize_booking
     serialized = serialize_booking(booking)
     return CabBookingDetailsOut(
         booking_id=booking.booking_id,
@@ -1735,7 +1745,8 @@ def get_booking_details(
         trip_started_at=serialized.get("trip_started_at"),
         trip_completed_at=serialized.get("trip_completed_at"),
         distance_km=float(booking.distance_km or 0),
-        created_at=booking.created_at
+        created_at=booking.created_at,
+        is_owner=is_owner,
     )
 
 
@@ -1776,7 +1787,7 @@ def cancel_booking(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Cancel a cab booking"""
+    """Cancel a cab booking — only the trip owner can cancel"""
     if current_user.role != "crew":
         raise HTTPException(status_code=403, detail="Only crew can cancel bookings")
     
@@ -1784,13 +1795,13 @@ def cancel_booking(
     if not profile:
         raise HTTPException(status_code=404, detail="Crew profile not found")
     
-    booking = db.query(CabBooking).filter(
-        CabBooking.booking_id == booking_id,
-        CabBooking.crew_id == profile.id
-    ).first()
+    booking = db.query(CabBooking).filter(CabBooking.booking_id == booking_id).first()
     
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
+    
+    if booking.crew_id != profile.id:
+        raise HTTPException(status_code=403, detail="Only the trip owner can cancel this ride")
     
     from app.db.models.cab_booking import BookingStatus
     if booking.status == BookingStatus.CANCELLED:
@@ -1808,6 +1819,9 @@ def cancel_booking(
         BookingStatus.PROVIDER_REJECTED,
     }:
         raise HTTPException(status_code=400, detail="Cannot cancel booking in current status")
+
+    if booking.trip_started_at:
+        raise HTTPException(status_code=400, detail="Cannot cancel booking after OTP has been verified")
 
     booking.status = BookingStatus.CANCELLED
     create_timeline_event(
@@ -1832,7 +1846,7 @@ def get_booking_history(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get all cab bookings for the current user"""
+    """Get all cab bookings for the current user (owned + invited)"""
     if current_user.role != "crew":
         raise HTTPException(status_code=403, detail="Only crew can view booking history")
     
@@ -1840,24 +1854,37 @@ def get_booking_history(
     if not profile:
         raise HTTPException(status_code=404, detail="Crew profile not found")
     
-    bookings = (
-        db.query(
-            CabBooking.id,
-            CabBooking.booking_id,
-            CabBooking.pickup_address,
-            CabBooking.drop_address,
-            cast(CabBooking.vehicle_type, String).label("vehicle_type"),
-            CabBooking.vehicle_name,
-            CabBooking.estimated_price,
-            CabBooking.num_passengers,
-            cast(CabBooking.status, String).label("status"),
-            CabBooking.scheduled_time,
-            CabBooking.created_at,
+    # Get booking IDs where user is invited
+    invited_booking_ids = [
+        inv.booking_id for inv in db.query(BookingInvitation).filter(
+            BookingInvitation.invited_crew_id == profile.id,
+            BookingInvitation.status == "active"
+        ).all()
+    ]
+    
+    # Fetch bookings: owned OR invited
+    from sqlalchemy import or_
+    query = db.query(
+        CabBooking.id,
+        CabBooking.booking_id,
+        CabBooking.pickup_address,
+        CabBooking.drop_address,
+        cast(CabBooking.vehicle_type, String).label("vehicle_type"),
+        CabBooking.vehicle_name,
+        CabBooking.estimated_price,
+        CabBooking.num_passengers,
+        cast(CabBooking.status, String).label("status"),
+        CabBooking.scheduled_time,
+        CabBooking.created_at,
+        CabBooking.crew_id,
+    ).filter(
+        or_(
+            CabBooking.crew_id == profile.id,
+            CabBooking.id.in_(invited_booking_ids) if invited_booking_ids else False
         )
-        .filter(CabBooking.crew_id == profile.id)
-        .order_by(CabBooking.created_at.desc())
-        .all()
-    )
+    ).order_by(CabBooking.created_at.desc())
+    
+    bookings = query.all()
     
     return [
         CabBookingOut(
@@ -1871,7 +1898,354 @@ def get_booking_history(
             num_passengers=booking.num_passengers,
             status=(booking.status or "").lower(),
             scheduled_time=booking.scheduled_time,
-            created_at=booking.created_at
+            created_at=booking.created_at,
+            is_owner=booking.crew_id == profile.id,
         )
         for booking in bookings
     ]
+
+
+# --- Booking Invitations ---
+
+class CrewInviteIn(BaseModel):
+    email: str
+
+class InvitationOut(BaseModel):
+    id: int
+    booking_id: int
+    invited_crew_name: str
+    invited_crew_email: str
+    invited_by_name: str
+    status: str
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/cab/bookings/{booking_id}/invitations", response_model=List[InvitationOut])
+def get_booking_invitations(
+    booking_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get all invitations for a booking (owner or invited crew can view)"""
+    if current_user.role != "crew":
+        raise HTTPException(status_code=403, detail="Only crew can access this")
+
+    profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Crew profile not found")
+
+    booking = db.query(CabBooking).filter(CabBooking.booking_id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    is_owner = booking.crew_id == profile.id
+    is_invited = db.query(BookingInvitation).filter(
+        BookingInvitation.booking_id == booking.id,
+        BookingInvitation.invited_crew_id == profile.id,
+        BookingInvitation.status == "active",
+    ).first() is not None
+
+    if not is_owner and not is_invited:
+        raise HTTPException(status_code=403, detail="Not part of this booking")
+
+    invitations = db.query(BookingInvitation).filter(
+        BookingInvitation.booking_id == booking.id,
+        BookingInvitation.status == "active",
+    ).all()
+
+    result = []
+    for inv in invitations:
+        invited_user = db.query(User).filter(User.id == inv.invited_crew.user_id).first() if inv.invited_crew else None
+        inviter_user = db.query(User).filter(User.id == inv.invited_by.user_id).first() if inv.invited_by else None
+        result.append(InvitationOut(
+            id=inv.id,
+            booking_id=inv.booking_id,
+            invited_crew_name=inv.invited_crew.full_name if inv.invited_crew else "Unknown",
+            invited_crew_email=invited_user.email if invited_user else "",
+            invited_by_name=inviter_user.name if inviter_user else "Unknown",
+            status=inv.status,
+            created_at=inv.created_at,
+        ))
+    return result
+
+
+@router.post("/cab/bookings/{booking_id}/invite", response_model=InvitationOut)
+def invite_crew_to_booking(
+    booking_id: str,
+    body: CrewInviteIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Invite a crew member to a booking by email. Only the owner can invite."""
+    if current_user.role != "crew":
+        raise HTTPException(status_code=403, detail="Only crew can invite")
+
+    profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Crew profile not found")
+
+    booking = db.query(CabBooking).filter(CabBooking.booking_id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    if booking.crew_id != profile.id:
+        raise HTTPException(status_code=403, detail="Only the trip owner can invite crew")
+
+    # Look up the invited user by email
+    invitee_user = db.query(User).filter(User.email == body.email.lower().strip()).first()
+    if not invitee_user:
+        raise HTTPException(status_code=404, detail="No registered crew found with this email")
+
+    invitee_profile = db.query(CrewProfile).filter(CrewProfile.user_id == invitee_user.id).first()
+    if not invitee_profile:
+        raise HTTPException(status_code=404, detail="This user does not have a crew profile")
+
+    if invitee_profile.id == profile.id:
+        raise HTTPException(status_code=400, detail="You cannot invite yourself")
+
+    # Check duplicate
+    existing = db.query(BookingInvitation).filter(
+        BookingInvitation.booking_id == booking.id,
+        BookingInvitation.invited_crew_id == invitee_profile.id,
+    ).first()
+    if existing:
+        if existing.status == "active":
+            raise HTTPException(status_code=400, detail="This crew member is already invited")
+        else:
+            # Re-activate
+            existing.status = "active"
+            db.commit()
+            db.refresh(existing)
+            return InvitationOut(
+                id=existing.id,
+                booking_id=existing.booking_id,
+                invited_crew_name=invitee_profile.full_name,
+                invited_crew_email=body.email.lower().strip(),
+                invited_by_name=profile.full_name,
+                status=existing.status,
+                created_at=existing.created_at,
+            )
+
+    # Check if invitee is already in an active booking (no 2 active trips per crew)
+    invitee_active_booking = db.query(CabBooking).join(
+        BookingInvitation, BookingInvitation.booking_id == CabBooking.id
+    ).filter(
+        BookingInvitation.invited_crew_id == invitee_profile.id,
+        BookingInvitation.status == "active",
+        CabBooking.status.notin_(["completed", "cancelled"]),
+    ).first()
+    if invitee_active_booking:
+        raise HTTPException(status_code=400, detail="This crew member is already part of an active booking")
+
+    invitation = BookingInvitation(
+        booking_id=booking.id,
+        invited_crew_id=invitee_profile.id,
+        invited_by_id=profile.id,
+        status="active",
+    )
+    db.add(invitation)
+    db.commit()
+    db.refresh(invitation)
+
+    return InvitationOut(
+        id=invitation.id,
+        booking_id=invitation.booking_id,
+        invited_crew_name=invitee_profile.full_name,
+        invited_crew_email=body.email.lower().strip(),
+        invited_by_name=profile.full_name,
+        status=invitation.status,
+        created_at=invitation.created_at,
+    )
+
+
+@router.delete("/cab/bookings/{booking_id}/invite/{invitation_id}")
+def remove_booking_invitation(
+    booking_id: str,
+    invitation_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Remove an invitation. Owner can remove any; invited crew can remove themselves."""
+    if current_user.role != "crew":
+        raise HTTPException(status_code=403, detail="Only crew can access this")
+
+    profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Crew profile not found")
+
+    booking = db.query(CabBooking).filter(CabBooking.booking_id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    invitation = db.query(BookingInvitation).filter(
+        BookingInvitation.id == invitation_id,
+        BookingInvitation.booking_id == booking.id,
+    ).first()
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+
+    is_owner = booking.crew_id == profile.id
+    is_self = invitation.invited_crew_id == profile.id
+
+    if not is_owner and not is_self:
+        raise HTTPException(status_code=403, detail="Not authorized to remove this invitation")
+
+    invitation.status = "removed"
+    db.commit()
+
+    return {"message": "Invitation removed successfully"}
+
+
+# ─── Booking Reviews ──────────────────────────────────────────────────────
+
+class BookingReviewIn(BaseModel):
+    review_type: str  # "driver" or "facility_stop"
+    driver_id: Optional[int] = None
+    facility_name: Optional[str] = None
+    facility_stop_id: Optional[str] = None
+    rating: float = Field(ge=1.0, le=5.0)
+    review_text: Optional[str] = None
+
+
+class BookingReviewOut(BaseModel):
+    id: int
+    booking_id: str
+    review_type: str
+    driver_id: Optional[int] = None
+    driver_name: Optional[str] = None
+    facility_name: Optional[str] = None
+    facility_stop_id: Optional[str] = None
+    rating: float
+    review_text: Optional[str] = None
+    crew_name: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+@router.post("/cab/bookings/{booking_id}/reviews", response_model=BookingReviewOut)
+def submit_booking_review(
+    booking_id: str,
+    body: BookingReviewIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role != "crew":
+        raise HTTPException(status_code=403, detail="Only crew can submit reviews")
+
+    profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Crew profile not found")
+
+    booking = db.query(CabBooking).filter(CabBooking.booking_id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    if booking.status != BookingStatus.COMPLETED:
+        raise HTTPException(status_code=400, detail="Can only review completed bookings")
+
+    if body.review_type not in ("driver", "facility_stop"):
+        raise HTTPException(status_code=400, detail="review_type must be 'driver' or 'facility_stop'")
+
+    if body.review_type == "driver" and not body.driver_id:
+        raise HTTPException(status_code=400, detail="driver_id required for driver reviews")
+
+    from app.db.models.booking_review import BookingReview
+
+    existing = None
+    if body.review_type == "driver":
+        existing = db.query(BookingReview).filter(
+            BookingReview.booking_id == booking.id,
+            BookingReview.crew_id == profile.id,
+            BookingReview.review_type == "driver",
+            BookingReview.driver_id == body.driver_id,
+        ).first()
+    elif body.review_type == "facility_stop":
+        if not body.facility_stop_id:
+            raise HTTPException(status_code=400, detail="facility_stop_id required for facility reviews")
+        existing = db.query(BookingReview).filter(
+            BookingReview.booking_id == booking.id,
+            BookingReview.crew_id == profile.id,
+            BookingReview.review_type == "facility_stop",
+            BookingReview.facility_stop_id == body.facility_stop_id,
+        ).first()
+
+    if existing:
+        existing.rating = body.rating
+        existing.review_text = body.review_text
+        if body.facility_name:
+            existing.facility_name = body.facility_name
+        db.commit()
+        db.refresh(existing)
+        return _serialize_review(existing, db)
+
+    review = BookingReview(
+        booking_id=booking.id,
+        crew_id=profile.id,
+        review_type=body.review_type,
+        driver_id=body.driver_id,
+        facility_name=body.facility_name,
+        facility_stop_id=body.facility_stop_id,
+        rating=body.rating,
+        review_text=body.review_text,
+    )
+    db.add(review)
+
+    if body.review_type == "driver" and body.driver_id:
+        driver = db.query(Driver).filter(Driver.id == body.driver_id).first()
+        if driver:
+            avg = db.query(func.avg(BookingReview.rating)).filter(
+                BookingReview.driver_id == body.driver_id,
+                BookingReview.review_type == "driver",
+            ).scalar()
+            if avg is not None:
+                driver.rating = round(float(avg), 2)
+
+    db.commit()
+    db.refresh(review)
+    return _serialize_review(review, db)
+
+
+@router.get("/cab/bookings/{booking_id}/reviews", response_model=List[BookingReviewOut])
+def get_booking_reviews(
+    booking_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if current_user.role not in ("crew", "superadmin", "agent", "aggregator"):
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    booking = db.query(CabBooking).filter(CabBooking.booking_id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    from app.db.models.booking_review import BookingReview
+    reviews = db.query(BookingReview).filter(BookingReview.booking_id == booking.id).all()
+    return [_serialize_review(r, db) for r in reviews]
+
+
+def _serialize_review(review, db: Session) -> dict:
+    driver_name = None
+    if review.driver_id:
+        driver = db.query(Driver).filter(Driver.id == review.driver_id).first()
+        driver_name = driver.name if driver else None
+
+    crew = db.query(CrewProfile).filter(CrewProfile.id == review.crew_id).first()
+
+    return {
+        "id": review.id,
+        "booking_id": db.query(CabBooking.booking_id).filter(CabBooking.id == review.booking_id).scalar(),
+        "review_type": review.review_type,
+        "driver_id": review.driver_id,
+        "driver_name": driver_name,
+        "facility_name": review.facility_name,
+        "facility_stop_id": review.facility_stop_id,
+        "rating": review.rating,
+        "review_text": review.review_text,
+        "crew_name": crew.full_name if crew else None,
+        "created_at": review.created_at,
+    }

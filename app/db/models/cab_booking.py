@@ -107,3 +107,28 @@ class CabBooking(Base):
         cascade="all, delete-orphan",
         order_by="BookingTimeline.event_time",
     )
+
+    invitations = relationship(
+        "BookingInvitation",
+        back_populates="booking",
+        cascade="all, delete-orphan",
+    )
+
+    provider_rejections = relationship(
+        "BookingProviderRejection",
+        back_populates="booking",
+        cascade="all, delete-orphan",
+    )
+
+    magic_link = relationship(
+        "DriverMagicLink",
+        back_populates="booking",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    reviews = relationship(
+        "BookingReview",
+        back_populates="booking",
+        cascade="all, delete-orphan",
+    )

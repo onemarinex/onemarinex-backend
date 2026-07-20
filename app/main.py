@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.db.session import engine
 from app.db.base import Base
 
-from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants, routes_incidents, routes_ports, routes_drivers, routes_early_access, routes_chat, routes_superadmin, routes_reviews, routes_sightseeing, routes_notifications, routes_sos, routes_pricing_controls
+from app.api.v1 import routes_auth, routes_contact, routes_files, routes_users, registration, routes_crew, routes_pubs, routes_hotels, routes_restaurants, routes_incidents, routes_ports, routes_drivers, routes_early_access, routes_chat, routes_superadmin, routes_reviews, routes_sightseeing, routes_notifications, routes_sos, routes_pricing_controls, routes_facilities
 
 from app.api.v1.routes_vendor import router as vendor_router
 from app.api.v1.routes_rfqs import router as rfq_router
@@ -136,6 +136,7 @@ app.include_router(routes_reviews.router, prefix="/api/v1/reviews", tags=["revie
 app.include_router(routes_notifications.router, prefix="/api/v1/notifications", tags=["notifications"])
 app.include_router(routes_sos.router, prefix="/api/v1/sos", tags=["sos"])
 app.include_router(routes_itinerary.router, prefix="/api/v1/itinerary", tags=["itinerary"])
+app.include_router(routes_facilities.router, prefix="/api/v1/facilities", tags=["facilities"])
 
 
 # --- Health checks & root ---

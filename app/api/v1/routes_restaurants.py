@@ -68,7 +68,9 @@ def get_restaurants(
             "about": other.get("about") or other.get("description") or "",
             "facilities": other.get("facilities", []),
             "address": v.location_name,
-            
+            "open_time": other.get("open_time"),
+            "close_time": other.get("close_time"),
+            "working_days": other.get("working_days"),
         })
     return results
 

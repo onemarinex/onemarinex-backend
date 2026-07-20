@@ -26,7 +26,7 @@ class DriverMagicLink(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    booking = relationship("CabBooking")
+    booking = relationship("CabBooking", back_populates="magic_link")
     created_by_aggregator = relationship("AggregatorProfile")
     reach_events = relationship(
         "DriverMagicLinkReachEvent",

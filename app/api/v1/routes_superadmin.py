@@ -41,6 +41,10 @@ class DashboardStats(BaseModel):
     total_sightseeing: int
     total_pubs: int
     total_hotels: int
+    total_massage: int = 0
+    total_wellness: int = 0
+    total_shopping: int = 0
+    total_utility: int = 0
     pending_provider_response: int = 0
     accepted_by_provider: int = 0
     rejected_by_provider: int = 0
@@ -234,6 +238,10 @@ def get_dashboard_stats(
         total_pubs=category_counts.get("pub", 0),
         total_hotels=category_counts.get("hotel", 0),
         total_sightseeing=category_counts.get("sightseeing", 0),
+        total_massage=category_counts.get("massage", 0),
+        total_wellness=category_counts.get("wellness", 0),
+        total_shopping=category_counts.get("shopping", 0),
+        total_utility=category_counts.get("utility", 0),
         total_crew=total_crew,
         **booking_metrics,
     )
@@ -955,7 +963,7 @@ def create_place(payload: VendorCreate, db: Session = Depends(get_db),current_us
     data = payload.model_dump()
 
     raw_category = str(data.get("category") or "").strip().lower()
-    if raw_category not in {"restaurant", "pub", "hotel", "sightseeing"}:
+    if raw_category not in {"restaurant", "pub", "hotel", "sightseeing", "massage", "wellness", "shopping", "utility"}:
         raise HTTPException(status_code=400, detail="Invalid category")
 
     port_id = data.get("port_id")
@@ -1024,7 +1032,7 @@ def update_place(
     patch = payload.model_dump(exclude_unset=True)
     if "category" in patch and patch["category"] is not None:
         patch["category"] = str(patch["category"]).strip().lower()
-        if patch["category"] not in {"restaurant", "pub", "hotel", "sightseeing"}:
+        if patch["category"] not in {"restaurant", "pub", "hotel", "sightseeing", "massage", "wellness", "shopping", "utility"}:
             raise HTTPException(status_code=400, detail="Invalid category")
     if "phone" in patch and patch["phone"] is None:
         patch["phone"] = ""
@@ -1304,3 +1312,106 @@ def list_agent_vessels_superadmin(
         raise HTTPException(status_code=404, detail="Agent user not found")
         
     return db.query(Vessel).filter(Vessel.agent_id == agent.id).all()
+
+
+@router.get("/reviews")
+def list_all_reviews(
+    review_type: Optional[str] = None,
+    port_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    verify_superadmin(current_user)
+
+    from app.db.models.booking_review import BookingReview
+    from app.db.models.cab_booking import CabBooking as CabBookingModel
+    from app.db.models.crew_profile import CrewProfile as CrewProfileModel
+    from app.db.models.driver import Driver as DriverModel
+
+    query = (
+        db.query(
+            BookingReview.id,
+            BookingReview.review_type,
+            BookingReview.rating,
+            BookingReview.review_text,
+            BookingReview.facility_name,
+            BookingReview.facility_stop_id,
+            BookingReview.created_at,
+            CabBookingModel.booking_id.label("booking_id"),
+            CabBookingModel.port,
+            CabBookingModel.vehicle_name,
+            CabBookingModel.estimated_price,
+            CrewProfileModel.full_name.label("crew_name"),
+            CrewProfileModel.hpid.label("crew_hpid"),
+            DriverModel.name.label("driver_name"),
+            DriverModel.phone.label("driver_phone"),
+        )
+        .outerjoin(CabBookingModel, BookingReview.booking_id == CabBookingModel.id)
+        .outerjoin(CrewProfileModel, BookingReview.crew_id == CrewProfileModel.id)
+        .outerjoin(DriverModel, BookingReview.driver_id == DriverModel.id)
+    )
+
+    if review_type:
+        query = query.filter(BookingReview.review_type == review_type)
+    if port_id:
+        port_obj = db.query(Port).filter(Port.id == port_id).first()
+        if port_obj:
+            query = query.filter(CabBookingModel.port.ilike(f"%{port_obj.name}%"))
+
+    rows = query.order_by(BookingReview.created_at.desc()).all()
+
+    return [
+        {
+            "id": row.id,
+            "review_type": row.review_type,
+            "rating": row.rating,
+            "review_text": row.review_text,
+            "facility_name": row.facility_name,
+            "facility_stop_id": row.facility_stop_id,
+            "booking_id": row.booking_id,
+            "port": row.port,
+            "vehicle_name": row.vehicle_name,
+            "estimated_price": float(row.estimated_price) if row.estimated_price else None,
+            "crew_name": row.crew_name,
+            "crew_hpid": row.crew_hpid,
+            "driver_name": row.driver_name,
+            "driver_phone": row.driver_phone,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+
+
+@router.get("/reviews/stats")
+def review_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    verify_superadmin(current_user)
+
+    from app.db.models.booking_review import BookingReview
+    from sqlalchemy import func as sqlfunc
+
+    total = db.query(sqlfunc.count(BookingReview.id)).scalar() or 0
+    avg_rating = db.query(sqlfunc.avg(BookingReview.rating)).scalar()
+    driver_avg = db.query(sqlfunc.avg(BookingReview.rating)).filter(
+        BookingReview.review_type == "driver"
+    ).scalar()
+    facility_avg = db.query(sqlfunc.avg(BookingReview.rating)).filter(
+        BookingReview.review_type == "facility_stop"
+    ).scalar()
+    driver_count = db.query(sqlfunc.count(BookingReview.id)).filter(
+        BookingReview.review_type == "driver"
+    ).scalar() or 0
+    facility_count = db.query(sqlfunc.count(BookingReview.id)).filter(
+        BookingReview.review_type == "facility_stop"
+    ).scalar() or 0
+
+    return {
+        "total_reviews": total,
+        "avg_rating": round(float(avg_rating), 2) if avg_rating else None,
+        "driver_avg_rating": round(float(driver_avg), 2) if driver_avg else None,
+        "driver_review_count": driver_count,
+        "facility_avg_rating": round(float(facility_avg), 2) if facility_avg else None,
+        "facility_review_count": facility_count,
+    }

@@ -69,6 +69,9 @@ class PubOut(BaseModel):
     best_for: Optional[str] = None
     facilities: Optional[List[str]] = None
     about: Optional[str] = None
+    open_time: Optional[str] = None
+    close_time: Optional[str] = None
+    working_days: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -105,7 +108,10 @@ def get_pubs(
             category=other.get("category", ""),
             best_for=other.get("best_for", ""),
             facilities=other.get("facilities", []),
-            about=other.get("about") or other.get("description") or ""
+            about=other.get("about") or other.get("description") or "",
+            open_time=other.get("open_time"),
+            close_time=other.get("close_time"),
+            working_days=other.get("working_days"),
         ))
     return results
 

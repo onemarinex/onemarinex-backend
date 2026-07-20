@@ -23,6 +23,73 @@ from app.db.models.pricing_controls import PricingDuration, PricingRideType, Pri
 from app.db.models.vendor_tag import VendorTag
 from app.db.session import get_db
 
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+from datetime import datetime
+
+DAY_ABBREV = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat"}
+SHORT_TO_FULL = {"m": "Mon", "mon": "Mon", "t": "Tue", "tue": "Tue", "w": "Wed", "wed": "Wed", "th": "Thu", "thu": "Thu", "f": "Fri", "fri": "Fri", "sa": "Sat", "sat": "Sat", "su": "Sun", "sun": "Sun"}
+
+
+def _normalize_days(raw) -> list[str] | None:
+    if not raw:
+        return None
+    if isinstance(raw, list):
+        return raw if raw else None
+    if isinstance(raw, str):
+        cleaned = raw.strip()
+        if not cleaned or cleaned.lower() == "all":
+            return None
+        parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+        if not parts:
+            return None
+        result = []
+        for p in parts:
+            low = p.lower()
+            result.append(SHORT_TO_FULL.get(low, p))
+        return result
+    return None
+
+
+def _parse_hhmm(time_str: str | None) -> tuple[int, int] | None:
+    if not time_str or not isinstance(time_str, str):
+        return None
+    parts = time_str.strip().split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        h, m = int(parts[0]), int(parts[1])
+        return (h, m)
+    except (ValueError, TypeError):
+        return None
+
+
+def vendor_is_currently_open(other_information: dict | None) -> bool:
+    if not other_information or not isinstance(other_information, dict):
+        return True
+    today = DAY_ABBREV.get(datetime.now().weekday(), "")
+    working_days = _normalize_days(other_information.get("working_days"))
+    if working_days and today not in working_days:
+        return False
+    opening = _parse_hhmm(other_information.get("open_time"))
+    closing = _parse_hhmm(other_information.get("close_time"))
+    if not opening and not closing:
+        return True
+    now = datetime.now()
+    now_minutes = now.hour * 60 + now.minute
+    if opening and closing:
+        open_min = opening[0] * 60 + opening[1]
+        close_min = closing[0] * 60 + closing[1]
+        return open_min <= now_minutes < close_min
+    if closing:
+        close_min = closing[0] * 60 + closing[1]
+        return now_minutes < close_min
+    if opening:
+        open_min = opening[0] * 60 + opening[1]
+        return now_minutes >= open_min
+    return True
+
 router = APIRouter()
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -40,7 +107,8 @@ MULTI_VISIT_TAGS = {"fun_zone", "explore_places"}
 # Fallback valid tags
 FALLBACK_VALID_TAGS = [
     "food", "pubs", "sightseeing", "shopping", 
-    "relax", "nightlife", "sim_card", "currency"
+    "relax", "nightlife", "sim_card", "currency",
+    "massage", "wellness", "utility"
 ]
 
 # Default time by category when not specified
@@ -81,6 +149,9 @@ class ItineraryStop(BaseModel):
     description: Optional[str] = None
     travel_minutes_from_prev: Optional[float] = None
     travel_minutes_to_port: Optional[float] = None
+    open_time: Optional[str] = None
+    close_time: Optional[str] = None
+    working_days: Optional[str] = None
 
 
 class ItineraryOption(BaseModel):
@@ -219,6 +290,9 @@ def vendor_to_stop(vendor: Vendors) -> ItineraryStop:
         description=other.get("about") or other.get("description"),
         travel_minutes_from_prev=None,
         travel_minutes_to_port=None,
+        open_time=other.get("open_time"),
+        close_time=other.get("close_time"),
+        working_days=other.get("working_days"),
     )
 
 
@@ -722,6 +796,9 @@ def suggest_itinerary(body: ItinerarySuggestIn, db: Session = Depends(get_db)):
         .filter(Vendors.status == "Active", Vendors.port_id == port.id)
         .all()
     )
+    
+    # ── 4a. Filter out currently closed facilities ──
+    vendors = [v for v in vendors if vendor_is_currently_open(v.other_information)]
     
     if not vendors:
         return ItinerarySuggestOut(

@@ -32,12 +32,16 @@ class RuleItem(BaseModel):
 
 class PortRulesIn(BaseModel):
     rules: Optional[List[RuleItem]] = None
+    opening_time: Optional[str] = None
     closing_time: Optional[str] = None
+    working_days: Optional[List[str]] = None
 
 class PortRulesOut(BaseModel):
     port_name: str
     rules: List[RuleItem]
+    opening_time: Optional[str] = None
     closing_time: Optional[str] = None
+    working_days: Optional[List[str]] = None
 
     class Config:
         from_attributes = True
@@ -71,12 +75,13 @@ def get_port_rules(port_name: str, db: Session = Depends(get_db)):
         .first()
     )
     if not rules:
-        # Return empty rules instead of 404 to simplify frontend
-        return {"port_name": port.code if port else port_name, "rules": [], "closing_time": None}
+        return {"port_name": port.code if port else port_name, "rules": [], "opening_time": None, "closing_time": None, "working_days": None}
     return {
         "port_name": rules.port_name,
         "rules": rules.rules or [],
+        "opening_time": rules.opening_time,
         "closing_time": rules.closing_time,
+        "working_days": rules.working_days,
     }
 
 @router.post("/{port_name}/rules", response_model=PortRulesOut)
@@ -112,13 +117,19 @@ def update_port_rules(
     if port_rules:
         if rule_data is not None:
             port_rules.rules = rule_data
+        if body.opening_time is not None:
+            port_rules.opening_time = body.opening_time
         if body.closing_time is not None:
             port_rules.closing_time = body.closing_time
+        if body.working_days is not None:
+            port_rules.working_days = body.working_days
     else:
         port_rules = PortRule(
             port_name=canonical_port_name,
             rules=rule_data or [],
+            opening_time=body.opening_time,
             closing_time=body.closing_time,
+            working_days=body.working_days,
         )
         db.add(port_rules)
     
@@ -132,7 +143,9 @@ def update_port_rules(
     return {
         "port_name": port_rules.port_name,
         "rules": port_rules.rules or [],
+        "opening_time": port_rules.opening_time,
         "closing_time": port_rules.closing_time,
+        "working_days": port_rules.working_days,
     }
 
 
