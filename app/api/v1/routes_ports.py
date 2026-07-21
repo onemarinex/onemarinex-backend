@@ -126,6 +126,8 @@ def update_port_rules(
     if port_rules:
         if rule_data is not None:
             port_rules.rules = rule_data
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(port_rules, "rules")
         if body.opening_time is not None:
             port_rules.opening_time = body.opening_time
         if body.closing_time is not None:
