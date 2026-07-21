@@ -82,12 +82,20 @@ def get_port_rules(port_name: str, db: Session = Depends(get_db)):
     )
     if not rules:
         return {"port_name": port.code if port else port_name, "rules": [], "opening_time": None, "closing_time": None, "working_days": None, "advance_booking_buffer_minutes": 30, "contact_email": None, "helpline_number": None}
+    working_days = rules.working_days
+    if isinstance(working_days, str):
+        try:
+            import json
+            working_days = json.loads(working_days)
+        except Exception:
+            working_days = [d.strip() for d in working_days.split(",") if d.strip()]
+
     return {
         "port_name": rules.port_name,
-        "rules": rules.rules or [],
+        "rules": rules.rules if isinstance(rules.rules, list) else (json.loads(rules.rules) if isinstance(rules.rules, str) else []),
         "opening_time": rules.opening_time,
         "closing_time": rules.closing_time,
-        "working_days": rules.working_days,
+        "working_days": working_days,
         "advance_booking_buffer_minutes": rules.advance_booking_buffer_minutes if hasattr(rules, 'advance_booking_buffer_minutes') else 30,
         "contact_email": rules.contact_email if hasattr(rules, 'contact_email') else None,
         "helpline_number": rules.helpline_number if hasattr(rules, 'helpline_number') else None,
