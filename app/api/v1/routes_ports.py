@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
+import json
 from pydantic import BaseModel, EmailStr
 
 from app.db.session import get_db
@@ -85,7 +86,6 @@ def get_port_rules(port_name: str, db: Session = Depends(get_db)):
     working_days = rules.working_days
     if isinstance(working_days, str):
         try:
-            import json
             working_days = json.loads(working_days)
         except Exception:
             working_days = [d.strip() for d in working_days.split(",") if d.strip()]
@@ -169,12 +169,19 @@ def update_port_rules(
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
+    working_days = port_rules.working_days
+    if isinstance(working_days, str):
+        try:
+            working_days = json.loads(working_days)
+        except Exception:
+            working_days = [d.strip() for d in working_days.split(",") if d.strip()]
+
     return {
         "port_name": port_rules.port_name,
-        "rules": port_rules.rules or [],
+        "rules": port_rules.rules if isinstance(port_rules.rules, list) else (json.loads(port_rules.rules) if isinstance(port_rules.rules, str) else []),
         "opening_time": port_rules.opening_time,
         "closing_time": port_rules.closing_time,
-        "working_days": port_rules.working_days,
+        "working_days": working_days,
         "advance_booking_buffer_minutes": port_rules.advance_booking_buffer_minutes,
         "contact_email": port_rules.contact_email,
         "helpline_number": port_rules.helpline_number,
