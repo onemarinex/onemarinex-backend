@@ -121,28 +121,30 @@ def update_port_rules(
         .first()
     )
 
-    rule_data = [item.model_dump() for item in body.rules] if body.rules is not None else None
+    update_data = body.model_dump(exclude_unset=True)
     
     if port_rules:
-        if rule_data is not None:
-            port_rules.rules = rule_data
+        if "rules" in update_data and update_data["rules"] is not None:
+            port_rules.rules = update_data["rules"]
             from sqlalchemy.orm.attributes import flag_modified
             flag_modified(port_rules, "rules")
-        if body.opening_time is not None:
-            port_rules.opening_time = body.opening_time
-        if body.closing_time is not None:
-            port_rules.closing_time = body.closing_time
-        port_rules.working_days = body.working_days
-        if body.advance_booking_buffer_minutes is not None:
-            port_rules.advance_booking_buffer_minutes = body.advance_booking_buffer_minutes
-        if body.contact_email is not None:
-            port_rules.contact_email = body.contact_email
-        if body.helpline_number is not None:
-            port_rules.helpline_number = body.helpline_number
+        
+        if "opening_time" in update_data:
+            port_rules.opening_time = update_data["opening_time"]
+        if "closing_time" in update_data:
+            port_rules.closing_time = update_data["closing_time"]
+        if "working_days" in update_data:
+            port_rules.working_days = update_data["working_days"]
+        if "advance_booking_buffer_minutes" in update_data:
+            port_rules.advance_booking_buffer_minutes = update_data["advance_booking_buffer_minutes"]
+        if "contact_email" in update_data:
+            port_rules.contact_email = update_data["contact_email"]
+        if "helpline_number" in update_data:
+            port_rules.helpline_number = update_data["helpline_number"]
     else:
         port_rules = PortRule(
             port_name=canonical_port_name,
-            rules=rule_data or [],
+            rules=update_data.get("rules") or [],
             opening_time=body.opening_time,
             closing_time=body.closing_time,
             working_days=body.working_days,
