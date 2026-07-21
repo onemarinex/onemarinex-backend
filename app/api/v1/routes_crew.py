@@ -145,6 +145,7 @@ class CrewProfileOut(BaseModel):
     mapping_status: Optional[str] = None
     shore_pass_eligible: Optional[bool] = None
     agency_name: Optional[str] = None
+    has_partnered_agency: bool = False
     vessel_exists: bool = False
 
     class Config:
@@ -591,18 +592,22 @@ def get_crew_profile(
     profile.mapping_status = v_crew.status if v_crew else "Unmapped"
     profile.shore_pass_eligible = v_crew.shore_pass_eligible if v_crew else False
     
+    v_target = vessel
+    if not v_target and profile.vessel:
+        v_target = db.query(Vessel).filter(Vessel.name.ilike(profile.vessel.strip())).first()
+
     agency_name = None
-    if vessel:
-        from app.db.models.agent_profile import AgentProfile
-        agent_prof = db.query(AgentProfile).filter(AgentProfile.user_id == vessel.agent_id).first()
-        if agent_prof:
-            agency_name = agent_prof.agency_name
+    if v_target:
+        agency_name = v_target.agency_name
+        if not agency_name and v_target.agent and hasattr(v_target.agent, "agent_profile") and v_target.agent.agent_profile:
+            agency_name = v_target.agent.agent_profile.agency_name
+
+    if not agency_name:
+        agency_name = "Other"
+
     profile.agency_name = agency_name
-    
-    vessel_exists = False
-    if profile.vessel:
-        vessel_exists = db.query(Vessel).filter(Vessel.name.ilike(profile.vessel.strip())).first() is not None
-    profile.vessel_exists = vessel_exists
+    profile.has_partnered_agency = bool(agency_name and agency_name.strip().lower() != "other")
+    profile.vessel_exists = v_target is not None
     
     return profile
 

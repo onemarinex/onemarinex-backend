@@ -14,6 +14,7 @@ class Vessel(Base):
     vessel_type = Column(String(100), nullable=False)
     berth_assignment = Column(String(100), nullable=True)
     flag = Column(String(100), nullable=True)
+    agency_name = Column(String(255), nullable=True)
     crew_count = Column(Integer, default=0)
     
     eta = Column(DateTime(timezone=True), nullable=True)

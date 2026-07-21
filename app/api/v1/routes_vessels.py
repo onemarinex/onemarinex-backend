@@ -72,6 +72,7 @@ class VesselIn(BaseModel):
     vessel_type: str
     berth_assignment: Optional[str] = None
     flag: Optional[str] = None
+    agency_name: Optional[str] = None
     crew_count: Optional[int] = 0
     total_crew: Optional[int] = 0
     eta: Optional[datetime] = None
@@ -254,6 +255,8 @@ class VesselOut(BaseModel):
     vessel_type: str
     berth_assignment: Optional[str] = None
     flag: Optional[str] = None
+    agency_name: Optional[str] = None
+    agent_id: Optional[int] = None
     crew_count: Optional[int] = 0
     total_crew: Optional[int] = 0
     eligible_crew_count: Optional[int] = 0
@@ -268,6 +271,8 @@ class VesselOut(BaseModel):
 class VesselPublicOut(BaseModel):
     id: int
     name: str
+    agency_name: Optional[str] = "Other"
+    has_partnered_agency: bool = False
 
     class Config:
         from_attributes = True
@@ -276,24 +281,30 @@ class VesselPublicOut(BaseModel):
 
 @router.post("/", response_model=VesselOut, status_code=status.HTTP_201_CREATED)
 def create_vessel(body: VesselIn, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if current_user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="Only superadmins can create vessels")
+    if current_user.role not in ["agent", "superadmin"]:
+        raise HTTPException(status_code=403, detail="Not authorized to create vessels")
     
     c_count = body.crew_count if body.crew_count is not None else 0
     if body.total_crew is not None:
         c_count = body.total_crew
 
+    resolved_agency = body.agency_name
+    if not resolved_agency and current_user.role == "agent":
+        if hasattr(current_user, "agent_profile") and current_user.agent_profile:
+            resolved_agency = current_user.agent_profile.agency_name
+
     vessel = Vessel(
-        agent_id=current_user.id if current_user.role == "agent" else 1,
+        agent_id=current_user.id,
         name=body.name,
         imo_number=body.imo_number,
         vessel_type=body.vessel_type,
         berth_assignment=body.berth_assignment,
         flag=body.flag,
+        agency_name=resolved_agency,
         crew_count=c_count,
         eta=body.eta,
         etd=body.etd,
-        status=body.status
+        status=body.status or "Active"
     )
     db.add(vessel)
     try:
@@ -302,6 +313,9 @@ def create_vessel(body: VesselIn, current_user: User = Depends(get_current_user)
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail="Vessel IMO possibly already exists")
+    
+    if not vessel.agency_name and vessel.agent and hasattr(vessel.agent, "agent_profile") and vessel.agent.agent_profile:
+        vessel.agency_name = vessel.agent.agent_profile.agency_name
     
     return vessel
 
@@ -319,6 +333,8 @@ def update_vessel(vessel_id: int, body: VesselIn, current_user: User = Depends(g
     vessel.vessel_type = body.vessel_type
     vessel.berth_assignment = body.berth_assignment
     vessel.flag = body.flag
+    if body.agency_name is not None:
+        vessel.agency_name = body.agency_name
     
     c_count = body.crew_count if body.crew_count is not None else 0
     if body.total_crew is not None:
@@ -337,6 +353,9 @@ def update_vessel(vessel_id: int, body: VesselIn, current_user: User = Depends(g
         db.rollback()
         raise HTTPException(status_code=400, detail="Vessel IMO possibly already exists")
         
+    if not vessel.agency_name and vessel.agent and hasattr(vessel.agent, "agent_profile") and vessel.agent.agent_profile:
+        vessel.agency_name = vessel.agent.agent_profile.agency_name
+
     return vessel
 
 @router.get("/", response_model=List[VesselOut])
@@ -344,7 +363,11 @@ def get_vessels(current_user: User = Depends(get_current_user), db: Session = De
     if current_user.role != "agent":
         raise HTTPException(status_code=403, detail="Only agents can access their vessels")
     
-    return db.query(Vessel).filter(Vessel.agent_id == current_user.id).all()
+    vessels = db.query(Vessel).filter(Vessel.agent_id == current_user.id).all()
+    for v in vessels:
+        if not v.agency_name and v.agent and hasattr(v.agent, "agent_profile") and v.agent.agent_profile:
+            v.agency_name = v.agent.agent_profile.agency_name
+    return vessels
 
 @router.get("/public", response_model=List[VesselPublicOut])
 def get_public_vessels(
@@ -352,25 +375,23 @@ def get_public_vessels(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    from app.db.models.agent_profile import AgentProfile
-    from sqlalchemy import func, or_
-
-    query = db.query(Vessel)
-    if port_code:
-        # Normalize: strip "port_" prefix and compare case-insensitively
-        # to handle formats like "port_visakhapatnam", "Visakhapatnam", etc.
-        port_name = port_code.replace("port_", "").replace("_", " ").lower()
-        query = (
-            query.join(AgentProfile, Vessel.agent_id == AgentProfile.user_id)
-            .filter(
-                or_(
-                    func.lower(AgentProfile.assigned_port) == port_code.lower(),
-                    func.lower(func.replace(AgentProfile.assigned_port, "port_", "")) == port_name,
-                    func.lower(AgentProfile.assigned_port) == port_name,
-                )
-            )
-        )
-    return query.all()
+    vessels = db.query(Vessel).all()
+    out = []
+    for v in vessels:
+        agency = v.agency_name
+        if not agency and v.agent and hasattr(v.agent, "agent_profile") and v.agent.agent_profile:
+            agency = v.agent.agent_profile.agency_name
+        if not agency:
+            agency = "Other"
+        
+        has_partnered = bool(agency and agency.strip().lower() != "other")
+        out.append(VesselPublicOut(
+            id=v.id,
+            name=v.name,
+            agency_name=agency,
+            has_partnered_agency=has_partnered
+        ))
+    return out
 
 @router.get("/{vessel_id}", response_model=VesselOut)
 def get_vessel_details(vessel_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):

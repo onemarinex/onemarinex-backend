@@ -1254,6 +1254,8 @@ class SuperAdminVesselCreate(BaseModel):
     vessel_type: str
     berth_assignment: Optional[str] = None
     flag: Optional[str] = None
+    agency_name: Optional[str] = None
+    agent_id: Optional[int] = None
     crew_count: Optional[int] = 0
     total_crew: Optional[int] = 0
     eta: Optional[datetime] = None
@@ -1261,6 +1263,123 @@ class SuperAdminVesselCreate(BaseModel):
     status: Optional[str] = "Active"
 
 from app.api.v1.routes_vessels import VesselOut
+
+@router.get("/vessels", response_model=List[VesselOut])
+def list_all_vessels_superadmin(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    verify_superadmin(current_user)
+    vessels = db.query(Vessel).all()
+    for v in vessels:
+        if not v.agency_name and v.agent and hasattr(v.agent, "agent_profile") and v.agent.agent_profile:
+            v.agency_name = v.agent.agent_profile.agency_name
+        elif not v.agency_name:
+            v.agency_name = "Other"
+    return vessels
+
+@router.post("/vessels", response_model=VesselOut, status_code=status.HTTP_201_CREATED)
+def create_vessel_superadmin(
+    body: SuperAdminVesselCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    verify_superadmin(current_user)
+    c_count = body.crew_count if body.crew_count is not None else 0
+    if body.total_crew is not None:
+        c_count = body.total_crew
+
+    assigned_agent_id = body.agent_id or current_user.id
+    if body.agency_name and body.agency_name != "Other":
+        # Find agent with matching agency_name if possible
+        from app.db.models.agent_profile import AgentProfile
+        prof = db.query(AgentProfile).filter(AgentProfile.agency_name == body.agency_name).first()
+        if prof:
+            assigned_agent_id = prof.user_id
+
+    vessel = Vessel(
+        agent_id=assigned_agent_id,
+        name=body.name,
+        imo_number=body.imo_number,
+        vessel_type=body.vessel_type,
+        berth_assignment=body.berth_assignment,
+        flag=body.flag,
+        agency_name=body.agency_name or "Other",
+        crew_count=c_count,
+        eta=body.eta,
+        etd=body.etd,
+        status="Active"
+    )
+    db.add(vessel)
+    try:
+        db.commit()
+        db.refresh(vessel)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Vessel IMO possibly already exists")
+
+    if not vessel.agency_name and vessel.agent and hasattr(vessel.agent, "agent_profile") and vessel.agent.agent_profile:
+        vessel.agency_name = vessel.agent.agent_profile.agency_name
+
+    return vessel
+
+@router.patch("/vessels/{vessel_id}", response_model=VesselOut)
+def update_vessel_superadmin(
+    vessel_id: int,
+    body: SuperAdminVesselCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    verify_superadmin(current_user)
+    vessel = db.query(Vessel).filter(Vessel.id == vessel_id).first()
+    if not vessel:
+        raise HTTPException(status_code=404, detail="Vessel not found")
+
+    vessel.name = body.name
+    vessel.imo_number = body.imo_number
+    vessel.vessel_type = body.vessel_type
+    vessel.berth_assignment = body.berth_assignment
+    vessel.flag = body.flag
+    if body.agency_name is not None:
+        vessel.agency_name = body.agency_name
+        if body.agency_name != "Other":
+            from app.db.models.agent_profile import AgentProfile
+            prof = db.query(AgentProfile).filter(AgentProfile.agency_name == body.agency_name).first()
+            if prof:
+                vessel.agent_id = prof.user_id
+
+    if body.agent_id:
+        vessel.agent_id = body.agent_id
+
+    vessel.eta = body.eta
+    vessel.etd = body.etd
+
+    try:
+        db.commit()
+        db.refresh(vessel)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Failed to update vessel")
+
+    if not vessel.agency_name and vessel.agent and hasattr(vessel.agent, "agent_profile") and vessel.agent.agent_profile:
+        vessel.agency_name = vessel.agent.agent_profile.agency_name
+
+    return vessel
+
+@router.delete("/vessels/{vessel_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_vessel_superadmin(
+    vessel_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    verify_superadmin(current_user)
+    vessel = db.query(Vessel).filter(Vessel.id == vessel_id).first()
+    if not vessel:
+        raise HTTPException(status_code=404, detail="Vessel not found")
+
+    db.delete(vessel)
+    db.commit()
+    return None
 
 @router.post("/agents/{agent_id}/vessels", response_model=VesselOut, status_code=status.HTTP_201_CREATED)
 def create_vessel_under_agent(
@@ -1285,10 +1404,11 @@ def create_vessel_under_agent(
         vessel_type=body.vessel_type,
         berth_assignment=body.berth_assignment,
         flag=body.flag,
+        agency_name=agent.agent_profile.agency_name if agent.agent_profile else "Other",
         crew_count=c_count,
         eta=body.eta,
         etd=body.etd,
-        status=body.status
+        status=body.status or "Active"
     )
     db.add(vessel)
     try:
@@ -1311,7 +1431,11 @@ def list_agent_vessels_superadmin(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent user not found")
         
-    return db.query(Vessel).filter(Vessel.agent_id == agent.id).all()
+    vessels = db.query(Vessel).filter(Vessel.agent_id == agent.id).all()
+    for v in vessels:
+        if not v.agency_name and agent.agent_profile:
+            v.agency_name = agent.agent_profile.agency_name
+    return vessels
 
 
 @router.get("/reviews")
