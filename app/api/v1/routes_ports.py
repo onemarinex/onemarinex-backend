@@ -2,6 +2,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
 import json
+
+def safe_parse_json(val, default_val):
+    if isinstance(val, list) or isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        try:
+            import json
+            return json.loads(val)
+        except Exception:
+            pass
+    return default_val
+
 from pydantic import BaseModel, EmailStr
 
 from app.db.session import get_db
@@ -86,13 +98,17 @@ def get_port_rules(port_name: str, db: Session = Depends(get_db)):
     working_days = rules.working_days
     if isinstance(working_days, str):
         try:
-            working_days = json.loads(working_days)
+            parsed = json.loads(working_days)
+            if isinstance(parsed, list):
+                working_days = parsed
+            else:
+                working_days = [d.strip() for d in working_days.split(",") if d.strip()]
         except Exception:
             working_days = [d.strip() for d in working_days.split(",") if d.strip()]
 
     return {
         "port_name": rules.port_name,
-        "rules": rules.rules if isinstance(rules.rules, list) else (json.loads(rules.rules) if isinstance(rules.rules, str) else []),
+        "rules": safe_parse_json(rules.rules, []),
         "opening_time": rules.opening_time,
         "closing_time": rules.closing_time,
         "working_days": working_days,
@@ -172,13 +188,17 @@ def update_port_rules(
     working_days = port_rules.working_days
     if isinstance(working_days, str):
         try:
-            working_days = json.loads(working_days)
+            parsed = json.loads(working_days)
+            if isinstance(parsed, list):
+                working_days = parsed
+            else:
+                working_days = [d.strip() for d in working_days.split(",") if d.strip()]
         except Exception:
             working_days = [d.strip() for d in working_days.split(",") if d.strip()]
 
     return {
         "port_name": port_rules.port_name,
-        "rules": port_rules.rules if isinstance(port_rules.rules, list) else (json.loads(port_rules.rules) if isinstance(port_rules.rules, str) else []),
+        "rules": safe_parse_json(port_rules.rules, []),
         "opening_time": port_rules.opening_time,
         "closing_time": port_rules.closing_time,
         "working_days": working_days,
