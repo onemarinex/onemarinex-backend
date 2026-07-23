@@ -467,33 +467,38 @@ def sync_crew_manifest_helper(profile: CrewProfile, db: Session):
             profile.hpid = new_hpid
             v_crew.hp_id = new_hpid
             
-            # 3. Auto-generate ShorePass if not exists
-            port_to_use = vessel_port or profile.current_port or "GEN"
-            existing_pass = db.query(ShorePass).filter(
-                ShorePass.crew_profile_id == profile.id,
-                ShorePass.port_name == port_to_use,
-                ShorePass.vessel_name == vessel.name
-            ).first()
-            
-            if not existing_pass:
-                port_code = port_to_use.replace("port_", "")[:3].upper()
-                vessel_code = vessel.name.replace(" ", "")[:3].upper()
-                random_suffix = uuid.uuid4().hex[:4].upper()
-                shore_pass_id = f"SP-{port_code}-{vessel_code}-{random_suffix}"
+            # 3. Auto-generate ShorePass if not exists (only if vessel is under a listed agency)
+            agency_name = vessel.agency_name
+            if not agency_name and vessel.agent and hasattr(vessel.agent, "agent_profile") and vessel.agent.agent_profile:
+                agency_name = vessel.agent.agent_profile.agency_name
+
+            if agency_name and agency_name.strip().lower() != "other":
+                port_to_use = vessel_port or profile.current_port or "GEN"
+                existing_pass = db.query(ShorePass).filter(
+                    ShorePass.crew_profile_id == profile.id,
+                    ShorePass.port_name == port_to_use,
+                    ShorePass.vessel_name == vessel.name
+                ).first()
                 
-                port_display = port_to_use.replace("port_", "").replace("_", " ").title()
-                agent_name = f"{port_display} Port Authority"
-                
-                new_pass = ShorePass(
-                    crew_profile_id=profile.id,
-                    agent_name=agent_name,
-                    shore_pass_id=shore_pass_id,
-                    port_name=port_to_use,
-                    vessel_name=vessel.name,
-                    is_verified=False,
-                    status="pending"
-                )
-                db.add(new_pass)
+                if not existing_pass:
+                    port_code = port_to_use.replace("port_", "")[:3].upper()
+                    vessel_code = vessel.name.replace(" ", "")[:3].upper()
+                    random_suffix = uuid.uuid4().hex[:4].upper()
+                    shore_pass_id = f"SP-{port_code}-{vessel_code}-{random_suffix}"
+                    
+                    port_display = port_to_use.replace("port_", "").replace("_", " ").title()
+                    agent_name = f"{port_display} Port Authority"
+                    
+                    new_pass = ShorePass(
+                        crew_profile_id=profile.id,
+                        agent_name=agent_name,
+                        shore_pass_id=shore_pass_id,
+                        port_name=port_to_use,
+                        vessel_name=vessel.name,
+                        is_verified=False,
+                        status="pending"
+                    )
+                    db.add(new_pass)
                 
         try:
             db.commit()
@@ -854,7 +859,7 @@ class GenerateShorePassIn(BaseModel):
     port_name: Optional[str] = None
     vessel_name: Optional[str] = None
 
-@router.post("/generate-shorepass", response_model=ShorePassOut)
+@router.post("/generate-shorepass", response_model=Optional[ShorePassOut])
 def generate_shorepass(
     body: GenerateShorePassIn = GenerateShorePassIn(),
     db: Session = Depends(get_db),
@@ -876,6 +881,16 @@ def generate_shorepass(
 
     if not port or not vessel:
         raise HTTPException(status_code=400, detail="Port and Vessel must be selected first")
+
+    # Check if vessel is under a listed agency
+    from app.db.models.vessel import Vessel
+    v_target = db.query(Vessel).filter(Vessel.name.ilike(vessel.strip())).first()
+    agency_name = v_target.agency_name if v_target else None
+    if not agency_name and v_target and v_target.agent and hasattr(v_target.agent, "agent_profile") and v_target.agent.agent_profile:
+        agency_name = v_target.agent.agent_profile.agency_name
+
+    if not agency_name or agency_name.strip().lower() == "other":
+        return None
 
     # Derive agent name from port (e.g. "port_singapore" -> "Singapore Port Authority")
     port_display = port.replace("port_", "").replace("_", " ").title()
@@ -920,9 +935,18 @@ def get_current_shorepass(
     current_user: User = Depends(get_current_user)
 ):
     profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
-    if not profile:
+    if not profile or not profile.vessel:
         return None
     
+    from app.db.models.vessel import Vessel
+    v_target = db.query(Vessel).filter(Vessel.name.ilike(profile.vessel.strip())).first()
+    agency_name = v_target.agency_name if v_target else None
+    if not agency_name and v_target and v_target.agent and hasattr(v_target.agent, "agent_profile") and v_target.agent.agent_profile:
+        agency_name = v_target.agent.agent_profile.agency_name
+
+    if not agency_name or agency_name.strip().lower() == "other":
+        return None
+
     # Get the latest shore pass for the CURRENT port
     last_pass = db.query(ShorePass).filter(
         ShorePass.crew_profile_id == profile.id,
@@ -937,7 +961,7 @@ def check_shorepass_eligibility(
 ):
     """Check if the crew member's vessel is managed by any agent.
     Returns under_agent=true only if the vessel name AND the crew's HPID
-    are both found in some agent's vessel_crew mapping.
+    are both found in some agent's vessel_crew mapping AND agency is NOT 'Other'.
     """
     from app.db.models.vessel import Vessel
     from app.db.models.vessel_crew import VesselCrew
@@ -962,6 +986,13 @@ def check_shorepass_eligibility(
     )
 
     if not matching_vessel:
+        return {"under_agent": False, "agent_name": None}
+
+    agency_name = matching_vessel.agency_name
+    if not agency_name and matching_vessel.agent and hasattr(matching_vessel.agent, "agent_profile") and matching_vessel.agent.agent_profile:
+        agency_name = matching_vessel.agent.agent_profile.agency_name
+
+    if not agency_name or agency_name.strip().lower() == "other":
         return {"under_agent": False, "agent_name": None}
 
     # Get the agent's name

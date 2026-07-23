@@ -194,29 +194,33 @@ def upload_crew_manifest(vessel_id: int, file: UploadFile = File(...), current_u
         profile = db.query(CrewProfile).filter(CrewProfile.hpid == generated_hpid).first()
         if profile:
             crew.status = "Mapped"
-            existing_pass = db.query(ShorePass).filter(
-                ShorePass.crew_profile_id == profile.id,
-                ShorePass.port_name == port,
-                ShorePass.vessel_name == vessel.name
-            ).first()
-            if not existing_pass:
-                port_code = (port or "GEN").replace("port_", "")[:3].upper()
-                vessel_code = vessel.name.replace(" ", "")[:3].upper()
-                random_suffix = uuid.uuid4().hex[:4].upper()
-                shore_pass_id = f"SP-{port_code}-{vessel_code}-{random_suffix}"
-                port_display = (port or "General").replace("port_", "").replace("_", " ").title()
-                agent_name = f"{port_display} Port Authority"
-                
-                new_pass = ShorePass(
-                    crew_profile_id=profile.id,
-                    agent_name=agent_name,
-                    shore_pass_id=shore_pass_id,
-                    port_name=port,
-                    vessel_name=vessel.name,
-                    is_verified=False,
-                    status="pending"
-                )
-                db.add(new_pass)
+            agency_name = vessel.agency_name
+            if not agency_name and vessel.agent and hasattr(vessel.agent, "agent_profile") and vessel.agent.agent_profile:
+                agency_name = vessel.agent.agent_profile.agency_name
+            if agency_name and agency_name.strip().lower() != "other":
+                existing_pass = db.query(ShorePass).filter(
+                    ShorePass.crew_profile_id == profile.id,
+                    ShorePass.port_name == port,
+                    ShorePass.vessel_name == vessel.name
+                ).first()
+                if not existing_pass:
+                    port_code = (port or "GEN").replace("port_", "")[:3].upper()
+                    vessel_code = vessel.name.replace(" ", "")[:3].upper()
+                    random_suffix = uuid.uuid4().hex[:4].upper()
+                    shore_pass_id = f"SP-{port_code}-{vessel_code}-{random_suffix}"
+                    port_display = (port or "General").replace("port_", "").replace("_", " ").title()
+                    agent_name = f"{port_display} Port Authority"
+                    
+                    new_pass = ShorePass(
+                        crew_profile_id=profile.id,
+                        agent_name=agent_name,
+                        shore_pass_id=shore_pass_id,
+                        port_name=port,
+                        vessel_name=vessel.name,
+                        is_verified=False,
+                        status="pending"
+                    )
+                    db.add(new_pass)
         added_count += 1
         
     db.commit()
@@ -435,7 +439,10 @@ def add_crew_member(vessel_id: int, body: CrewMemberIn, current_user: User = Dep
     
     # Check if a matching CrewProfile exists to automatically generate a ShorePass
     profile = db.query(CrewProfile).filter(CrewProfile.hpid == generated_hpid).first()
-    if profile:
+    agency_name = vessel.agency_name
+    if not agency_name and vessel.agent and hasattr(vessel.agent, "agent_profile") and vessel.agent.agent_profile:
+        agency_name = vessel.agent.agent_profile.agency_name
+    if profile and agency_name and agency_name.strip().lower() != "other":
         # Create ShorePass automatically
         port_code = (port or "GEN").replace("port_", "")[:3].upper()
         vessel_code = vessel.name.replace(" ", "")[:3].upper()
