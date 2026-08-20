@@ -16,6 +16,12 @@ and is not a finding. This reports the ones whose agency_name and agent_id
 disagree and, with --apply, hands each to the agency it names. A name matching no
 agency, or more than one, is reported and left alone.
 
+A vessel with no agent at all is never reassigned. Archiving is what nulls
+agent_id, so those vessels have been deliberately taken out of operations and
+still carry the agency name they left with; handing one back would half-revive it
+— holding an agent again while its status still reads Archived. They are listed
+separately, with their status, and nothing is proposed for them.
+
 It also lists the agency names that would defeat an exact-match lookup — the
 ones carrying leading or trailing whitespace, and any name registered twice —
 since those are what made the lookup miss in the first place.
@@ -78,7 +84,7 @@ def main():
         # and not a finding. Reporting those was 137 lines of noise that hid
         # the question worth asking.
         unassigned = {"", "other", "others", "none", "n/a", "other agency"}
-        stranded = []
+        stranded, agentless = [], []
         for v in db.query(Vessel).all():
             if _key(v.agency_name) in unassigned:
                 continue
@@ -86,7 +92,25 @@ def main():
             distinct = {p.user_id for p in owners}
             if len(distinct) == 1 and v.agent_id in distinct:
                 continue  # holder already matches the agency it names
+            if v.agent_id is None:
+                # Archiving nulls agent_id. Reassigning would half-revive the
+                # vessel: an agent again, with its status still Archived.
+                agentless.append(v)
+                continue
             stranded.append(v)
+
+        if agentless:
+            print()
+            print(RULE)
+            print("Vessels with no agent — archived or unlinked, left untouched")
+            print()
+            for v in agentless:
+                print(f"  vessel {v.id:<6} '{v.name}'  IMO {v.imo_number}")
+                print(f"      names '{v.agency_name}'  ·  status {v.status}")
+            print()
+            print("  Nothing is proposed for these. If one should be back in")
+            print("  operations, bring it back through the app so its status and")
+            print("  its port call move together.")
 
         print()
         print(RULE)
@@ -105,7 +129,8 @@ def main():
             owners = by_name.get(_key(v.agency_name), [])
             distinct = {p.user_id for p in owners}
             print(f"  vessel {v.id:<6} '{v.name}'  IMO {v.imo_number}")
-            print(f"      names '{v.agency_name}' but is held by user {v.agent_id}")
+            print(f"      names '{v.agency_name}' but is held by user {v.agent_id}"
+                  f"  ·  status {v.status}")
             if len(distinct) == 1:
                 target = owners[0].user_id
                 print(f"      -> agency {owners[0].id}, agent user {target}")
