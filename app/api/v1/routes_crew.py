@@ -2396,10 +2396,27 @@ def book_cab(
         (booking_call.port.code if booking_call.port else None)
         or booking_call.port_name
     )
+    if not port_value and booking_assignment is None:
+        # An unmanaged vessel's call carries no port. A call takes its port from
+        # the agency's assigned_port, and a vessel recorded as "Other" has no
+        # agency to take it from — so the call is opened with the port null and
+        # every booking against it died here, one step past the gate that had
+        # just let the crew member in.
+        #
+        # Their own answer is the only one there is: they named a port on Select
+        # Port & Vessel and it was stored on their profile. This is safe exactly
+        # where the assignment is absent — with an assignment the call still
+        # decides, so someone on two ships cannot move a booking to the other.
+        port_value = (profile.current_port or "").strip() or None
     if not port_value:
         raise HTTPException(
             status_code=409,
-            detail="The selected vessel assignment has no port context",
+            detail=(
+                "No port is recorded for this booking. Set your port on the "
+                "Select Port & Vessel screen and try again."
+                if booking_assignment is None
+                else "The selected vessel assignment has no port context"
+            ),
         )
     resolved_trip_type = body.trip_type or (
         "package_trip" if body.scheduled_time is None else "coordinated_transfer"
