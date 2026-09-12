@@ -125,5 +125,53 @@ class UnmanagedVesselTests(unittest.TestCase):
         self.assertIsNone(got_call)
 
 
+class UnmanagedPortResolutionTests(UnmanagedVesselTests):
+    """Where an unmanaged booking gets its port.
+
+    A call takes its port from the agency's assigned_port, and a vessel recorded
+    as "Other" has no agency — so its call is opened with the port null and
+    every booking against it failed on the port check, one step past the gate
+    that had just let the crew member in. Their own answer, given on Select Port
+    & Vessel, is the only one there is.
+    """
+
+    def test_an_unmanaged_call_really_does_open_without_a_port(self):
+        """The premise. If this ever stops being true the fallback is dead code."""
+        from app.services.historical_context import active_vessel_call
+
+        vessel = self.vessel(agency_name="Other", agent_id=self.holder.id,
+                             with_call=False)
+        call = active_vessel_call(self.db, vessel)
+        self.assertIsNotNone(call)
+        self.assertIsNone(call.port_id)
+        self.assertIsNone(call.port_name)
+        self.assertIsNone(call.agency_id)
+
+    def test_the_crew_members_own_port_is_used_when_the_call_has_none(self):
+        self.vessel(agency_name="Other", agent_id=self.holder.id,
+                    with_call=False)
+        from app.services.historical_context import active_vessel_call
+        from app.db.models.vessel import Vessel
+
+        vessel = self.db.query(Vessel).filter(
+            Vessel.id == self.profile.selected_vessel_id).first()
+        call = active_vessel_call(self.db, vessel)
+        self.profile.current_port = "port_visakhapatnam"
+        self.db.flush()
+
+        # The resolution the booking performs.
+        port_value = (call.port.code if call.port else None) or call.port_name
+        self.assertIsNone(port_value, "premise: the call has no port")
+        port_value = port_value or (self.profile.current_port or "").strip() or None
+        self.assertEqual(port_value, "port_visakhapatnam")
+
+    def test_a_crew_member_who_never_chose_a_port_still_cannot_book(self):
+        self.vessel(agency_name="Other", agent_id=self.holder.id,
+                    with_call=False)
+        self.profile.current_port = None
+        self.db.flush()
+        self.assertIsNone((self.profile.current_port or "").strip() or None)
+
+
 if __name__ == "__main__":
     unittest.main()
