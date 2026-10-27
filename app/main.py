@@ -5,6 +5,7 @@ from fastapi.openapi.models import OAuthFlows as OAuthFlowsModel
 from fastapi.openapi.utils import get_openapi
 import logging
 import logging.handlers
+import sys
 import os
 from sqlalchemy import inspect, text
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -29,6 +30,30 @@ if not any(
     for h in _root_logger.handlers
 ):
     _root_logger.addHandler(_file_handler)
+
+# And to stdout, which is the only one anybody can read on the deployed
+# platform. The file handler above writes inside the container: DigitalOcean
+# collects stdout, not arbitrary files, and the file is destroyed on every
+# redeploy -- so until now every application log line was invisible in
+# production and gone within a day.
+#
+# That is not just inconvenient. `ensure_company_domain_schema` catches its own
+# exception and logs it, so the one startup guard that can fail without
+# stopping the deploy was failing where nobody could see. The same went for the
+# record of each crew-manifest PDF leaving the system and of who verified a
+# vendor, both of which are deliberately log lines rather than audit tables.
+# Matched on our own formatter rather than on "any StreamHandler": anything
+# else attached to the root logger -- pytest's capture handlers, for one -- is
+# not ours and must not stop ours being added.
+if not any(
+    isinstance(h, logging.StreamHandler)
+    and not isinstance(h, logging.handlers.RotatingFileHandler)
+    and getattr(getattr(h, "formatter", None), "_fmt", None) == _log_formatter._fmt
+    for h in _root_logger.handlers
+):
+    _stream_handler = logging.StreamHandler(sys.stdout)
+    _stream_handler.setFormatter(_log_formatter)
+    _root_logger.addHandler(_stream_handler)
 if _root_logger.level == logging.NOTSET or _root_logger.level > logging.INFO:
     _root_logger.setLevel(logging.INFO)
 
