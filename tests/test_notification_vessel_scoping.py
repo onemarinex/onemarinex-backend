@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import app.db.base  # noqa: F401 — registers every model on Base
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from sqlalchemy.orm import Session
 
 from app.api.v1.routes_notifications import (
@@ -119,7 +119,7 @@ class NotificationVesselScopingTests(unittest.TestCase):
         self.send(self.agent_b, self.vessel_b.name)
         self.send(self.agent_b, self.vessel_b.name)
 
-        mine = list_notifications_admin(db=self.db, current_user=self.agent_a)
+        mine = list_notifications_admin(response=Response(), db=self.db, current_user=self.agent_a)
 
         self.assertEqual(len(mine), 1)
         self.assertEqual(mine[0].vessel, self.vessel_a.name)
@@ -187,13 +187,18 @@ class NotificationVesselScopingTests(unittest.TestCase):
         self.db.add(crew_user)
         self.db.flush()
         hpid = _uniq("HP")
+        # Passport and nationality on both sides: that pair is what links a
+        # manifest row to a profile (HPID spec §4.1), and the link is made when
+        # the call seeds its assignments, not by the profile= argument below.
+        passport = _uniq("P")
         profile = CrewProfile(
                 user_id=crew_user.id, full_name="Crew", rank="able_seaman",
                 nationality="IN", hpid=hpid, current_port=self.PORT,
-                vessel=self.vessel_a.name,
+                vessel=self.vessel_a.name, passport_number=passport,
             )
         manifest = VesselCrew(
                 vessel_id=self.vessel_a.id, name="Crew", rank="able_seaman", hp_id=hpid,
+                passport_number=passport, nationality="IN",
             )
         self.db.add_all([profile, manifest])
         self.db.flush()
@@ -232,12 +237,15 @@ class NotificationVesselScopingTests(unittest.TestCase):
             hpid=_uniq("HP"),
             current_port=self.PORT,
             vessel=self.vessel_a.name,
+            passport_number=_uniq("P"),
         )
         manifest = VesselCrew(
             vessel_id=self.vessel_a.id,
             name="Crew",
             rank="able_seaman",
             hp_id=profile.hpid,
+            passport_number=profile.passport_number,
+            nationality=profile.nationality,
         )
         self.db.add_all([profile, manifest])
         self.db.flush()
@@ -277,11 +285,13 @@ class NotificationVesselScopingTests(unittest.TestCase):
         profile = CrewProfile(
             user_id=crew_user.id, full_name="Crew", rank="able_seaman",
             nationality="IN", hpid=_uniq("HP"), current_port=self.PORT,
-            vessel=self.vessel_a.name,
+            vessel=self.vessel_a.name, passport_number=_uniq("P"),
         )
         manifest = VesselCrew(
             vessel_id=self.vessel_a.id, name="Crew", rank="able_seaman",
             hp_id=profile.hpid,
+            passport_number=profile.passport_number,
+            nationality=profile.nationality,
         )
         self.db.add_all([profile, manifest])
         self.db.flush()
@@ -342,7 +352,7 @@ class NotificationVesselScopingTests(unittest.TestCase):
         for vessel in (self.vessel_a, new_ship):
             manifest = VesselCrew(
                 vessel_id=vessel.id, name="Crew", rank="able_seaman",
-                hp_id=hpid, passport_number=passport,
+                hp_id=hpid, passport_number=passport, nationality="IN",
             )
             self.db.add(manifest)
             self.db.flush()

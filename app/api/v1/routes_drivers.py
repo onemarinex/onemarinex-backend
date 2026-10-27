@@ -1,3 +1,5 @@
+from fastapi import Response
+from app.services.result_limits import capped_response
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
@@ -114,8 +116,11 @@ async def driver_login(body: DriverLoginIn, db: Session = Depends(get_db)):
     from datetime import timedelta
     from app.core.config import settings
 
+    from app.api.v1.routes_auth import _check_credential
+
     driver = db.query(Driver).filter(Driver.email == body.email).first()
-    if not driver or not verify_password(body.password, driver.hashed_password):
+    if not _check_credential(db, driver, body.password,
+                             driver.hashed_password if driver else ""):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_access_token(
@@ -264,6 +269,8 @@ async def get_assigned_rides(
 
 @router.get("/rides")
 async def get_driver_rides(
+    response: Response,
+    limit: Optional[int] = None,
     db: Session = Depends(get_db),
     authorization: Optional[str] = Header(None)
 ):
@@ -281,11 +288,16 @@ async def get_driver_rides(
     if not driver:
         raise HTTPException(status_code=401, detail="Invalid driver token")
         
-    rides = db.query(CabBooking).options(joinedload(CabBooking.crew)).filter(
-        or_(CabBooking.driver_id == driver.id, CabBooking.assigned_driver_id == driver.id)
-    ).order_by(CabBooking.created_at.desc(), CabBooking.id.desc()).all()
-    
-    return rides
+    # Every ride this driver has ever done, newest first. Ordered already, so
+    # a ceiling loses the oldest -- the right end to lose.
+    return capped_response(
+        response,
+        db.query(CabBooking).options(joinedload(CabBooking.crew)).filter(
+            or_(CabBooking.driver_id == driver.id,
+                CabBooking.assigned_driver_id == driver.id)
+        ).order_by(CabBooking.created_at.desc(), CabBooking.id.desc()),
+        limit=limit,
+    )
 
 @router.post("/rides/{ride_id}/accept")
 async def accept_ride(
@@ -356,18 +368,36 @@ async def start_ride(
     from app.db.models.cab_booking import CabBooking
     from app.services.booking_service import serialize_booking, start_trip
 
+    from datetime import datetime, timezone
+
+    from app.services import attempt_limits
+
+    # Locked for the duration, so parallel guesses cannot each read a stale
+    # counter and slip past the threshold together.
     ride = db.query(CabBooking).filter(
         CabBooking.id == ride_id,
         or_(CabBooking.driver_id == current_driver.id, CabBooking.assigned_driver_id == current_driver.id),
-    ).first()
+    ).with_for_update().first()
     if not ride:
         raise HTTPException(status_code=404, detail="Ride not found")
+
+    # This route compared the OTP and returned 400 with no counter and no
+    # cooldown, while the magic-link route next to it had both. The code is
+    # four digits and CrewProfile.ride_otp never rotates, so unlimited guesses
+    # here yielded that crew member's OTP for every trip they ever take.
+    now = datetime.now(timezone.utc)
+    attempt_limits.assert_attempt_allowed(ride, now=now)
 
     crew_otp = ride.crew.ride_otp if ride.crew else None
     booking_otp = ride.otp
     if crew_otp != body.otp and booking_otp != body.otp:
+        locked = attempt_limits.record_failure(ride, now=now)
+        db.commit()
+        if locked:
+            raise attempt_limits.locked_out_error()
         raise HTTPException(status_code=400, detail="Invalid OTP")
 
+    attempt_limits.record_success(ride)
     updated = start_trip(db, ride, current_driver)
     return {"message": "Ride started", "booking": serialize_booking(updated)}
 

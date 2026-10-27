@@ -6,7 +6,19 @@ class ShorePass(Base):
     __tablename__ = "shore_passes"
 
     id = Column(Integer, primary_key=True, index=True)
-    crew_profile_id = Column(Integer, ForeignKey("crew_profiles.id", ondelete="CASCADE"), nullable=False)
+    # Nullable since 26 Oct 2026 — owner answer Q1, HPID spec §7 and §16,
+    # audit R10. An agent may mark a crew member eligible before that person
+    # has ever registered: "crew app registration controls use of HeyPorts
+    # services, not the agent's legal ability to process shore leave". While
+    # this was non-null no such pass could be written at all, so the schema
+    # contradicted the card the crew member was shown.
+    #
+    # The assignment is what a pass is really against -- one person on one
+    # call -- and it is filled on every pass this application writes. The
+    # profile is the link to an account, which may arrive later or never.
+    crew_profile_id = Column(
+        Integer, ForeignKey("crew_profiles.id", ondelete="CASCADE"), nullable=True
+    )
     crew_assignment_id = Column(
         Integer,
         ForeignKey("crew_assignments.id", ondelete="SET NULL"),

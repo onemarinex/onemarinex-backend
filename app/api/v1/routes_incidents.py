@@ -1,14 +1,16 @@
+from fastapi import Response
+from app.services.result_limits import capped_response
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import uuid
 from app.db.session import get_db
 from app.db.models.incident import Incident, IncidentNote, IncidentStatus, IncidentType
 from app.db.models.crew_assignment import CrewAssignment
 from app.api.v1.routes_auth import get_current_user
 from app.services.vessel_lifecycle import belongs_to_call, current_call_for
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 router = APIRouter()
 
@@ -21,6 +23,22 @@ class IncidentNoteResponse(IncidentNoteBase):
     created_at: datetime
     class Config:
         from_attributes = True
+
+# Cab aggregators have no incident surface, by product decision (owner,
+# 26 October 2026). The screens were deleted after being found unrouted since
+# June, and these endpoints carried matching branches that let an aggregator
+# create an incident only they could then read -- a self-contained loop no
+# other role could see into, fed by nothing.
+#
+# The branches are gone, so an aggregator now gets 403 rather than an empty
+# list, which is the honest answer: there is nothing here for them. A crew
+# member's incident about a cab trip belongs to the agency that manages the
+# vessel, which is where the crew branch already routes it.
+#
+# `Incident.aggregator_id` is deliberately left on the model. Removing it would
+# be a schema change that destroys the provenance of any row that still carries
+# one, and nothing reads it now.
+
 
 class IncidentBase(BaseModel):
     type: IncidentType
@@ -36,6 +54,27 @@ class IncidentBase(BaseModel):
     reporter_id: Optional[str] = None
     trip_id: Optional[str] = None
     port_name: Optional[str] = None
+    # When it happened, not when it was reported. Optional: a crew member who
+    # does not know, or does not say, leaves it null rather than being pushed
+    # into inventing one, and the dashboard treats that row as reporting-time.
+    occurred_at: Optional[datetime] = None
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _occurrence_is_not_in_the_future(cls, value):
+        """An incident cannot be reported before it happens.
+
+        A small tolerance for the reporter's clock, which is a phone at a port
+        and not synchronised to anything in particular. Without the check a
+        mistyped year lands an incident in 2036, where it sits outside every
+        company's tenure and is invisible to all of them.
+        """
+        if value is None:
+            return value
+        moment = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if moment > datetime.now(timezone.utc) + timedelta(minutes=15):
+            raise ValueError("occurred_at cannot be in the future")
+        return value
 
 class IncidentCreate(IncidentBase):
     # Recipient/aggregator is always derived from the authenticated actor.
@@ -201,19 +240,14 @@ def list_eligible_incident_trips(
 
 @router.get("/monitoring")
 async def get_incident_monitoring(
+    response: Response,
+    limit: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     base_query = db.query(Incident)
     
-    if current_user.role == "aggregator":
-        from app.db.models.aggregator_profile import AggregatorProfile
-        aggregator = db.query(AggregatorProfile).filter(AggregatorProfile.user_id == current_user.id).first()
-        if not aggregator:
-            raise HTTPException(status_code=403, detail="Not an aggregator")
-        base_query = base_query.filter(Incident.aggregator_id == aggregator.id)
-    
-    elif current_user.role == "agent":
+    if current_user.role == "agent":
         ownership = _agent_incident_filter(db, current_user.id)
         if ownership is None:
             return {
@@ -227,8 +261,26 @@ async def get_incident_monitoring(
     else:
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    active_incidents = base_query.filter(Incident.status.in_([IncidentStatus.ACTIVE, IncidentStatus.INVESTIGATING])).all()
-    resolved_incidents = base_query.filter(Incident.status == IncidentStatus.RESOLVED).all()
+    # Deliberately NOT capped: these rows are counted below as well as
+    # returned, so a ceiling here would under-report how many incidents are
+    # open -- a safety number, read as fact. They are bounded by operational
+    # reality rather than by time: an incident leaves this set when it is
+    # resolved.
+    active_incidents = (
+        base_query
+        .filter(Incident.status.in_([IncidentStatus.ACTIVE, IncidentStatus.INVESTIGATING]))
+        .order_by(Incident.created_at.desc(), Incident.id.desc())
+        .all()
+    )
+
+    # Resolved incidents only accumulate, and this list is not counted. Newest
+    # first, so a ceiling drops the oldest.
+    resolved_incidents = capped_response(
+        response,
+        base_query.filter(Incident.status == IncidentStatus.RESOLVED)
+        .order_by(Incident.created_at.desc(), Incident.id.desc()),
+        limit=limit,
+    )
     
     active_crew = sum(1 for inc in active_incidents if inc.type == IncidentType.CREW)
     active_aggregator = sum(1 for inc in active_incidents if inc.type == IncidentType.DRIVER) # Assuming DRIVER type represents aggregator incidents in this context as per original model
@@ -242,24 +294,31 @@ async def get_incident_monitoring(
 
 @router.get("/", response_model=List[IncidentResponse])
 async def get_incidents(
+    response: Response,
+    limit: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    if current_user.role == "aggregator":
-        from app.db.models.aggregator_profile import AggregatorProfile
-        aggregator = db.query(AggregatorProfile).filter(AggregatorProfile.user_id == current_user.id).first()
-        if not aggregator:
-            raise HTTPException(status_code=403, detail="Not an aggregator")
-        return db.query(Incident).filter(Incident.aggregator_id == aggregator.id).all()
-    
-    elif current_user.role == "superadmin":
-        return db.query(Incident).all()
-    
+    # Ordered newest-first as well as capped. It had no ordering at all, so a
+    # ceiling would have truncated an arbitrary slice -- and "the first 2000
+    # rows Postgres happened to return" is not an answer anyone can read.
+    if current_user.role == "superadmin":
+        return capped_response(
+            response,
+            db.query(Incident).order_by(Incident.created_at.desc(), Incident.id.desc()),
+            limit=limit,
+        )
+
     elif current_user.role == "agent":
         ownership = _agent_incident_filter(db, current_user.id)
         if ownership is None:
             return []
-        return db.query(Incident).filter(ownership).all()
+        return capped_response(
+            response,
+            db.query(Incident).filter(ownership)
+            .order_by(Incident.created_at.desc(), Incident.id.desc()),
+            limit=limit,
+        )
     
     else:
         raise HTTPException(status_code=403, detail="Not authorized to list incidents")
@@ -291,29 +350,7 @@ async def create_incident(
     # own risk. Medical and Safety start High; the agent can adjust later.
     incident_data["severity"] = tax.default_severity_for(category)
     
-    if current_user.role == "aggregator":
-        from app.db.models.aggregator_profile import AggregatorProfile
-        aggregator = db.query(AggregatorProfile).filter(AggregatorProfile.user_id == current_user.id).first()
-        if not aggregator:
-            raise HTTPException(status_code=403, detail="Not an aggregator")
-        
-        if incident_in.crew_assignment_id is not None:
-            raise HTTPException(
-                status_code=400,
-                detail="Aggregators cannot select a crew vessel assignment",
-            )
-
-        # Remove fields that we will set explicitly or cannot derive from an
-        # authenticated aggregator operation.
-        for field in ["aggregator_id", "crew_assignment_id"]:
-            incident_data.pop(field, None)
-
-        incident = Incident(
-            **incident_data,
-            aggregator_id=aggregator.id,
-            incident_id=incident_id
-        )
-    elif current_user.role == "crew":
+    if current_user.role == "crew":
         from app.db.models.crew_profile import CrewProfile
         crew = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
         if crew is None:
@@ -454,13 +491,7 @@ async def get_incident(
 ):
     query = db.query(Incident).filter(Incident.id == id)
     
-    if current_user.role == "aggregator":
-        from app.db.models.aggregator_profile import AggregatorProfile
-        aggregator = db.query(AggregatorProfile).filter(AggregatorProfile.user_id == current_user.id).first()
-        if not aggregator:
-             raise HTTPException(status_code=403, detail="Not authorized")
-        incident = query.filter(Incident.aggregator_id == aggregator.id).first()
-    elif current_user.role == "superadmin":
+    if current_user.role == "superadmin":
         incident = query.first()
     elif current_user.role == "agent":
         ownership = _agent_incident_filter(db, current_user.id)
@@ -656,6 +687,15 @@ def agent_incident_list(
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Unknown status: {status_filter}")
 
+    # Deliberately not given a result ceiling, though both streams grow with
+    # time. This response merges two of them and sorts the union in Python, so
+    # a ceiling would need a policy the ceiling cannot express: capping each
+    # stream separately yields up to twice the limit and a header that cannot
+    # say what was cut from which, and capping after the merge means the
+    # database has already been asked for everything. It needs pagination over
+    # the merged feed, which is a response-shape decision rather than a safety
+    # limit. See app/services/result_limits for the same problem in a nested
+    # list.
     rows = query.order_by(Incident.created_at.desc()).all()
     records = [dict(_serialize_incident(db, i), kind="incident") for i in rows]
     if include_sos:

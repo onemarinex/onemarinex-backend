@@ -33,6 +33,7 @@ if _root_logger.level == logging.NOTSET or _root_logger.level > logging.INFO:
     _root_logger.setLevel(logging.INFO)
 
 from app.core.config import settings
+from app.db.schema_verification import verify_critical_schema
 from app.db.session import ddl_transaction, engine
 from app.db.base import Base
 from app.services.shore_pass_reminders import run_shore_pass_reminders
@@ -44,6 +45,10 @@ from app.api.v1.routes_rfqs import router as rfq_router
 from app.api.v1 import routes_quotes 
 from app.api.v1 import routes_orders 
 from app.api.v1 import routes_vessels
+from app.api.v1 import routes_shipping_company
+from app.api.v1 import routes_company_review
+from app.api.v1 import routes_vendor_review
+from app.api.v1 import routes_privacy
 from app.api.v1 import routes_trips
 from app.api.v1 import routes_agents
 from app.api.v1 import routes_aggregators
@@ -116,6 +121,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # The frontend is a separate origin from this API, and a browser hides
+    # every response header from JavaScript except a short safelist unless the
+    # server names it here. `allow_headers` is about the *request*; this is the
+    # response side, and without it the result-ceiling headers reach the
+    # browser and are invisible to the code that has to act on them -- a list
+    # silently truncated at the ceiling would render as a complete one.
+    expose_headers=["X-Result-Count", "X-Result-Limit", "X-Result-Truncated"],
 )
 
 # WebSocket connection logging middleware
@@ -151,7 +163,20 @@ def on_startup():
     ensure_historical_context_schema()
     ensure_placeholder_helplines_removed()
     ensure_port_identity_schema()
+    ensure_assignment_public_ref()
+    ensure_assignment_source()
+    ensure_shore_pass_profile_nullable()
+    ensure_assignment_movement_columns()
+    ensure_magic_link_lifecycle()
+    ensure_ride_otp_attempt_columns()
+    ensure_auth_attempt_columns()
+    ensure_incident_occurred_at()
+    ensure_company_domain_schema()
     ensure_alembic_baseline()
+    # Last, after every guard has had its turn. Raises rather than logging, so
+    # a guard that failed aborts the deployment instead of serving a broken
+    # application that reports healthy.
+    verify_critical_schema()
     _log_whatsapp_config()
     _log_chat_moderation_config()
     scheduler.add_job(run_shore_pass_reminders, "interval", minutes=5, id="shore_pass_reminders", replace_existing=True)
@@ -911,6 +936,352 @@ def ensure_port_identity_schema():
             "ensure_port_identity_schema failed — duplicate port identities may remain"
         )
 
+def ensure_auth_attempt_columns():
+    """Add the password-attempt counters to `users` and `drivers`.
+
+    The same schema change as migration d0e1f2a3b4c5, repeated here because
+    migrations do not run on this deployment.
+
+    Every login route compared a password and returned 401 with no counter and
+    no cooldown, so any account could be guessed at indefinitely. These three
+    columns let one shared policy cover passwords as well as OTPs.
+
+    Additive. The counter defaults to 0 server-side and both timestamps are
+    nullable, so no existing row is read or rewritten.
+    """
+    log = logging.getLogger("app.startup")
+    statements = {
+        "users": {
+            "failed_auth_attempts":
+                "ALTER TABLE users ADD COLUMN failed_auth_attempts INTEGER NOT NULL DEFAULT 0",
+            "last_auth_attempt_at":
+                "ALTER TABLE users ADD COLUMN last_auth_attempt_at TIMESTAMPTZ",
+            "auth_locked_until":
+                "ALTER TABLE users ADD COLUMN auth_locked_until TIMESTAMPTZ",
+        },
+        "drivers": {
+            "failed_auth_attempts":
+                "ALTER TABLE drivers ADD COLUMN failed_auth_attempts INTEGER NOT NULL DEFAULT 0",
+            "last_auth_attempt_at":
+                "ALTER TABLE drivers ADD COLUMN last_auth_attempt_at TIMESTAMPTZ",
+            "auth_locked_until":
+                "ALTER TABLE drivers ADD COLUMN auth_locked_until TIMESTAMPTZ",
+        },
+    }
+    try:
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        pending = []
+        for table, wanted in statements.items():
+            if table not in tables:
+                continue  # fresh deploy: create_all built it with the columns
+            present = {column["name"] for column in inspector.get_columns(table)}
+            pending.extend(sql for name, sql in wanted.items() if name not in present)
+        if not pending:
+            return
+        with ddl_transaction() as connection:
+            for sql in pending:
+                connection.execute(text(sql))
+        log.info("auth attempt columns ensured (%d statement(s))", len(pending))
+    except Exception:
+        log.exception("ensure_auth_attempt_columns failed")
+
+
+def ensure_ride_otp_attempt_columns():
+    """Add the three ride-OTP counters to `cab_bookings`.
+
+    The same schema change as migration b8c9d0e1f2a3, repeated here because
+    migrations do not run on this deployment.
+
+    `CrewProfile.ride_otp` is four digits and never rotates. The magic-link
+    route already counted failed attempts on the DriverMagicLink row; the
+    authenticated driver route counted nothing, so the assigned driver could
+    walk all ten thousand values and keep the result for every future trip
+    that crew member takes. These columns let one shared policy cover both.
+
+    Additive. The counter defaults to 0 server-side and the two timestamps are
+    nullable, so no existing row is read or rewritten -- a booking written
+    before today starts from zero attempts, which is true of all of them.
+    """
+    log = logging.getLogger("app.startup")
+    try:
+        inspector = inspect(engine)
+        if "cab_bookings" not in inspector.get_table_names():
+            return  # fresh deploy: create_all built it with the columns already
+        columns = {column["name"] for column in inspector.get_columns("cab_bookings")}
+        # Written out literally rather than built from a loop: the guard
+        # coverage test reads this file for `ALTER TABLE ... ADD COLUMN`, and
+        # an interpolated column name is invisible to it. That is how these
+        # three nearly shipped without being verified at startup.
+        statements = {
+            "otp_failed_attempts":
+                "ALTER TABLE cab_bookings ADD COLUMN otp_failed_attempts INTEGER NOT NULL DEFAULT 0",
+            "otp_last_attempt_at":
+                "ALTER TABLE cab_bookings ADD COLUMN otp_last_attempt_at TIMESTAMPTZ",
+            "otp_locked_until":
+                "ALTER TABLE cab_bookings ADD COLUMN otp_locked_until TIMESTAMPTZ",
+        }
+        missing = {name: sql for name, sql in statements.items() if name not in columns}
+        if not missing:
+            return
+        with ddl_transaction() as connection:
+            for sql in missing.values():
+                connection.execute(text(sql))
+        log.info("cab_bookings ride-OTP attempt columns ensured: %s", ", ".join(missing))
+    except Exception:
+        log.exception("ensure_ride_otp_attempt_columns failed")
+
+
+def ensure_assignment_public_ref():
+    """Add `crew_assignments.public_ref` and its unique index.
+
+    The same schema change as migration u2v3w4x5y6z7, repeated here because
+    migrations do not run on this deployment. There is no PRE_DEPLOY job; the
+    build command installs requirements and the run command starts uvicorn, so
+    nothing ever calls `alembic upgrade`. `create_all()` adds missing *tables*
+    and never ALTERs an existing one, and `ensure_alembic_baseline()` stamps
+    head without applying any DDL -- so without this guard the column would not
+    exist while the ORM model declares it, and the first SELECT against
+    crew_assignments would fail.
+
+    Written to match the migration exactly, so a database that gets the column
+    from either route is identical. Nothing is backfilled: the column is
+    nullable, every surface treats a null reference as "no reference", and
+    issuing the values is `scripts/backfill_assignment_public_ref.py`, run
+    deliberately rather than as a side effect of a deploy.
+    """
+    log = logging.getLogger("app.startup")
+    try:
+        inspector = inspect(engine)
+        if "crew_assignments" not in inspector.get_table_names():
+            return  # fresh deploy: create_all built it with the column already
+        columns = {column["name"] for column in inspector.get_columns("crew_assignments")}
+        indexes = {index["name"] for index in inspector.get_indexes("crew_assignments")}
+        if "public_ref" in columns and "uq_crew_assignments_public_ref" in indexes:
+            return
+        with ddl_transaction() as connection:
+            if "public_ref" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE crew_assignments ADD COLUMN public_ref VARCHAR(40)"
+                ))
+            # NULLs are distinct in Postgres, so this is satisfied by a table
+            # where every row is still null.
+            if "uq_crew_assignments_public_ref" not in indexes:
+                connection.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_crew_assignments_public_ref "
+                    "ON crew_assignments (public_ref)"
+                ))
+        log.info("crew_assignments.public_ref ensured")
+    except Exception:
+        log.exception("ensure_assignment_public_ref failed")
+
+
+def ensure_assignment_movement_columns():
+    """Add `signed_on_at` / `signed_off_at` — HPID spec §8.
+
+    Additive and nullable, so no row is read or rewritten. They record an
+    agent confirming a movement, which the specification separates from a trip
+    being booked or completed; a null means nobody has confirmed, which is
+    exactly true of every row written before they existed.
+    """
+    log = logging.getLogger("app.startup")
+    try:
+        inspector = inspect(engine)
+        if "crew_assignments" not in inspector.get_table_names():
+            return  # fresh deploy: create_all built them already
+        existing = {c["name"] for c in inspector.get_columns("crew_assignments")}
+        missing = [
+            name for name in ("signed_on_at", "signed_off_at")
+            if name not in existing
+        ]
+        if not missing:
+            return
+        with ddl_transaction() as connection:
+            for name in missing:
+                connection.execute(text(
+                    f"ALTER TABLE crew_assignments ADD COLUMN IF NOT EXISTS "
+                    f"{name} TIMESTAMPTZ"
+                ))
+        log.info("crew_assignments movement columns ensured: %s", ", ".join(missing))
+    except Exception:
+        log.exception("ensure_assignment_movement_columns failed")
+
+
+def ensure_shore_pass_profile_nullable():
+    """Drop NOT NULL from `shore_passes.crew_profile_id` — Q1, HPID spec §7.
+
+    An agent can mark an unregistered crew member eligible, and until this
+    column was nullable no pass could be written for them: the schema refused
+    the exact case the owner's answer describes.
+
+    Purely permissive. Dropping a NOT NULL constraint reads no row, rewrites
+    no row and cannot fail on existing data; every pass that exists keeps its
+    profile. Guarded so a database that already allows nulls is left alone.
+    """
+    log = logging.getLogger("app.startup")
+    try:
+        inspector = inspect(engine)
+        if "shore_passes" not in inspector.get_table_names():
+            return  # fresh deploy: create_all built it nullable already
+        columns = {c["name"]: c for c in inspector.get_columns("shore_passes")}
+        column = columns.get("crew_profile_id")
+        if column is None or column.get("nullable"):
+            return
+        with ddl_transaction() as connection:
+            connection.execute(text(
+                "ALTER TABLE shore_passes ALTER COLUMN crew_profile_id DROP NOT NULL"
+            ))
+        log.info("shore_passes.crew_profile_id is now nullable")
+    except Exception:
+        log.exception("ensure_shore_pass_profile_nullable failed")
+
+
+def ensure_assignment_source():
+    """Add `crew_assignments.source` — HPID specification §11.
+
+    Same reasoning as the guard above: migrations do not run here and
+    `create_all` never ALTERs. The default is MANIFEST rather than anything
+    meaning "unknown", because every row that existed before this column was
+    created from an agent's manifest; calling them unknown would lose a fact
+    the schema already implies.
+
+    NOT NULL with a default, so the backfill is the default itself and no row
+    is read or rewritten.
+    """
+    log = logging.getLogger("app.startup")
+    try:
+        inspector = inspect(engine)
+        if "crew_assignments" not in inspector.get_table_names():
+            return  # fresh deploy: create_all built it with the column already
+        columns = {column["name"] for column in inspector.get_columns("crew_assignments")}
+        if "source" in columns:
+            return
+        with ddl_transaction() as connection:
+            connection.execute(text(
+                "ALTER TABLE crew_assignments ADD COLUMN source VARCHAR(32) "
+                "NOT NULL DEFAULT 'MANIFEST'"
+            ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_crew_assignments_source "
+                "ON crew_assignments (source)"
+            ))
+        log.info("crew_assignments.source ensured")
+    except Exception:
+        log.exception("ensure_assignment_source failed")
+
+
+def ensure_magic_link_lifecycle():
+    """Add `expires_at` and `revoked_at` to driver_magic_links.
+
+    The same schema change as migration v3w4x5y6z7a8. Repeated here for the
+    same reason as ensure_assignment_public_ref: nothing on this deployment
+    calls `alembic upgrade`, and create_all() never ALTERs an existing table.
+
+    Writes no row. A link created before these columns existed has a null
+    `expires_at`, which `link_expires_at()` reads as creation plus the TTL, so
+    those links expire on the same rule without being rewritten.
+    """
+    log = logging.getLogger("app.startup")
+    try:
+        inspector = inspect(engine)
+        if "driver_magic_links" not in inspector.get_table_names():
+            return  # fresh deploy: create_all built it with both columns
+        columns = {column["name"] for column in inspector.get_columns("driver_magic_links")}
+        missing = [c for c in ("expires_at", "revoked_at") if c not in columns]
+        if not missing:
+            return
+        with ddl_transaction() as connection:
+            for column in missing:
+                connection.execute(text(
+                    f"ALTER TABLE driver_magic_links ADD COLUMN {column} TIMESTAMPTZ"
+                ))
+        log.info("driver_magic_links lifecycle columns ensured: %s", ", ".join(missing))
+    except Exception:
+        log.exception("ensure_magic_link_lifecycle failed")
+
+
+def ensure_incident_occurred_at():
+    """Add `incidents.occurred_at`.
+
+    The same schema change as migration x5y6z7a8b9c0, repeated here for the
+    same reason as the other guards: nothing on this deployment calls
+    `alembic upgrade`, and create_all() never ALTERs an existing table.
+
+    Writes no row. Existing incidents keep a null occurrence on purpose --
+    there is nowhere to recover it from, and the event dictionary reports those
+    rows as carrying a reporting time rather than inventing one.
+    """
+    log = logging.getLogger("app.startup")
+    try:
+        inspector = inspect(engine)
+        if "incidents" not in inspector.get_table_names():
+            return  # fresh deploy: create_all built it with the column
+        columns = {column["name"] for column in inspector.get_columns("incidents")}
+        indexes = {index["name"] for index in inspector.get_indexes("incidents")}
+        if "occurred_at" in columns and "ix_incidents_occurred_at" in indexes:
+            return
+        with ddl_transaction() as connection:
+            if "occurred_at" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE incidents ADD COLUMN occurred_at TIMESTAMPTZ"
+                ))
+            if "ix_incidents_occurred_at" not in indexes:
+                connection.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_incidents_occurred_at "
+                    "ON incidents (occurred_at)"
+                ))
+        log.info("incidents.occurred_at ensured")
+    except Exception:
+        log.exception("ensure_incident_occurred_at failed")
+
+
+def ensure_company_domain_schema():
+    """The overlap invariant on approved vessel-role claims.
+
+    Document 2 section 6: the same role on the same vessel must not be held
+    over overlapping periods, "database-level exclusion or serializable
+    locking... ORM checks alone are insufficient", because two simultaneous
+    approvals must not both succeed.
+
+    create_all() builds the four tables but cannot express EXCLUDE, so the
+    constraint is added here. Half-open tstzrange, so a handover at the
+    boundary instant is not an overlap, and scoped to live approved rows: a
+    pending or revoked claim must not block a real one.
+
+    Writes no row. Skips quietly where btree_gist is unavailable, logging it,
+    because the constraint is an invariant to add rather than a reason to
+    refuse to boot -- but an environment without it has no overlap protection
+    and the log line is how that gets noticed.
+    """
+    log = logging.getLogger("app.startup")
+    try:
+        inspector = inspect(engine)
+        if "vessel_role_claims" not in inspector.get_table_names():
+            return
+        with ddl_transaction() as connection:
+            existing = connection.execute(text(
+                "SELECT 1 FROM pg_constraint WHERE conname = :name"
+            ), {"name": "uq_vessel_role_claims_no_overlap"}).first()
+            if existing:
+                return
+            connection.execute(text("CREATE EXTENSION IF NOT EXISTS btree_gist"))
+            connection.execute(text("""
+                ALTER TABLE vessel_role_claims
+                ADD CONSTRAINT uq_vessel_role_claims_no_overlap
+                EXCLUDE USING gist (
+                    vessel_id WITH =,
+                    role WITH =,
+                    tstzrange(effective_start, effective_end, '[)') WITH &&
+                ) WHERE (status = 'APPROVED' AND revoked_at IS NULL)
+            """))
+        log.info("vessel_role_claims overlap constraint ensured")
+    except Exception:
+        log.exception(
+            "ensure_company_domain_schema failed — approved vessel-role claims "
+            "are NOT protected against overlap on this database"
+        )
+
+
 def ensure_alembic_baseline():
     """Make Alembic usable against a database that was never stamped.
 
@@ -958,6 +1329,11 @@ app.include_router(routes_hotels.router,   prefix="/api/v1/hotels",       tags=[
 app.include_router(routes_sightseeing.router, prefix="/api/v1/sightseeing", tags=["sightseeing"])
 app.include_router(routes_restaurants.router, prefix="/api/v1/restaurants",   tags=["restaurants"])
 app.include_router(routes_vessels.router,     prefix="/api/v1/vessels",       tags=["vessels"])
+app.include_router(routes_shipping_company.router, prefix="/api/v1/shipping-company", tags=["shipping-company"])
+app.include_router(routes_company_review.router, prefix="/api/v1/superadmin", tags=["company-review"])
+app.include_router(routes_vendor_review.router, prefix="/api/v1/superadmin", tags=["vendor-review"])
+app.include_router(routes_privacy.router, prefix="/api/v1", tags=["privacy"])
+app.include_router(routes_privacy.admin_router, prefix="/api/v1/superadmin", tags=["privacy-review"])
 app.include_router(routes_trips.router,       prefix="/api/v1/trips",         tags=["trips"])
 app.include_router(routes_incidents.router, prefix="/api/v1/incidents", tags=["incidents"])
 app.include_router(routes_agents.router, prefix="/api/v1/agents", tags=["agents"])

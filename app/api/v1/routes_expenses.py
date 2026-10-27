@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
+from fastapi import Response
+from app.services.result_limits import capped_response
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -233,7 +235,9 @@ def upload_bill(
 
     ext = "." + (file.filename or "").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else ".jpg"
     key = f"expense_bills/bill_{profile.id}_{uuid.uuid4().hex}{ext}"
-    stored_ref = storage.save_fileobj(buf, key, content_type=file.content_type)
+    # A receipt carries a crew member's spending; resolve() already presigns
+    # it on read, so this only states what was previously left to the bucket.
+    stored_ref = storage.save_fileobj(buf, key, content_type=file.content_type, public=False)
 
     bill = ExpenseBill(
         crew_id=profile.id,
@@ -371,15 +375,18 @@ def linkable_trips(
 
 @router.get("", response_model=List[BillOut])
 def list_bills(
+    response: Response,
+    limit: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     profile = _crew_profile(db, current_user)
-    bills = (
+    bills = capped_response(
+        response,
         db.query(ExpenseBill)
         .filter(ExpenseBill.crew_id == profile.id)
-        .order_by(ExpenseBill.created_at.desc())
-        .all()
+        .order_by(ExpenseBill.created_at.desc()),
+        limit=limit,
     )
     return [_to_out(b) for b in bills]
 

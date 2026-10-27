@@ -106,6 +106,11 @@ and are not exposed to an agent by current-crew inference. Never "repair" them
 by assigning the crew member's present vessel. Release 1 has no destructive
 downgrade; roll the application back while leaving this additive schema intact.
 
+See [docs/MIGRATION-ROLLBACK.md](docs/MIGRATION-ROLLBACK.md) for why that is the
+only rollback available: the chain cannot build a database from empty, downgrade
+reaches only five revisions and changes no schema, and restoring from a backup
+is therefore the sole way to undo a schema change.
+
 ## Release 2: immutable report artifacts
 
 Release 2 starts only from the verified Release 1 head and adds one revision:
@@ -200,6 +205,71 @@ Unresolved records are expected and remain visible only to superadmin for
 manual reconciliation. Do not bulk-assign them from current crew identity.
 Release 3 is additive; its downgrade deliberately preserves reconciliation
 audit rows.
+
+## After Release 3: four revisions with no release section
+
+The numbered sections above stop at `o6p7q8r9s0t1`. Four revisions have landed
+since, in this order:
+
+```text
+o6p7q8r9s0t1
+  -> r9s0t1u2v3w4  assignment-scoped operations and request idempotency
+  -> s0t1u2v3w4x5  persist SOS note authorship for safe agent edits
+  -> t1u2v3w4x5y6  remember which vessel a crew member selected
+  -> u2v3w4x5y6z7  give every crew assignment an opaque public reference
+```
+
+So the current graph head is:
+
+```text
+u2v3w4x5y6z7 (head)
+```
+
+They were not grouped into a release and have no staged rollout of their own.
+Deploy them as one step from the verified Release 3 head, or from any later
+revision in the list. None of the four contains a `drop_column`, `drop_table` or
+`drop_constraint`, and each guards its own work with a schema inspection, so a
+partial run can be repeated. Only `u2v3w4x5y6z7` has been rehearsed end to end
+(see below); the other three are additive by inspection, not by measurement.
+
+The gate for the first of them covers the whole group, because its checks are
+the data invariants the rest rely on:
+
+```bash
+PYTHONPATH=. python scripts/preflight_assignment_scoped_operations.py
+```
+
+It reads the head from the Alembic graph rather than naming one, so it does not
+need editing when the next migration lands; it prints
+`assignment_scoped_applied` so you can see the schema assertions actually ran.
+Do not continue if it prints `BLOCKED`.
+
+`u2v3w4x5y6z7` is **schema only**: it adds a nullable column and its unique
+index, reads no row and writes no row. Deploying it does not rewrite the
+database. Its `downgrade()` is deliberately a no-op — dropping the column would
+destroy references that may already have been handed to drivers and cab
+providers. Roll the application back and leave the schema in place, as with
+Releases 1-3.
+
+Filling that column is a separate, deliberate step, and the application does not
+need it done: an assignment with a null reference behaves exactly as it did
+before, which is why this can wait, run in slices, or stop halfway.
+
+```bash
+# what it would do, writing nothing
+PYTHONPATH=. python scripts/backfill_assignment_public_ref.py
+
+# a bounded first slice, to watch it on real data
+PYTHONPATH=. python scripts/backfill_assignment_public_ref.py --apply --limit 500
+
+# the rest, resuming from wherever it stopped
+PYTHONPATH=. python scripts/backfill_assignment_public_ref.py --apply
+```
+
+It writes `public_ref` and only where it is NULL, so a row that already has one
+is never re-issued. Each batch commits before the next begins, so interrupting
+it leaves finished rows written and the rest NULL. Rehearsed against 1,200 rows:
+a checksum over every other column was identical before and after.
 
 ## Before the first run, check the stamp
 

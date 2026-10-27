@@ -263,6 +263,20 @@ def register_crew(body: CrewRegistrationIn, db: Session = Depends(get_db)):
         db.rollback()
         print(f"Error during registration crew manifest sync: {e}")
 
+    try:
+        # The sync above walks VesselCrew, which is a *current* roster -- every
+        # row is deleted when the vessel departs. So someone registering after
+        # signing off matches nothing, and the assignments that are theirs keep
+        # crew_profile_id NULL for ever. This attaches those, and only the ones
+        # that are unambiguously theirs.
+        from app.services.historical_linkage import link_historical_assignments
+
+        link_historical_assignments(db, crew_profile)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Error during registration historical linkage: {e}")
+
     db.refresh(user)
 
     # 3. Issue Token

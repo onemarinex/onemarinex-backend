@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.crew_identity_conflict import CrewIdentityConflictRecord
-from app.services.crew_reference import normalize_nationality
+from app.services.crew_reference import COUNTRY_ALIASES, normalize_nationality
 
 
 class CrewIdentityConflict(ValueError):
@@ -48,6 +48,114 @@ def normalized_passport_expression(column):
     # Existing production values contain ordinary spaces.  New writes are
     # canonical, so this expression is primarily a compatibility bridge.
     return func.replace(func.upper(func.trim(column)), " ", "")
+
+
+
+# --- HPID shape -------------------------------------------------------------
+#
+# The HPID is HP-{passport}-{NAT}-{PORT}, and it is **not** permanent. A crew
+# member is issued a new one each time they come to a port, so the PORT
+# fragment is meant to differ between visits. Two HPIDs that differ only in the
+# port are two visits by one person, not a duplicate to be merged.
+#
+# What is *not* meant to differ is the rendering. The nationality fragment came
+# from slicing whatever was stored -- "IN" gave IN, "INDIAN" gave IND -- so the
+# same person at the same port produced two different HPIDs depending on how
+# their nationality happened to be recorded. That is the instability worth
+# removing, and it is all this canonicalisation touches.
+
+HPID_PREFIX = "HP"
+
+# Fragment -> ISO code, built from the aliases the rest of the codebase uses.
+# Needed because the fragment is the alias's first three characters and cannot
+# be trimmed back: FILIPINO gives FIL for PH, UKRAINIAN gives UKR for UA.
+#
+# A fragment produced by more than one country is dropped rather than guessed.
+# IND is the one that matters: INDIAN and INDONESIAN both give it, so an HPID
+# carrying IND cannot be resolved to IN or ID. Those rows stay un-collapsed and
+# are reported by scripts/audit_hpid_consistency.py -- it is a flaw in the
+# identifier's design, and inventing an answer would silently merge two
+# nationalities.
+def _build_nationality_fragments():
+    candidates = {}
+    for alias, code in COUNTRY_ALIASES.items():
+        candidates.setdefault(alias[:3].upper(), set()).add(code)
+    fragments = {
+        fragment: next(iter(codes))
+        for fragment, codes in candidates.items()
+        if len(codes) == 1
+    }
+    # An ISO code is always itself, even where it collides with a name prefix.
+    for code in COUNTRY_ALIASES.values():
+        fragments[code.upper()] = code
+    return fragments
+
+
+def _ambiguous_fragments():
+    candidates = {}
+    for alias, code in COUNTRY_ALIASES.items():
+        candidates.setdefault(alias[:3].upper(), set()).add(code)
+    return frozenset(f for f, codes in candidates.items() if len(codes) > 1)
+
+
+# GRE, IND, NOR, REP, SOU, UNI — each produced by two or more countries.
+AMBIGUOUS_NATIONALITY_FRAGMENTS = _ambiguous_fragments()
+
+_NATIONALITY_FRAGMENTS = _build_nationality_fragments()
+
+
+def canonical_nationality_fragment(fragment: Optional[str]) -> str:
+    """One spelling for a nationality fragment: IND and IN both give IN."""
+    if not fragment:
+        return ""
+    text = str(fragment).strip().upper()
+    return _NATIONALITY_FRAGMENTS.get(text, text)
+
+
+def canonical_hpid(value: Optional[str]) -> Optional[str]:
+    """The comparable form of one HPID, keeping the port it was issued at.
+
+    `HP-R1522877-IND-VIS` and `HP-R1522877-IN-VIS` are one visit by one person
+    and reduce to the same value. `HP-R1522877-IN-KRI` is a different visit and
+    deliberately does not. Returns None for anything that is not an HPID -- the
+    eight crew_profiles rows carrying identifiers like `ITEM46-0-005C` come from
+    a retired product and must not be coerced into looking like one.
+    """
+    if value is None:
+        return None
+    parts = [p for p in str(value).strip().upper().split("-") if p != ""]
+    if len(parts) < 2 or parts[0] != HPID_PREFIX:
+        return None
+    if len(parts) >= 4:
+        passport = normalize_passport_number("-".join(parts[1:-2]))
+        nationality = canonical_nationality_fragment(parts[-2])
+        port = parts[-1]
+    else:
+        # Malformed: no nationality or port to canonicalise. Kept comparable
+        # rather than discarded, and reported by scripts/audit_hpid_consistency.
+        passport = normalize_passport_number("-".join(parts[1:]))
+        nationality = port = ""
+    if not passport:
+        return None
+    return "-".join(part for part in (HPID_PREFIX, passport, nationality, port) if part)
+
+
+def hpids_match(left: Optional[str], right: Optional[str]) -> bool:
+    """Whether two HPIDs are the same issuance, whatever their rendering.
+
+    Not whether they are the same person: a person has one HPID per port visit,
+    and comparing across visits is the passport's job, not this one's.
+    """
+    canonical_left = canonical_hpid(left)
+    return canonical_left is not None and canonical_left == canonical_hpid(right)
+
+
+def hpid_is_conforming(value: Optional[str]) -> bool:
+    """Whether a stored HPID has the full HP-{passport}-{NAT}-{PORT} shape."""
+    if value is None:
+        return False
+    parts = [p for p in str(value).strip().upper().split("-") if p != ""]
+    return len(parts) >= 4 and parts[0] == HPID_PREFIX
 
 
 # Values that were typed to get past the field rather than to identify anyone.

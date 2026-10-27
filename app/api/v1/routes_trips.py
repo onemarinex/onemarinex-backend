@@ -24,6 +24,10 @@ class TripCrewOut(BaseModel):
     name: str
     rank: str
     hp_id: str
+    # The opaque per-assignment reference. Preferred for display over hp_id,
+    # which in the legacy format embeds the passport number. Empty where the
+    # trip predates the reference or carries no assignment.
+    reference: str
 
 class TripDetailsOut(BaseModel):
     id: int
@@ -177,7 +181,8 @@ def get_trip_monitoring(
                cb.status, cb.created_at, cb.scheduled_time, cb.port, cb.ride_type,
                COALESCE(cp.full_name, ca.crew_name, 'Historical crew') AS full_name,
                COALESCE(cp.rank, ca.rank, 'Unknown') AS rank,
-               COALESCE(cp.hpid, ca.hpid, '') AS hpid
+               COALESCE(cp.hpid, ca.hpid, '') AS hpid,
+               COALESCE(ca.public_ref, '') AS reference
         FROM cab_bookings cb
         LEFT JOIN crew_profiles cp ON cb.crew_id = cp.id
         LEFT JOIN crew_assignments ca ON cb.crew_assignment_id = ca.id
@@ -225,7 +230,8 @@ def get_trip_monitoring(
         crew_details = TripCrewOut(
             name=row.full_name,
             rank=row.rank,
-            hp_id=row.hpid or ""
+            hp_id=row.hpid or "",
+            reference=row.reference or "",
         )
 
         trip = TripDetailsOut(

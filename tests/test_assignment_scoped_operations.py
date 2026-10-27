@@ -60,6 +60,9 @@ def _crew(db):
         rank="officer",
         nationality="IN",
         hpid=_uniq("HP"),
+        # Passport and nationality are what link a manifest row to this
+        # profile (HPID spec §4.1); the HPID is no longer a key.
+        passport_number=_uniq("P"),
     )
     db.add(profile)
     db.flush()
@@ -88,6 +91,7 @@ def _assignment(db, profile, suffix):
         rank=profile.rank,
         nationality=profile.nationality,
         hp_id=profile.hpid,
+        passport_number=profile.passport_number,
     )
     db.add(manifest)
     db.flush()
@@ -214,6 +218,7 @@ def test_eligible_assignment_read_does_not_create_transaction_local_ids(db):
         rank=profile.rank,
         nationality=profile.nationality,
         hp_id=profile.hpid,
+        passport_number=profile.passport_number,
     ))
     db.flush()
 

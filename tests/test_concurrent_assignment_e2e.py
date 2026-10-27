@@ -5,7 +5,7 @@ import uuid
 from unittest.mock import patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from sqlalchemy.orm import Session
 
 import app.db.base  # noqa: F401
@@ -253,8 +253,8 @@ def test_two_active_vessels_keep_sos_and_history_with_the_selected_trip(db):
         incident_b.agency_id,
         incident_b.crew_assignment_id,
     ) == (vessel_b.id, assignment_b.vessel_call_id, agency_b.id, assignment_b.id)
-    assert [row.id for row in _run(get_incidents(db=db, current_user=agent_a))] == [incident_a.id]
-    assert [row.id for row in _run(get_incidents(db=db, current_user=agent_b))] == [incident_b.id]
+    assert [row.id for row in _run(get_incidents(response=Response(), db=db, current_user=agent_a))] == [incident_a.id]
+    assert [row.id for row in _run(get_incidents(response=Response(), db=db, current_user=agent_b))] == [incident_b.id]
 
     snapshot_a = create_agent_safety_report_snapshot(
         "incident", incident_a.id, db=db, current_user=agent_a
@@ -284,7 +284,7 @@ def test_two_active_vessels_keep_sos_and_history_with_the_selected_trip(db):
     assert old_report.vessel_details["vessel_call_id"] == assignment_a.vessel_call_id
     assert [row["id"] for row in list_sos_requests(db=db, current_user=agent_a)] == [first.id]
     assert [row["id"] for row in list_sos_requests(db=db, current_user=agent_b)] == [second.id]
-    assert [row.id for row in _run(get_incidents(db=db, current_user=agent_a))] == [incident_a.id]
+    assert [row.id for row in _run(get_incidents(response=Response(), db=db, current_user=agent_a))] == [incident_a.id]
     assert get_agent_safety_report_snapshot(
         snapshot_a["snapshot_id"], db=db, current_user=agent_a
     )["payload"] == frozen_a

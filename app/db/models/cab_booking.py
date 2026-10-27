@@ -140,6 +140,13 @@ class CabBooking(Base):
     # with a demo number.
     helpline_number = Column(String, nullable=True)
     otp = Column(String(10), nullable=True)
+    # Brute-force counters for the ride OTP, the same three fields
+    # DriverMagicLink carries. The authenticated driver route checked the OTP
+    # with no limit at all, and CrewProfile.ride_otp is four digits that never
+    # rotate, so an unlimited guesser got that person's code permanently.
+    otp_failed_attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    otp_last_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    otp_locked_until = Column(DateTime(timezone=True), nullable=True)
     arrived_at = Column(DateTime(timezone=True), nullable=True)
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)

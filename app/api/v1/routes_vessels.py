@@ -8,6 +8,7 @@ from app.db.session import get_db
 from app.db.models.vessel import Vessel
 from app.db.models.vessel_crew import VesselCrew
 from app.db.models.crew_assignment import CrewAssignment
+from app.services.assignment_ref import resolve_crew_identifier
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.cab_booking import CabBooking
 from app.db.models.shore_pass import ShorePass
@@ -17,7 +18,9 @@ from app.services.crew_service import generate_hpid
 from app.services.crew_reference import normalize_nationality, normalize_rank
 from app.services.crew_identity import (
     CrewIdentityConflict,
+    hpids_match,
     normalize_passport_number,
+    validate_passport_number,
     normalized_passport_expression,
     normalized_person_name,
     resolve_verified_crew_profile,
@@ -54,6 +57,9 @@ class CrewMemberOut(BaseModel):
     rank: str
     nationality: Optional[str] = None
     hp_id: Optional[str] = None
+    # The opaque per-assignment reference. Absent where the crew member has no
+    # active assignment, or where one predates the reference.
+    reference: Optional[str] = None
     passport_number: Optional[str] = None
     expiry_date: Optional[datetime] = None
     status: str
@@ -280,17 +286,20 @@ def _existing_manifest_for_add(
             "requires Superadmin identity reconciliation"
         )
 
-    hpid_matches = (
-        db.query(VesselCrew)
-        .filter(
-            VesselCrew.vessel_id == vessel.id,
-            func.upper(func.trim(VesselCrew.hp_id))
-            == generated_hpid.strip().upper(),
-        )
+    # Compared on the canonical form rather than the literal string, so a
+    # rendering difference does not read as a different person. The port
+    # fragment is kept: an HPID is issued per port visit, so HP-X-IN-VIS and
+    # HP-X-IN-KRI are two visits by one person and must not collapse. Done in
+    # Python over one vessel's manifest, which is tens of rows, rather than as
+    # SQL that would have to reimplement the same rules.
+    hpid_matches = [
+        row
+        for row in db.query(VesselCrew)
+        .filter(VesselCrew.vessel_id == vessel.id, VesselCrew.hp_id.isnot(None))
         .order_by(VesselCrew.id)
-        .limit(2)
         .all()
-    )
+        if hpids_match(row.hp_id, generated_hpid)
+    ][:2]
     if len(hpid_matches) > 1:
         raise _add_crew_conflict(
             "This HPID already has duplicate entries on the vessel and "
@@ -456,10 +465,14 @@ def _ensure_crew_shore_pass(
     port: Optional[str],
     agency_name: Optional[str],
 ) -> None:
-    if profile is None or not is_partnered_agency(agency_name):
+    # A pass is against the assignment -- one person on one call. The profile
+    # is the link to an account, and owner answer Q1 is explicit that there
+    # may not be one: "an agent can upload the manifest and mark a crew member
+    # eligible without that person having an account". This used to return
+    # early on a missing profile, so exactly that person got no pass.
+    if not is_partnered_agency(agency_name):
         return
     existing = db.query(ShorePass).filter(
-        ShorePass.crew_profile_id == profile.id,
         ShorePass.crew_assignment_id == assignment.id,
     ).first()
     if existing is not None:
@@ -472,7 +485,7 @@ def _ensure_crew_shore_pass(
     vessel_code = pass_vessel.replace(" ", "")[:3].upper()
     port_display = (pass_port or "General").replace("port_", "").replace("_", " ").title()
     db.add(ShorePass(
-        crew_profile_id=profile.id,
+        crew_profile_id=profile.id if profile else None,
         crew_assignment_id=assignment.id,
         vessel_call_id=assignment.vessel_call_id,
         agent_name=f"{port_display} Port Authority",
@@ -519,16 +532,38 @@ def _save_manifest_rows(db: Session, vessel: Vessel, rows, port: Optional[str]) 
     # two-phase structure that commit could accidentally make earlier rows in
     # the failed upload permanent.
     prepared = []
+    # Rows are resolved against the database before anything is written, so two
+    # rows carrying one passport would each look unseen and both be saved. The
+    # file itself has to be checked for that.
+    seen_passports: dict[str, str] = {}
     for row in rows:
         name = (row.name or "").strip()
         if not name:
             continue
-        passport_number = normalize_passport_number(row.passport_number)
-        if not passport_number:
+        # The same check registration applies. Until this was shared, the
+        # manifest was the wider door: it accepted anything non-empty, so
+        # placeholders the sign-up form rejects arrived here instead, and then
+        # propagated into generated HPIDs and into the uniqueness rules that
+        # assume a passport identifies a person.
+        try:
+            passport_number = validate_passport_number(row.passport_number)
+        except CrewIdentityConflict as exc:
             raise HTTPException(
                 status_code=422,
-                detail=f"Crew member {name}: Passport number is required",
+                detail=f"Crew member {name}: {exc}",
+            ) from exc
+
+        first = seen_passports.get(passport_number)
+        if first is not None:
+            also = f" (listed as {first})" if first != name else ""
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Crew member {name}: this passport appears more than once "
+                    f"in the upload{also}. Correct the file and upload it again"
+                ),
             )
+        seen_passports[passport_number] = name
         rank = normalize_rank(row.rank)
         try:
             nationality = normalize_nationality(row.nationality, strict=bool(row.nationality))
@@ -743,12 +778,15 @@ async def upload_crew_manifest(
 
 @router.get("/crew/{hp_id}/profile", response_model=CrewProfileOut)
 def get_crew_profile(hp_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Accepts either identifier form; the scoping below is unchanged.
+    hp_id = resolve_crew_identifier(db, hp_id)
     query = db.query(VesselCrew)
+    is_superadmin = current_user.role == "superadmin"
     if current_user.role == "agent":
         query = query.join(Vessel, Vessel.id == VesselCrew.vessel_id).filter(
             Vessel.agent_id == current_user.id
         )
-    elif current_user.role != "superadmin":
+    elif not is_superadmin:
         raise HTTPException(status_code=403, detail="Agent access required")
     v_crew = query.filter(VesselCrew.hp_id == hp_id).first()
     if not v_crew:
@@ -759,13 +797,43 @@ def get_crew_profile(hp_id: str, current_user: User = Depends(get_current_user),
     bookings = []
     visits = []
     if c_profile:
-        bookings = db.query(CabBooking).filter(
-            CabBooking.crew_id == c_profile.id
-        ).order_by(CabBooking.created_at.desc(), CabBooking.id.desc()).all()
-        # Filter shoreline history
-        shore_passes = db.query(ShorePass).filter(
-            ShorePass.crew_profile_id == c_profile.id
-        ).order_by(ShorePass.created_at.desc(), ShorePass.id.desc()).all()
+        # Appearing on this agent's current manifest authorises the crew member,
+        # not the crew member's whole history. Without the scoping below an agent
+        # reads another agency's pickup/drop addresses and port visits.
+        booking_q = db.query(CabBooking).filter(CabBooking.crew_id == c_profile.id)
+        pass_q = db.query(ShorePass).filter(ShorePass.crew_profile_id == c_profile.id)
+        if not is_superadmin:
+            from app.db.models.agent_profile import AgentProfile
+            from app.db.models.vessel_call import VesselCall
+            agency_id = db.query(AgentProfile.id).filter(
+                AgentProfile.user_id == current_user.id
+            ).scalar()
+            # Same rule as _agent_incident_filter: match the immutable agency
+            # stamp only. A null stamp is not necessarily missing data -- per the
+            # owner decision on historical records it may legitimately mean an
+            # unmanaged ("Other") vessel -- but either way the row is not this
+            # agency's, so it stays superadmin-only until it is classified.
+            booking_q = (
+                booking_q.filter(CabBooking.agency_id == agency_id)
+                if agency_id is not None
+                else None
+            )
+            # shortcut: shore passes carry no immutable agency stamp, so they are
+            # scoped through the pass's own vessel call; passes with no call are
+            # excluded. Replace this with an agency stamp once the shore-pass
+            # schema question is settled.
+            pass_q = (
+                pass_q.join(VesselCall, VesselCall.id == ShorePass.vessel_call_id)
+                .join(Vessel, Vessel.id == VesselCall.vessel_id)
+                .filter(Vessel.agent_id == current_user.id)
+            )
+        if booking_q is not None:
+            bookings = booking_q.order_by(
+                CabBooking.created_at.desc(), CabBooking.id.desc()
+            ).all()
+        shore_passes = pass_q.order_by(
+            ShorePass.created_at.desc(), ShorePass.id.desc()
+        ).all()
         visits = [sp.port_name for sp in shore_passes if sp.port_name]
 
     return {
@@ -1222,8 +1290,30 @@ def get_crew_manifest(vessel_id: int, current_user: User = Depends(get_current_u
     vessel = query.first()
     if not vessel:
         raise HTTPException(status_code=404, detail="Vessel not found")
-    
-    return vessel.crew_manifest
+
+    # The reference lives on the assignment, not the manifest row. One query
+    # for the whole roster rather than one per crew member.
+    #
+    # Deliberately not restricted to open assignments: this screen shows the
+    # manifest of a port call that may already have ended, and the reference is
+    # that call's identifier. Filtering on ended_at left a departed vessel's
+    # roster with no references at all. Most recent assignment wins where a
+    # manifest row has served more than one call.
+    manifest = vessel.crew_manifest
+    refs = {}
+    for crew_id, ref in (
+        db.query(CrewAssignment.vessel_crew_id, CrewAssignment.public_ref)
+        .filter(CrewAssignment.vessel_crew_id.in_([c.id for c in manifest] or [0]))
+        .order_by(CrewAssignment.id.desc())
+        .all()
+    ):
+        refs.setdefault(crew_id, ref)
+    return [
+        CrewMemberOut.model_validate(crew).model_copy(
+            update={"reference": refs.get(crew.id)}
+        )
+        for crew in manifest
+    ]
 
 @router.post("/{vessel_id}/crew", response_model=CrewMemberOut, status_code=status.HTTP_201_CREATED)
 def add_crew_member(vessel_id: int, body: CrewMemberIn, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):

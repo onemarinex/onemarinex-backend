@@ -23,13 +23,18 @@ from types import SimpleNamespace
 import app.db.base  # noqa: F401 — registers every model on Base
 from sqlalchemy.orm import Session
 
+from sqlalchemy import text
+
 from app.api.v1.routes_trips import get_trip_monitoring
 from app.db.models.cab_booking import BookingStatus, CabBooking
+from app.db.models.crew_assignment import CrewAssignment
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.user import User
 from app.db.models.vessel import Vessel
+from app.db.models.vessel_call import VesselCall
 from app.db.models.vessel_crew import VesselCrew
 from app.db.session import engine
+from app.services.assignment_ref import issue_assignment_ref
 from app.services.booking_service import list_bookings_for_user
 
 
@@ -166,3 +171,88 @@ class TripMonitoringBucketTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TripMonitoringIdentifierTests(unittest.TestCase):
+    """The agent's Trips screen must not be handed the passport.
+
+    The opaque reference replaced hp_id on the driver, aggregator and crew-list
+    payloads. This endpoint was missed, and kept sending the legacy identifier,
+    which in its old format is `HP-<passport>-<nationality>-<port>`.
+    """
+
+    def setUp(self):
+        self.connection = engine.connect()
+        self.trans = self.connection.begin()
+        self.db = Session(bind=self.connection)
+
+        agent = User(email=_uniq("agent") + "@example.com", hashed_password="x", role="agent")
+        crew_user = User(email=_uniq("crew") + "@example.com", hashed_password="x", role="crew")
+        self.db.add_all([agent, crew_user])
+        self.db.flush()
+
+        self.legacy_hpid = "HP-P7654321-IND-VIZ"
+        crew = CrewProfile(
+            user_id=crew_user.id, full_name="Test Crew", rank="AB",
+            nationality="IN", hpid=self.legacy_hpid,
+        )
+        vessel = Vessel(
+            agent_id=agent.id, name=_uniq("MV"), imo_number=_uniq("IMO"),
+            vessel_type="Bulk Carrier", status="Active",
+        )
+        self.db.add_all([crew, vessel])
+        self.db.flush()
+        self.db.add(VesselCrew(
+            vessel_id=vessel.id, name="Test Crew", rank="AB", hp_id=self.legacy_hpid,
+        ))
+
+        call = VesselCall(vessel_id=vessel.id, vessel_name=vessel.name)
+        self.db.add(call)
+        self.db.flush()
+        self.reference = issue_assignment_ref(self.db)
+        assignment = CrewAssignment(
+            vessel_call_id=call.id, crew_profile_id=crew.id, crew_name="Test Crew",
+            rank="AB", hpid=self.legacy_hpid, public_ref=self.reference,
+        )
+        self.db.add(assignment)
+        self.db.flush()
+
+        self.db.add(CabBooking(
+            booking_id=_uniq("CAB"), crew_id=crew.id, vessel_id=vessel.id,
+            crew_assignment_id=assignment.id,
+            pickup_address="Gate", pickup_lat=0, pickup_lng=0,
+            drop_address="City", drop_lat=0, drop_lng=0,
+            vehicle_type="ac", vehicle_name="Sedan", estimated_price=100,
+            distance_km=5, status=BookingStatus.ON_TRIP, created_at=datetime.utcnow(),
+        ))
+        self.db.flush()
+
+        self.agent_user = SimpleNamespace(id=agent.id, role="agent", agent_profile=None)
+
+    def tearDown(self):
+        self.db.close()
+        self.trans.rollback()
+        self.connection.close()
+
+    def _crew_payload(self):
+        result = get_trip_monitoring(db=self.db, current_user=self.agent_user)
+        self.assertEqual(len(result.ongoing), 1, "the seeded trip should be on-going")
+        return result.ongoing[0].crew_details
+
+    def test_the_opaque_reference_is_carried(self):
+        self.assertEqual(self._crew_payload().reference, self.reference)
+
+    def test_the_passport_is_not_what_the_screen_prefers(self):
+        """The screen renders `reference || hp_id`, so a present reference wins."""
+        crew = self._crew_payload()
+        self.assertTrue(crew.reference)
+        self.assertNotIn("P7654321", crew.reference)
+
+    def test_a_trip_with_no_assignment_still_answers(self):
+        """Pre-assignment rows exist; an empty reference must not break the tab."""
+        self.db.execute(
+            text("UPDATE cab_bookings SET crew_assignment_id = NULL WHERE crew_id = :c"),
+            {"c": self.db.query(CrewProfile).filter(
+                CrewProfile.hpid == self.legacy_hpid).one().id},
+        )
+        self.assertEqual(self._crew_payload().reference, "")

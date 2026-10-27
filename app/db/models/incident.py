@@ -69,6 +69,17 @@ class Incident(Base):
     sub_category = Column(String(64), nullable=True)
     severity = Column(String(16), nullable=True)  # high | medium | low
 
+    # When the incident actually happened, as reported by whoever raised it.
+    # Distinct from created_at, which is when we were told. The two differ by
+    # however long it took someone to open the app, and at a management
+    # handover that gap decides which company the incident belongs to.
+    #
+    # Nullable, and null on every row written before this column existed. Those
+    # rows are not backfilled -- there is nowhere to recover the occurrence
+    # from -- so they keep reporting-time quality and the event dictionary says
+    # so per row rather than per family.
+    occurred_at = Column(UTCDateTime, nullable=True, index=True)
+
     resolved_at = Column(UTCDateTime, nullable=True)
     cancelled_at = Column(UTCDateTime, nullable=True)
 

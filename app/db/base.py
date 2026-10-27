@@ -63,3 +63,5 @@ from app.db.models.shore_pass_reminder import ShorePassReminder # noqa: F401
 from app.db.models.chat_restricted_word import ChatRestrictedWord # noqa: F401
 from app.db.models.chat_moderation_event import ChatModerationEvent # noqa: F401
 from app.db.models.chat_moderation_setting import ChatModerationSetting # noqa: F401
+from app.db.models import shipping_company  # noqa: F401
+from app.db.models.data_deletion import DataDeletionRequest  # noqa: F401

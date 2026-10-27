@@ -18,8 +18,25 @@ from sqlalchemy import inspect, text
 from app.db.session import engine
 
 
-PREVIOUS_HEADS = {"r9s0t1u2v3w4"}
-EXPECTED_HEAD = "s0t1u2v3w4x5"
+# The revision that introduced the assignment-scoped tables, columns and
+# constraints this gate verifies. A historical fact, so it is pinned — but it is
+# NOT the expected head. The graph head moves with every later migration, and
+# pinning it here is what made this script reject an up-to-date database.
+ASSIGNMENT_SCOPED_REVISION = "s0t1u2v3w4x5"
+
+# Databases this gate accepts as a starting point, besides the graph head
+# itself: the revision above and the one immediately before it.
+SUPPORTED_ORIGINS = {"r9s0t1u2v3w4", ASSIGNMENT_SCOPED_REVISION}
+
+
+def _applied_revisions(script, current):
+    """Every revision the database has applied, by walking down from its head.
+
+    Empty for an unstamped database, which the head check reports separately.
+    """
+    if not current:
+        return set()
+    return {rev.revision for rev in script.iterate_revisions(current, "base")}
 
 # These records predate Release A and require evidence-backed Release C work.
 # They are not referenced by the schema constraints added in this migration.
@@ -258,14 +275,34 @@ def main(argv=None):
         root = Path(__file__).resolve().parents[1]
         config = Config(str(root / "alembic.ini"))
         config.set_main_option("script_location", str(root / "alembic"))
-        graph_heads = ScriptDirectory.from_config(config).get_heads()
+        script = ScriptDirectory.from_config(config)
+        graph_heads = script.get_heads()
         current = list(MigrationContext.configure(connection).get_current_heads())
+        applied = _applied_revisions(script, current)
+        # The assignment-scoped structures exist once their revision is in the
+        # database's history, not only when it is the database's head. Checking
+        # the head alone silently skipped every column check below as soon as a
+        # later migration landed.
+        assignment_scoped_applied = ASSIGNMENT_SCOPED_REVISION in applied
         print("migration_graph_heads:", graph_heads)
         print("database_current:", current)
-        if graph_heads != [EXPECTED_HEAD]:
-            failures.append("migration graph must have one assignment-scoped head")
-        if current not in [*[ [head] for head in sorted(PREVIOUS_HEADS) ], [EXPECTED_HEAD]]:
-            failures.append("database must be at the previous or assignment-scoped head")
+        print("assignment_scoped_applied:", assignment_scoped_applied)
+        if len(graph_heads) != 1:
+            failures.append(
+                f"migration graph must have exactly one head; found {graph_heads}"
+            )
+        elif ASSIGNMENT_SCOPED_REVISION not in {
+            rev.revision for rev in script.iterate_revisions(graph_heads[0], "base")
+        }:
+            failures.append(
+                f"graph head {graph_heads[0]} does not descend from "
+                f"{ASSIGNMENT_SCOPED_REVISION}; this gate does not apply to it"
+            )
+        if current != graph_heads and not (set(current) & SUPPORTED_ORIGINS):
+            failures.append(
+                f"database must be at the graph head or a supported origin "
+                f"{sorted(SUPPORTED_ORIGINS)}; found {current}"
+            )
 
         for name, query in CHECKS.items():
             value = connection.execute(text(query)).scalar_one()
@@ -330,7 +367,7 @@ def main(argv=None):
                 missing_identity_audit_columns,
             )
             if missing_identity_columns or missing_identity_audit_columns:
-                if current == [EXPECTED_HEAD]:
+                if assignment_scoped_applied:
                     failures.append(
                         "identity conflict queue columns are missing"
                     )
@@ -340,7 +377,7 @@ def main(argv=None):
                     print(f"{name}: {value}")
                     if value:
                         failures.append(name)
-        elif current == [EXPECTED_HEAD]:
+        elif assignment_scoped_applied:
             failures.append("identity conflict queue tables are missing")
         columns = {
             row["name"] for row in inspector.get_columns("cab_bookings")
@@ -400,7 +437,7 @@ def main(argv=None):
             if "crew_identity_conflict_audits" in tables
             else set()
         )
-        if current == [EXPECTED_HEAD]:
+        if assignment_scoped_applied:
             required = {"client_idempotency_key", "request_fingerprint"}
             if not required.issubset(columns):
                 failures.append("cab booking idempotency columns are missing")

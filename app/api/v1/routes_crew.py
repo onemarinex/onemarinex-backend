@@ -40,6 +40,7 @@ from app.db.models.pricing_controls import (
 from app.api.v1.routes_auth import get_current_user
 from app.services.crew_service import generate_hpid, ensure_stable_hpid
 from app.services.crew_reference import normalize_nationality, normalize_rank
+from app.services.assignment_source import is_agent_attested
 from app.services.booking_service import (
     get_eligible_providers_for_ride,
     vehicle_category_matches,
@@ -191,6 +192,40 @@ def is_partnered_agency(agency_name: Optional[str]) -> bool:
     return clean not in ["other", "others", "none", "n/a", "", "other agency"]
 
 
+def booking_port_for(profile, call, assignment):
+    """Which port a booking belongs to, or None if there is no answer.
+
+    A port call takes its port from the agency's assigned_port, and a vessel
+    recorded as "Other" has no agency to take it from — so an unmanaged call
+    is opened with the port null, and every booking against it died one step
+    past the gate that had just let the crew member in. The crew member's own
+    answer, given on Select Port & Vessel, is the only one there is.
+
+    The condition is whether an *agent attests* the assignment, not whether
+    there is one. Those were the same question while unmanaged bookings had no
+    assignment at all; they stopped being the same when §9 gave them one, and
+    asking the old way refuses every unmanaged booking for want of a port.
+    Where an agent does attest it, the call still decides, so someone on two
+    ships cannot move a booking to the other.
+
+    Extracted from the booking route so the branch can be tested. It was a
+    condition buried mid-function, and the test that covered it re-implemented
+    the logic rather than calling it, so changing the route's behaviour left
+    the test green.
+    """
+    from app.services.assignment_source import is_agent_attested
+
+    port_value = (call.port.code if call and call.port else None) or (
+        call.port_name if call else None
+    )
+    if port_value:
+        return port_value
+    attested = assignment is not None and is_agent_attested(assignment.source)
+    if attested:
+        return None
+    return (getattr(profile, "current_port", None) or "").strip() or None
+
+
 def _unmanaged_vessel_call(db: Session, profile):
     """The vessel and call for crew on a ship no agency runs.
 
@@ -336,7 +371,10 @@ class CrewProfileOut(BaseModel):
     # Which shore leave card to show, decided here rather than reassembled from
     # several fields by every screen that needs it.
     #
-    #   APPROVED      an assignment exists and the agent marked them eligible
+    #   ELIGIBLE      an assignment exists and the agent marked them eligible.
+    #                 The agent is attesting that local immigration is likely
+    #                 to permit shore leave; it is not a claim that a pass has
+    #                 been issued, so the crew card must not say APPROVED.
     #   NOT_ELIGIBLE  an assignment exists and the agent marked them not
     #   PENDING       no assignment yet, on a vessel an agency manages — the
     #                 agent has not uploaded the manifest. Waiting, not allowed
@@ -978,7 +1016,7 @@ def get_crew_profile(
         "vessel_exists": vessel is not None,
         # An assignment exists, so the agent has decided one way or the other.
         "shore_leave_status": (
-            "APPROVED" if assignment.shore_pass_eligible else "NOT_ELIGIBLE"
+            "ELIGIBLE" if assignment.shore_pass_eligible else "NOT_ELIGIBLE"
         ),
         "cab_booking_locked": not assignment.shore_pass_eligible,
     })
@@ -2378,6 +2416,15 @@ def book_cab(
                 status_code=409,
                 detail="No active vessel assignment is available for this booking",
             )
+        # HPID specification §9: the call gets one SELF_SELECTED_UNMANAGED
+        # assignment, reused by every later booking on it, so an unmanaged
+        # trip carries a call-specific reference like any other. Created here
+        # rather than when the vessel is selected, because a read should not
+        # write a row.
+        from app.services.historical_context import self_selected_assignment
+
+        booking_assignment = self_selected_assignment(db, profile, booking_call)
+
 
     from app.db.models.cab_booking import VehicleType, BookingStatus, RideType
     from app.db.models.booking_timeline import TimelineEventType
@@ -2391,30 +2438,19 @@ def book_cab(
 
     # The selected vessel call owns the operation. Device storage and mutable
     # CrewProfile fields cannot choose another port when the person has two
-    # concurrent assignments.
-    port_value = (
-        (booking_call.port.code if booking_call.port else None)
-        or booking_call.port_name
+    # concurrent assignments — except on an unmanaged call, which has no port
+    # for the call to own. See booking_port_for.
+    booking_is_self_selected = booking_assignment is None or not is_agent_attested(
+        booking_assignment.source
     )
-    if not port_value and booking_assignment is None:
-        # An unmanaged vessel's call carries no port. A call takes its port from
-        # the agency's assigned_port, and a vessel recorded as "Other" has no
-        # agency to take it from — so the call is opened with the port null and
-        # every booking against it died here, one step past the gate that had
-        # just let the crew member in.
-        #
-        # Their own answer is the only one there is: they named a port on Select
-        # Port & Vessel and it was stored on their profile. This is safe exactly
-        # where the assignment is absent — with an assignment the call still
-        # decides, so someone on two ships cannot move a booking to the other.
-        port_value = (profile.current_port or "").strip() or None
+    port_value = booking_port_for(profile, booking_call, booking_assignment)
     if not port_value:
         raise HTTPException(
             status_code=409,
             detail=(
                 "No port is recorded for this booking. Set your port on the "
                 "Select Port & Vessel screen and try again."
-                if booking_assignment is None
+                if booking_is_self_selected
                 else "The selected vessel assignment has no port context"
             ),
         )
@@ -3242,6 +3278,63 @@ class BookingReviewOut(BaseModel):
         from_attributes = True
 
 
+def _crew_booking_or_404(db: Session, profile, booking_id: str):
+    """The booking this crew member may act on, or a 404 that admits nothing.
+
+    Owner or actively-invited, which is the rule `get_booking_details` already
+    applies, and the same 404 rather than a 403: a booking they have no part in
+    should not be confirmed to exist. Shared because both the review routes got
+    it wrong in the same way, and one of them was a write.
+    """
+    booking = db.query(CabBooking).filter(CabBooking.booking_id == booking_id).first()
+    if booking is None:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if booking.crew_id == profile.id:
+        return booking
+    invited = db.query(BookingInvitation).filter(
+        BookingInvitation.booking_id == booking.id,
+        BookingInvitation.invited_crew_id == profile.id,
+        BookingInvitation.status == "active",
+    ).first()
+    if invited is None:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return booking
+
+
+def _may_read_booking_reviews(db: Session, booking, current_user) -> bool:
+    """Whether this caller has any part in the booking whose reviews they ask for.
+
+    The role allowlist that used to stand here checked that the caller was *a*
+    crew member, agent or aggregator — not that they were this booking's. With
+    a booking id in hand, any of them could read its reviews, and a review
+    carries the reviewer's full name.
+    """
+    role = (current_user.role or "").lower()
+    if role == "superadmin":
+        return True
+    if role == "crew":
+        profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
+        if profile is None:
+            return False
+        if booking.crew_id == profile.id:
+            return True
+        return db.query(BookingInvitation).filter(
+            BookingInvitation.booking_id == booking.id,
+            BookingInvitation.invited_crew_id == profile.id,
+            BookingInvitation.status == "active",
+        ).first() is not None
+    if role == "agent":
+        from app.api.v1.routes_bookings import _agent_may_view_booking
+        return _agent_may_view_booking(db, current_user.id, booking)
+    if role == "aggregator":
+        from app.db.models.aggregator_profile import AggregatorProfile
+        aggregator_id = db.query(AggregatorProfile.id).filter(
+            AggregatorProfile.user_id == current_user.id
+        ).scalar()
+        return aggregator_id is not None and booking.aggregator_id == aggregator_id
+    return False
+
+
 @router.post("/cab/bookings/{booking_id}/reviews", response_model=BookingReviewOut)
 def submit_booking_review(
     booking_id: str,
@@ -3256,9 +3349,10 @@ def submit_booking_review(
     if not profile:
         raise HTTPException(status_code=404, detail="Crew profile not found")
 
-    booking = db.query(CabBooking).filter(CabBooking.booking_id == booking_id).first()
-    if not booking:
-        raise HTTPException(status_code=404, detail="Booking not found")
+    # Previously any crew member who knew a completed booking's id could review
+    # it — and a driver review recomputes that driver's public rating below, so
+    # the gap moved a number strangers can see.
+    booking = _crew_booking_or_404(db, profile, booking_id)
 
     raw_status = str(booking.status.value if hasattr(booking.status, 'value') else booking.status).lower()
     if raw_status != "completed":
@@ -3345,11 +3439,12 @@ def get_booking_reviews(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in ("crew", "superadmin", "agent", "aggregator"):
-        raise HTTPException(status_code=403, detail="Unauthorized")
-
     booking = db.query(CabBooking).filter(CabBooking.booking_id == booking_id).first()
     if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if not _may_read_booking_reviews(db, booking, current_user):
+        # 404, not 403: whether this booking exists is itself none of their
+        # business, and the pair would otherwise be an existence oracle.
         raise HTTPException(status_code=404, detail="Booking not found")
 
     from app.db.models.booking_review import BookingReview

@@ -70,8 +70,12 @@ class SafetyCenterTests(unittest.TestCase):
         self.db.flush()
 
         hpid = _uniq("HP")
+        # Passport and nationality are the matching pair (HPID spec §4.1); the
+        # HPID is no longer a key.
+        passport = _uniq("P")
         crew = CrewProfile(user_id=crew_user.id, full_name="Test Crew", rank="third_officer",
-                           nationality="IN", hpid=hpid, current_port="port_test")
+                           nationality="IN", hpid=hpid, current_port="port_test",
+                           passport_number=passport)
         vessel = Vessel(agent_id=agent_user.id, name=_uniq("MV"), imo_number=_uniq("IMO"),
                         vessel_type="Bulk Carrier", status="Active")
         self.db.add_all([crew, vessel])
@@ -81,6 +85,8 @@ class SafetyCenterTests(unittest.TestCase):
             name="Test Crew",
             rank="third_officer",
             hp_id=hpid,
+            passport_number=passport,
+            nationality="IN",
         )
         self.db.add(manifest)
         self.db.flush()

@@ -27,6 +27,15 @@ class Driver(Base):
     is_temp_password = Column(Integer, server_default="1") # 1 if needs change
     is_reset_requested = Column(Integer, server_default="0") # 1 if driver requested reset
 
+    # Password-guessing counters. Until these existed, every login route
+    # compared a password and returned 401 with no counter and no cooldown,
+    # so any account could be guessed at indefinitely. Same three fields as
+    # DriverMagicLink and CabBooking carry for OTPs; one shared policy in
+    # app/services/attempt_limits reads all of them.
+    failed_auth_attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    last_auth_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    auth_locked_until = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

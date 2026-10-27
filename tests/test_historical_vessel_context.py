@@ -270,6 +270,10 @@ def test_ambiguous_current_assignments_require_a_selected_call(db):
         rank="officer",
         nationality="IN",
         hpid=_uniq("HP"),
+        # The manifest fixture copies this pair across; without a passport
+        # neither assignment links to the profile and there is no ambiguity
+        # left to test (HPID spec §4.1).
+        passport_number=_uniq("P"),
     )
     db.add(crew)
     db.flush()

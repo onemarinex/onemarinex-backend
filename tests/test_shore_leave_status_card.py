@@ -123,7 +123,7 @@ class ShoreLeaveStatusTests(unittest.TestCase):
 
         result = self.card()
 
-        self.assertEqual(result.shore_leave_status, "APPROVED")
+        self.assertEqual(result.shore_leave_status, "ELIGIBLE")
         self.assertFalse(result.cab_booking_locked)
 
     def test_assigned_but_not_eligible_locks_the_cab(self):
@@ -176,7 +176,7 @@ class ShoreLeaveStatusTests(unittest.TestCase):
 
         self.assign(vessel, eligible=True)
 
-        self.assertEqual(self.card().shore_leave_status, "APPROVED")
+        self.assertEqual(self.card().shore_leave_status, "ELIGIBLE")
 
     def test_pending_becomes_not_eligible_when_that_is_the_decision(self):
         vessel = self.vessel(agency_name=self.agency.agency_name)
@@ -198,7 +198,7 @@ class ShoreLeaveStatusTests(unittest.TestCase):
 
         result = self.card()
 
-        self.assertEqual(result.shore_leave_status, "APPROVED")
+        self.assertEqual(result.shore_leave_status, "ELIGIBLE")
         self.assertEqual(result.vessel, assigned.name)
 
 

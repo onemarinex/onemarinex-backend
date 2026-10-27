@@ -10,6 +10,7 @@ from app.db.models.aggregator_profile import AggregatorProfile
 from app.db.models.cab_booking import CabBooking, BookingStatus, RideType
 from app.db.models.driver_magic_link import DriverMagicLink
 from app.db.models.driver import Driver
+from app.db.models.crew_assignment import CrewAssignment
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.vessel_call import VesselCall
 from app.db.models.pricing_controls import PricingDuration, PricingRideType, PricingRule, PricingVehicleCategory
@@ -32,7 +33,10 @@ PRICING_PROVIDER_TYPE_BY_PROFILE_TYPE = {
 
 class CrewShortOut(BaseModel):
     name: str
-    hp_id: str
+    # The opaque per-assignment reference, not the legacy HPID: that embeds the
+    # passport number, and a cab provider has no business holding one. Empty
+    # where an older assignment has not been given a reference.
+    reference: str
     vessel: str
 
 class BookingDashboardOut(BaseModel):
@@ -287,11 +291,14 @@ def get_aggregator_dashboard(
             CabBooking.port,
             DriverMagicLink.token.label("magic_token"),
             CrewProfile.full_name.label("crew_name"),
-            CrewProfile.hpid.label("crew_hpid"),
+            CrewAssignment.public_ref.label("crew_reference"),
             VesselCall.vessel_name.label("crew_vessel"),
         )
         .outerjoin(DriverMagicLink, DriverMagicLink.booking_id == CabBooking.id)
         .outerjoin(CrewProfile, CabBooking.crew_id == CrewProfile.id)
+        .outerjoin(
+            CrewAssignment, CabBooking.crew_assignment_id == CrewAssignment.id
+        )
         .outerjoin(VesselCall, CabBooking.vessel_call_id == VesselCall.id)
         .filter(
             or_(
@@ -336,7 +343,7 @@ def get_aggregator_dashboard(
             booking_id=row.booking_id,
             crew=CrewShortOut(
                 name=row.crew_name or "Unknown",
-                hp_id=row.crew_hpid or "",
+                reference=row.crew_reference or "",
                 vessel=row.crew_vessel or "",
             ),
             pickup_address=row.pickup_address,
