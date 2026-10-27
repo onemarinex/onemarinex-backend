@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Form, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Response, status, Form, File, UploadFile
 from fastapi.encoders import jsonable_encoder
 import os
 import shutil
@@ -6,6 +6,8 @@ import uuid
 from sqlalchemy.orm import Session
 from sqlalchemy import String, cast, func, literal, or_, select, union_all
 from typing import Any, Dict, List, Literal, Optional
+
+from app.services.result_limits import capped_response
 from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 import logging
@@ -445,6 +447,15 @@ def resolve_identity_conflict(
     row.resolved_by_user_id = current_user.id
     row.resolved_at = datetime.utcnow()
     db.flush()
+
+    # Recording the decision is not the same as acting on it. Most operations
+    # consult resolved_identity_decision() the next time they run; a
+    # historical assignment has no next time, so its decision is applied here
+    # or never.
+    from app.services.historical_linkage import apply_resolved_conflict
+
+    apply_resolved_conflict(db, row)
+
     after = _identity_conflict_payload(db, row)
     db.add(CrewIdentityConflictAudit(
         conflict_id=row.id,
@@ -955,9 +966,15 @@ def track_magic_links(
     return response
 
 @router.get("/tracking/drivers")
-def track_drivers(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def track_drivers(
+    response: Response,
+    limit: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     verify_superadmin(current_user)
-    return db.query(Driver).all()
+    return capped_response(
+        response, db.query(Driver).order_by(Driver.id.desc()), limit=limit)
 
 @router.get("/tracking/aggregators")
 def track_aggregators(
@@ -1105,20 +1122,54 @@ def track_aggregators(
     # return db.query(AggregatorProfile).options(joinedload(AggregatorProfile.user),joinedload(AggregatorProfile.operating_port)).all()
 
 @router.get("/tracking/incidents")
-def track_incidents(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def track_incidents(
+    response: Response,
+    limit: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     verify_superadmin(current_user)
-    return db.query(Incident).order_by(Incident.created_at.desc()).all()
+    return capped_response(
+        response,
+        db.query(Incident).order_by(Incident.created_at.desc()),
+        limit=limit,
+    )
 
 @router.get("/tracking/crew")
-def track_crew(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def track_crew(
+    response: Response,
+    limit: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     verify_superadmin(current_user)
     from sqlalchemy.orm import joinedload
-    return db.query(CrewProfile).options(joinedload(CrewProfile.user)).all()
+
+    # Every seafarer in the system, with their account, and no response_model
+    # to narrow the columns -- so this is the single largest export of identity
+    # data the application can produce in one request.
+    return capped_response(
+        response,
+        # Newest first: a ceiling keeps what it reaches first, so ascending
+        # order would silently drop the most recently registered crew.
+        db.query(CrewProfile).options(joinedload(CrewProfile.user))
+        .order_by(CrewProfile.id.desc()),
+        limit=limit,
+    )
 
 @router.get("/tracking/service-requests")
-def track_service_requests(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def track_service_requests(
+    response: Response,
+    limit: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     verify_superadmin(current_user)
-    return db.query(PortServiceRequest).order_by(PortServiceRequest.created_at.desc()).all()
+    return capped_response(
+        response,
+        db.query(PortServiceRequest).order_by(PortServiceRequest.created_at.desc()),
+        limit=limit,
+    )
 
 @router.get("/contact-messages")
 def list_contact_messages(

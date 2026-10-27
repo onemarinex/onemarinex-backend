@@ -103,15 +103,20 @@ class ShoreLeaveAverageTests(unittest.TestCase):
         self.db.add(crew_user)
         self.db.flush()
         hpid = _uniq("HP")
+        # Passport and nationality on both sides, because that pair is what
+        # links a manifest row to a profile (HPID spec §4.1). The HPID used to
+        # be the key and is no longer one.
+        passport = _uniq("P")
         profile = CrewProfile(
             user_id=crew_user.id, full_name="Crew", rank="able_seaman",
-            nationality="IN", hpid=hpid,
+            nationality="IN", hpid=hpid, passport_number=passport,
         )
         self.db.add(profile)
         self.db.flush()
         self.db.add(VesselCrew(
             vessel_id=self.vessel.id, name="Crew", rank="able_seaman",
             hp_id=hpid, shore_pass_eligible=shore_pass_eligible,
+            passport_number=passport, nationality="IN",
         ))
         self.db.flush()
         return profile
@@ -138,7 +143,7 @@ class ShoreLeaveAverageTests(unittest.TestCase):
         # seats left as None keeps the model default of 1, which is one booker
         # and nobody unaccounted for.
         extra = {} if seats is None else {"num_passengers": seats}
-        self.db.add(CabBooking(
+        booking = CabBooking(
             booking_id=_uniq("CAB"), crew_id=crew.id,
             pickup_address="Gate", pickup_lat=0, pickup_lng=0,
             drop_address="City", drop_lat=0, drop_lng=0,
@@ -152,8 +157,34 @@ class ShoreLeaveAverageTests(unittest.TestCase):
             trip_started_at=started, trip_completed_at=completed,
             crew_member_ids=passengers,
             **extra,
-        ))
+        )
+        self.db.add(booking)
         self.db.flush()
+        return booking
+
+    def reach(self, booking, *stop_types):
+        """Mark itinerary stops reached, as the driver magic link does."""
+        from app.db.models.driver_magic_link import (
+            DriverMagicLink, DriverMagicLinkReachEvent,
+        )
+        from app.services.magic_link_service import _default_itinerary_stops
+
+        stops = _default_itinerary_stops(booking)
+        link = DriverMagicLink(
+            booking_id=booking.id, token=_uniq("tok"), itinerary_stops=stops,
+        )
+        self.db.add(link)
+        self.db.flush()
+        for stop in stops:
+            if stop["type"] in stop_types:
+                self.db.add(DriverMagicLinkReachEvent(
+                    magic_link_id=link.id, stop_id=stop["id"],
+                    stop_name=stop["name"], latitude=stop.get("lat") or 0,
+                    longitude=stop.get("lng") or 0,
+                ))
+        self.db.flush()
+        self.db.expire(booking)
+        return link
 
     def report(self):
         return shore_leave_report(
@@ -650,7 +681,27 @@ class SeatsTakenTests(ShoreLeaveAverageTests):
 
         self.assertEqual(result.average_duration_minutes, 120)
 
-    def test_seats_on_a_running_trip_are_still_ashore(self):
+    def test_seats_are_still_ashore_once_the_pickup_is_reached(self):
+        booker = self.crew()
+
+        booking = self.trip_for(
+            booker, started=_at(10), completed=None, seats=3,
+            status=BookingStatus.ON_TRIP,
+        )
+        self.reach(booking, "pickup")
+
+        result = self.report()
+
+        self.assertEqual(result.crew_went_ashore, 3)
+        self.assertEqual(result.still_ashore, 3)
+        self.assertFalse(result.all_returned)
+
+    def test_a_running_trip_with_no_reach_event_is_neither_ashore_nor_returned(self):
+        """Owner decision: no reach evidence means no claim in either direction.
+
+        It must not quietly fall into returns by subtraction either, which is
+        what made the report and the dashboard tile disagree before.
+        """
         booker = self.crew()
 
         self.trip_for(
@@ -660,9 +711,23 @@ class SeatsTakenTests(ShoreLeaveAverageTests):
 
         result = self.report()
 
-        self.assertEqual(result.crew_went_ashore, 3)
-        self.assertEqual(result.still_ashore, 3)
-        self.assertFalse(result.all_returned)
+        self.assertEqual(result.still_ashore, 0)
+        self.assertEqual(result.returned_safely, 0)
+
+    def test_reaching_the_port_again_returns_the_seats(self):
+        booker = self.crew()
+
+        booking = self.trip_for(
+            booker, started=_at(10), completed=None, seats=3,
+            status=BookingStatus.ON_TRIP,
+        )
+        self.reach(booking, "pickup", "trip_end")
+
+        result = self.report()
+
+        self.assertEqual(result.returned_safely, 3)
+        self.assertEqual(result.still_ashore, 0)
+        self.assertTrue(result.all_returned)
 
     def test_a_cancelled_booking_takes_nobody_ashore_however_many_seats(self):
         booker = self.crew()
@@ -720,3 +785,49 @@ class SeatsTakenTests(ShoreLeaveAverageTests):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TileAndReportAgreeTests(SeatsTakenTests):
+    """The reason app/services/crew_ashore.py exists.
+
+    The dashboard tile and this report answered "who is ashore" from different
+    evidence and disagreed in front of the agent. Both now read the same
+    per-stop reach events, so these assert the two figures directly against
+    each other rather than each against a constant.
+    """
+
+    def _tile(self, *crew):
+        from app.services.crew_ashore import crew_ashore_count
+        return crew_ashore_count(self.db, [c.id for c in crew])
+
+    def test_they_agree_while_the_crew_are_ashore(self):
+        booker = self.crew()
+        booking = self.trip_for(
+            booker, started=_at(10), completed=None, seats=3,
+            status=BookingStatus.ON_TRIP,
+        )
+        self.reach(booking, "pickup")
+
+        self.assertEqual(self.report().still_ashore, self._tile(booker))
+
+    def test_they_agree_once_the_port_stop_is_reached(self):
+        booker = self.crew()
+        booking = self.trip_for(
+            booker, started=_at(10), completed=None, seats=3,
+            status=BookingStatus.ON_TRIP,
+        )
+        self.reach(booking, "pickup", "trip_end")
+
+        self.assertEqual(self.report().still_ashore, self._tile(booker))
+        self.assertEqual(self._tile(booker), 0)
+
+    def test_they_agree_when_the_evidence_is_missing(self):
+        """Both must decline to claim, rather than one guessing."""
+        booker = self.crew()
+        self.trip_for(
+            booker, started=_at(10), completed=None, seats=3,
+            status=BookingStatus.ON_TRIP,
+        )
+
+        self.assertEqual(self.report().still_ashore, self._tile(booker))
+        self.assertEqual(self._tile(booker), 0)

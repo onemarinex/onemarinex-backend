@@ -314,8 +314,11 @@ class ManifestSaveTests(unittest.TestCase):
         """The agent has to be told which cell to correct."""
         from fastapi import HTTPException
 
+        # A valid passport, so the row reaches the nationality check this test
+        # is about: the manifest now applies registration's passport rule, and
+        # "X1" is too short for it.
         rows = [cm.ParsedCrewRow(name="Someone", rank="AB",
-                                 nationality="Atlantean", passport_number="X1")]
+                                 nationality="Atlantean", passport_number="X1234567")]
 
         with self.assertRaises(HTTPException) as ctx:
             self.save(rows)

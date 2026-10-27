@@ -19,7 +19,7 @@ import uuid
 import app.db.base  # noqa: F401 — registers every model on Base
 from sqlalchemy.orm import Session
 
-from app.api.v1.routes_crew import _unmanaged_vessel_call
+from app.api.v1.routes_crew import _unmanaged_vessel_call, booking_port_for
 from app.db.models.agent_profile import AgentProfile
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.user import User
@@ -147,31 +147,142 @@ class UnmanagedPortResolutionTests(UnmanagedVesselTests):
         self.assertIsNone(call.port_name)
         self.assertIsNone(call.agency_id)
 
-    def test_the_crew_members_own_port_is_used_when_the_call_has_none(self):
-        self.vessel(agency_name="Other", agent_id=self.holder.id,
-                    with_call=False)
+    def _portless_call(self):
         from app.services.historical_context import active_vessel_call
         from app.db.models.vessel import Vessel
 
+        self.vessel(agency_name="Other", agent_id=self.holder.id,
+                    with_call=False)
         vessel = self.db.query(Vessel).filter(
             Vessel.id == self.profile.selected_vessel_id).first()
         call = active_vessel_call(self.db, vessel)
+        self.assertIsNone(
+            (call.port.code if call.port else None) or call.port_name,
+            "premise: an unmanaged call opens with no port")
+        return call
+
+    def test_the_crew_members_own_port_is_used_when_the_call_has_none(self):
+        """Calls the real decision rather than re-implementing it.
+
+        This test used to recompute the booking route's logic in its own body,
+        so changing the route left it green. It caught nothing when the
+        condition was later keyed on the wrong thing.
+        """
+        call = self._portless_call()
         self.profile.current_port = "port_visakhapatnam"
         self.db.flush()
+        self.assertEqual(
+            booking_port_for(self.profile, call, None), "port_visakhapatnam")
 
-        # The resolution the booking performs.
-        port_value = (call.port.code if call.port else None) or call.port_name
-        self.assertIsNone(port_value, "premise: the call has no port")
-        port_value = port_value or (self.profile.current_port or "").strip() or None
-        self.assertEqual(port_value, "port_visakhapatnam")
+    def test_a_self_selected_assignment_does_not_make_the_call_authoritative(self):
+        """The regression this guards: an unmanaged call now has an assignment.
+
+        Asking "is there an assignment?" instead of "does an agent attest it?"
+        refuses every unmanaged booking for want of a port.
+        """
+        from app.services.historical_context import self_selected_assignment
+
+        call = self._portless_call()
+        self.profile.current_port = "port_visakhapatnam"
+        self.db.flush()
+        assignment = self_selected_assignment(self.db, self.profile, call)
+        self.assertEqual(
+            booking_port_for(self.profile, call, assignment), "port_visakhapatnam")
+
+    def test_an_agent_attested_assignment_keeps_the_call_authoritative(self):
+        """Someone on two ships cannot move a booking to the other."""
+        from types import SimpleNamespace
+        from app.services.assignment_source import MANIFEST
+
+        call = self._portless_call()
+        self.profile.current_port = "port_visakhapatnam"
+        self.db.flush()
+        attested = SimpleNamespace(source=MANIFEST)
+        self.assertIsNone(booking_port_for(self.profile, call, attested))
 
     def test_a_crew_member_who_never_chose_a_port_still_cannot_book(self):
-        self.vessel(agency_name="Other", agent_id=self.holder.id,
-                    with_call=False)
+        call = self._portless_call()
         self.profile.current_port = None
         self.db.flush()
-        self.assertIsNone((self.profile.current_port or "").strip() or None)
+        self.assertIsNone(booking_port_for(self.profile, call, None))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SelfSelectedAssignmentTests(UnmanagedVesselTests):
+    """HPID specification §9 — an unmanaged call still gets an assignment.
+
+    It records that a crew member picked the vessel themselves, which is not
+    an agent confirming crew membership and not an immigration clearance. The
+    reference is call-specific like any other, so an unmanaged trip is no
+    longer the one surface with no reference at all.
+    """
+
+    def _assignment(self, call):
+        from app.services.historical_context import self_selected_assignment
+
+        return self_selected_assignment(self.db, self.profile, call)
+
+    def test_selecting_an_unmanaged_call_issues_one_assignment_and_reference(self):
+        from app.services.assignment_ref import looks_like_assignment_ref
+        from app.services.assignment_source import SELF_SELECTED_UNMANAGED
+
+        self.vessel(agency_name="Other", agent_id=self.holder.id)
+        _, call = _unmanaged_vessel_call(self.db, self.profile)
+        assignment = self._assignment(call)
+        self.assertIsNotNone(assignment)
+        self.assertEqual(assignment.source, SELF_SELECTED_UNMANAGED)
+        self.assertTrue(looks_like_assignment_ref(assignment.public_ref))
+        # No manifest means no legacy identifier to inherit.
+        self.assertIsNone(assignment.hpid)
+
+    def test_it_claims_no_shore_leave_eligibility(self):
+        """An agency grants shore leave, and there is no agency here."""
+        self.vessel(agency_name="Other", agent_id=self.holder.id)
+        _, call = _unmanaged_vessel_call(self.db, self.profile)
+        self.assertFalse(self._assignment(call).shore_pass_eligible)
+
+    def test_no_agent_stands_behind_it(self):
+        from app.services.assignment_source import is_agent_attested
+
+        self.vessel(agency_name="Other", agent_id=self.holder.id)
+        _, call = _unmanaged_vessel_call(self.db, self.profile)
+        self.assertFalse(is_agent_attested(self._assignment(call).source))
+
+    def test_booking_again_on_the_same_call_reuses_it(self):
+        self.vessel(agency_name="Other", agent_id=self.holder.id)
+        _, call = _unmanaged_vessel_call(self.db, self.profile)
+        first = self._assignment(call)
+        second = self._assignment(call)
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(first.public_ref, second.public_ref)
+
+    def test_a_new_call_on_the_same_vessel_gets_a_new_reference(self):
+        """§9: a new unmanaged call, even same vessel and port, is new."""
+        vessel = self.vessel(agency_name="Other", agent_id=self.holder.id)
+        _, first_call = _unmanaged_vessel_call(self.db, self.profile)
+        first = self._assignment(first_call)
+
+        first_call.ended_at = NOW
+        first.ended_at = NOW
+        self.db.flush()
+        later = VesselCall(
+            vessel_id=vessel.id, agency_id=None, vessel_name=vessel.name,
+            imo_number=vessel.imo_number, port_name="port_test",
+            status="ACTIVE", started_at=NOW, ended_at=None,
+        )
+        self.db.add(later)
+        self.db.flush()
+
+        second = self._assignment(later)
+        self.assertNotEqual(first.id, second.id)
+        self.assertNotEqual(first.public_ref, second.public_ref)
+
+    def test_no_active_call_invents_nothing(self):
+        """§9: a missing call must not be papered over."""
+        self.vessel(agency_name="Other", agent_id=self.holder.id, with_call=False)
+        _, call = _unmanaged_vessel_call(self.db, self.profile)
+        self.assertIsNone(call)
+        self.assertIsNone(self._assignment(call))

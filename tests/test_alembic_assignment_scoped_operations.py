@@ -6,6 +6,8 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 
 from scripts.preflight_assignment_scoped_operations import (
+    ASSIGNMENT_SCOPED_REVISION,
+    SUPPORTED_ORIGINS,
     _is_blocking_finding,
 )
 
@@ -63,11 +65,55 @@ def test_assignment_snapshot_backfill_precedes_unique_indexes():
     assert "server_default=sa.false()" in source
 
 
-def test_preflight_supports_only_the_previous_and_new_heads_and_is_read_only():
+def test_preflight_pins_the_revision_it_verifies_not_the_graph_head():
+    """The gate must not reject a database that is simply up to date.
+
+    It used to assert an EXPECTED_HEAD literal, so the later crew_selected_vessel
+    migration left the script rejecting the current graph and this test passing
+    anyway. The revision that introduced the structures is a historical fact and
+    stays pinned; the head is read from the graph.
+    """
     source = PREFLIGHT.read_text()
 
-    assert 'EXPECTED_HEAD = "s0t1u2v3w4x5"' in source
-    assert 'PREVIOUS_HEADS = {"r9s0t1u2v3w4"}' in source
+    assert "EXPECTED_HEAD" not in source, (
+        "an expected-head constant is drift waiting to happen; read the head "
+        "from the Alembic graph instead"
+    )
+    assert f'ASSIGNMENT_SCOPED_REVISION = "{ASSIGNMENT_SCOPED_REVISION}"' in source
+    assert "len(graph_heads) != 1" in source
+
+    # The pinned revision must still be part of the graph's history, or the gate
+    # is verifying structures this repository no longer creates that way.
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+    script = ScriptDirectory.from_config(config)
+    head = script.get_heads()[0]
+    history = {rev.revision for rev in script.iterate_revisions(head, "base")}
+    assert ASSIGNMENT_SCOPED_REVISION in history
+    assert SUPPORTED_ORIGINS <= history
+
+
+def test_preflight_checks_columns_whenever_the_revision_is_applied():
+    """Not only when it is the head.
+
+    `current == [EXPECTED_HEAD]` meant that one migration after this release,
+    every column and index assertion below was skipped in silence — the gate
+    passed by checking nothing.
+    """
+    source = PREFLIGHT.read_text()
+
+    assert "assignment_scoped_applied = ASSIGNMENT_SCOPED_REVISION in applied" in source
+    assert "current == [" not in source
+    for guarded in (
+        "identity conflict queue tables are missing",
+        "cab booking idempotency columns are missing",
+    ):
+        assert guarded in source
+
+
+def test_preflight_keeps_its_checks_and_stays_read_only():
+    source = PREFLIGHT.read_text()
+
     assert "duplicate_active_profiles" in source
     assert "duplicate_pending_passports" in source
     assert "duplicate_magic_links" in source

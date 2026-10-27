@@ -10,6 +10,26 @@ columns are laid out visually, so it goes through Claude the same way
 beyond the Anthropic client already in use, and degrades to a clear error when
 no API key is configured rather than failing obscurely.
 
+**The PDF path leaves this system.** The whole document is sent to Anthropic,
+and a crew list carries every crew member's full name, nationality and
+passport number. The read-only audit raised it as a processor boundary whose
+configuration, retention and approved data handling were not verified, and
+asked that format support be preserved while accounting for it. Accounting for
+it means three things, all here:
+
+  - it is **opt-out** rather than implicit. `MANIFEST_PDF_PROCESSOR=off`
+    refuses PDFs and says why; CSV and Excel are unaffected, never leave, and
+    are the way to upload a manifest without a third party reading it;
+  - every crossing is **logged** — vessel, file name, size, how many rows came
+    back, and the model — so a data-protection review can answer which
+    manifests were processed externally. The manifest's *contents* are never
+    logged;
+  - `docs/MANIFEST-PDF-PROCESSOR.md` records what is sent and what is not.
+
+What is still an owner decision, and is not code: the processor agreement
+itself — retention, training use and sub-processors. Turning the switch off is
+the only control this repository can offer on its own.
+
 Nothing here touches the database. Callers parse first, show the agent what was
 found, and only then persist — so a misread manifest is caught before it lands
 on the crew list.
@@ -31,6 +51,30 @@ logger = logging.getLogger("heyports.crew_manifest")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 MANIFEST_MODEL = os.getenv("CREW_MANIFEST_MODEL", "claude-haiku-4-5")
+
+# "anthropic" keeps the existing behaviour; "off" refuses PDFs entirely. The
+# default preserves format support, which the audit explicitly asked for — the
+# point of the setting is that an operator can decline the boundary without a
+# code change, not that they are opted out by surprise.
+PDF_PROCESSORS = frozenset({"anthropic", "off"})
+
+
+def resolve_pdf_processor(value: Optional[str]) -> str:
+    """Read the setting, refusing a value that does not mean anything.
+
+    A typo matters here in one direction only: `off` misspelt is not "off",
+    and silently falling back to the default would keep sending crew lists to
+    a third party while the operator believed they had stopped.
+    """
+    chosen = (value or "anthropic").strip().lower()
+    if chosen not in PDF_PROCESSORS:
+        raise RuntimeError(
+            f"MANIFEST_PDF_PROCESSOR must be one of {sorted(PDF_PROCESSORS)}, not {chosen!r}"
+        )
+    return chosen
+
+
+MANIFEST_PDF_PROCESSOR = resolve_pdf_processor(os.getenv("MANIFEST_PDF_PROCESSOR"))
 
 CSV_EXTENSIONS = (".csv",)
 EXCEL_EXTENSIONS = (".xlsx", ".xlsm")
@@ -225,7 +269,13 @@ _PDF_PROMPT = (
 )
 
 
-def _parse_pdf(data: bytes) -> ParsedManifest:
+def _parse_pdf(data: bytes, filename: str = "") -> ParsedManifest:
+    if MANIFEST_PDF_PROCESSOR == "off":
+        raise ManifestError(
+            "PDF manifests are read by an external document service, which is "
+            "turned off on this server. Upload the crew list as CSV or Excel "
+            "and it will be read here."
+        )
     if not ANTHROPIC_API_KEY:
         raise ManifestError(
             "PDF manifests need the document reader to be configured on the server "
@@ -256,6 +306,13 @@ def _parse_pdf(data: bytes) -> ParsedManifest:
             output_format=_PdfCrewList,
         )
         parsed = resp.parsed_output
+        # The record of the crossing, not of the manifest: counts and
+        # identifiers only, never a name, nationality or passport number.
+        logger.info(
+            "manifest.pdf.external_processing file=%s bytes=%d model=%s rows=%d",
+            filename or "(unnamed)", len(data), MANIFEST_MODEL,
+            len(parsed.crew) if parsed else 0,
+        )
     except Exception as exc:
         logger.exception("Crew manifest PDF extraction failed")
         # A rejected key is an operator problem, not a bad scan. Telling the
@@ -306,7 +363,7 @@ def parse_manifest(data: bytes, filename: str) -> ParsedManifest:
     if name.endswith(EXCEL_EXTENSIONS):
         return _parse_excel(data)
     if name.endswith(PDF_EXTENSIONS):
-        return _parse_pdf(data)
+        return _parse_pdf(data, filename)
     if name.endswith(LEGACY_EXCEL_EXTENSIONS):
         raise ManifestError(
             "The older .xls format is not supported. Open it and save as .xlsx."

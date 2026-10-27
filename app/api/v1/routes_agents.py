@@ -8,6 +8,7 @@ from typing import Optional
 from datetime import datetime, timedelta, date as _date, timezone as dt_timezone
 
 from app.db.session import get_db
+from app.services.assignment_ref import resolve_crew_identifier
 from app.db.models.agent_profile import AgentProfile
 from app.db.models.vessel import Vessel
 from app.db.models.cab_booking import CabBooking, BookingStatus
@@ -22,7 +23,7 @@ from app.db.models.aggregator_profile import AggregatorProfile
 from app.db.models.driver import Driver
 from app.api.v1.routes_auth import get_current_user
 from app.db.models.user import User
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import List, Dict, Any
 from app.api.v1.routes_crew import ShorePassOut
 
@@ -82,6 +83,12 @@ class DashboardVessel(BaseModel):
     status: str
     ongoing_trips_count: int
     crew_ashore_count: int
+    # How much of that count rests on evidence, and how much does not.
+    # Audit R05: the figure accepts open passes and started trips, and a
+    # started trip with no reach event says nothing about where anyone is.
+    # Reporting the count alone presented an estimate as a measurement.
+    crew_ashore_unknown_seats: int = 0
+    crew_ashore_unknown_trips: int = 0
     incidents_count: int
 
 class DashboardTrip(BaseModel):
@@ -257,7 +264,7 @@ async def upload_agent_image(
 
     suffix = (file.filename or "").rsplit(".", 1)[-1].lower() or "jpg"
     key = f"agent_{kind}/{agent_profile.id}_{uuid.uuid4().hex[:8]}.{suffix}"
-    stored = save_fileobj(io.BytesIO(data), key, content_type=file.content_type)
+    stored = save_fileobj(io.BytesIO(data), key, content_type=file.content_type, public=True)
 
     if kind == "logo":
         agent_profile.agency_logo_url = stored
@@ -451,8 +458,12 @@ def get_dashboard_data(
                 CabBooking.status.in_(LIVE_TRIP_STATUSES),
             ).count()
 
-        # 2. Crew Ashore — same calculation as the headline tile above.
-        crew_ashore = crew_ashore_count(db, vessel_crew_ids)
+        # 2. Crew Ashore — same calculation as the headline tile above, but
+        # keeping the coverage the count throws away (audit R05).
+        from app.services.crew_ashore import crew_ashore_breakdown
+
+        ashore = crew_ashore_breakdown(db, vessel_crew_ids)
+        crew_ashore = ashore.count
 
         # 3. SOS/Incidents of ship — the card says "SOS/Incidents", so count both.
         #
@@ -491,6 +502,8 @@ def get_dashboard_data(
                 status=v.status,
                 ongoing_trips_count=ongoing_trips,
                 crew_ashore_count=crew_ashore,
+                crew_ashore_unknown_seats=ashore.unknown_seats,
+                crew_ashore_unknown_trips=ashore.unknown_bookings,
                 incidents_count=incidents
             )
         )
@@ -782,11 +795,39 @@ def get_agent_bookings(
     ownership = []
     if agency_profile_id is not None:
         ownership.append(CabBooking.agency_id == agency_profile_id)
+
+    # The legacy arm, aligned with `_agent_may_view_booking`, which is the
+    # rule the audit already examined under R04.
+    #
+    # This list used to ask only "is the agency null and is this crew member on
+    # one of my current manifests", with no condition on the booking's own
+    # vessel. So a booking for a ship this agency has never operated appeared
+    # here -- including its ride OTP -- while opening that same booking by id
+    # was refused, because the detail check requires the stored vessel to be
+    # one of theirs. Narrowing the list to the detail rule removes the
+    # inconsistency without removing the fallback, which the audit says must
+    # not happen before its impact is measured.
+    agent_vessel_ids = [
+        row[0] for row in db.query(Vessel.id).filter(Vessel.agent_id == current_user.id).all()
+    ]
+    legacy_alternatives = []
+    if agent_vessel_ids:
+        legacy_alternatives.append(CabBooking.vessel_id.in_(agent_vessel_ids))
     if crew_profile_ids:
-        ownership.append(and_(
-            CabBooking.agency_id.is_(None),
+        # Only where the booking records no vessel of its own; a booking that
+        # names someone else's ship is not theirs because the passenger is.
+        legacy_alternatives.append(and_(
+            CabBooking.vessel_id.is_(None),
             CabBooking.crew_id.in_(crew_profile_ids),
         ))
+    if legacy_alternatives:
+        ownership.append(and_(
+            CabBooking.agency_id.is_(None),
+            or_(*legacy_alternatives),
+        ))
+
+    if not ownership:
+        return []
     query = query.filter(or_(*ownership))
 
     if status_filter:
@@ -859,6 +900,9 @@ class AgentCrewDetailOut(BaseModel):
     passport_number: Optional[str]
     date_of_birth: Optional[_date]
     hpid: Optional[str]
+    # The opaque per-assignment reference. The agent screens show this; hpid
+    # stays in the payload for anything still keyed on the legacy value.
+    reference: Optional[str] = None
     current_port: Optional[str]
     vessel: Optional[str]
     vessel_id: Optional[int] = None
@@ -889,6 +933,10 @@ def get_agent_crew_detail(
     if current_user.role != "agent":
         raise HTTPException(status_code=403, detail="Only agents can access this")
 
+    # Accepts the opaque reference or the legacy identifier. Translation only:
+    # the agent-ownership filter below is unchanged and still does the work.
+    hp_id = resolve_crew_identifier(db, hp_id)
+
     query = (
         db.query(VesselCrew, Vessel)
         .join(Vessel, Vessel.id == VesselCrew.vessel_id)
@@ -914,6 +962,7 @@ def get_agent_crew_detail(
     ).first()
 
     shore_pass = None
+    assignment = None
     if crew_profile:
         assignment = (
             db.query(CrewAssignment)
@@ -944,6 +993,7 @@ def get_agent_crew_detail(
         passport_number=passport_number,
         date_of_birth=date_of_birth,
         hpid=hp_id,
+        reference=assignment.public_ref if assignment else None,
         current_port=crew_profile.current_port if crew_profile else None,
         vessel=vessel.name,
         vessel_id=vessel_crew.vessel_id,
@@ -1270,20 +1320,35 @@ def shore_leave_report(
         if p.out_time:
             person = roster.key_for_profile(p.crew_profile_id)
             departures.append((person, p.out_time, p.in_time, p.in_time is not None))
+    # Whether a trip's riders are still off the ship is decided by the same
+    # per-stop reach events the dashboard tile uses, so the report and the tile
+    # cannot disagree in front of the agent. A trip that started but carries no
+    # usable reach event is neither ashore nor returned; it is held separately
+    # so it inflates neither figure.
+    from app.services.crew_ashore import (
+        ASHORE, RETURNED, UNKNOWN, _reached_ids_by_booking, booking_ashore_state,
+    )
+
+    reached_by_booking = _reached_ids_by_booking(db, day_trips)
+    unknown_crew: set = set()
     for t in day_trips:
         if t.status == BookingStatus.CANCELLED:
             continue
         start = t.trip_started_at or t.started_at
         end = t.trip_completed_at or t.completed_at
-        finished = t.status == BookingStatus.COMPLETED
-        if not start and not finished:
+        state = booking_ashore_state(t, reached_by_booking.get(t.id, ()))
+        finished = state != ASHORE
+        if not start and state != RETURNED:
             continue
         named = _trip_crew(t)
-        for person in named:
+        riders = list(named) + [
+            f"seat:{t.id}:{seat}"
+            for seat in range(max(0, (t.num_passengers or 0) - len(named)))
+        ]
+        for person in riders:
             departures.append((person, start, end, finished))
-        unnamed_seats = max(0, (t.num_passengers or 0) - len(named))
-        for seat in range(unnamed_seats):
-            departures.append((f"seat:{t.id}:{seat}", start, end, finished))
+        if state == UNKNOWN:
+            unknown_crew.update(riders)
 
     ashore_crew = {person for person, _, _, _ in departures if person is not None}
     crew_went_ashore = len(ashore_crew)
@@ -1298,7 +1363,10 @@ def shore_leave_report(
         person for person, _, _, is_back in departures
         if person is not None and not is_back
     }
-    returned_crew = ashore_crew - still_ashore_crew
+    # Owner decision: a trip with no reach evidence is not counted as ashore and
+    # is not treated as returned either, so it leaves both figures rather than
+    # falling into returns by subtraction.
+    returned_crew = ashore_crew - still_ashore_crew - unknown_crew
 
     completed_trips = sum(1 for t in day_trips if t.status == BookingStatus.COMPLETED)
 
@@ -1527,3 +1595,130 @@ def agency_logo(agency_id: int, db: Session = Depends(get_db)):
         # Logos change rarely and every report download re-fetches this.
         headers={"Cache-Control": "public, max-age=86400"},
     )
+
+
+# --- crew sign-on and sign-off ----------------------------------------------
+#
+# HPID specification §8, the agency transfer screen. A joining crew member may
+# not be on the sailing manifest and may hold no account, so neither is a
+# precondition here. What is required is a passport number, because that is
+# what resolves this person to an assignment that may already exist -- from
+# the manifest, or from an earlier sign-on -- rather than minting a second
+# reference for one person on one call.
+
+
+class SignOnIn(BaseModel):
+    vessel_id: int = Field(gt=0)
+    crew_name: str = Field(min_length=1, max_length=255)
+    passport_number: str = Field(min_length=1, max_length=64)
+    nationality: Optional[str] = None
+    rank: Optional[str] = None
+    shore_pass_eligible: bool = False
+
+
+class MovementOut(BaseModel):
+    assignment_id: int
+    vessel_call_id: int
+    reference: Optional[str] = None
+    crew_name: str
+    source: str
+    signed_on_at: Optional[datetime] = None
+    signed_off_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    # True when this call already held the person, so the agent can see that
+    # nothing new was issued rather than wondering why no reference changed.
+    reused_existing: bool = False
+
+
+def _agent_vessel(db: Session, current_user, vessel_id: int):
+    if current_user.role != "agent":
+        raise HTTPException(status_code=403, detail="Only agents can do this")
+    vessel = (
+        db.query(Vessel)
+        .filter(Vessel.id == vessel_id, Vessel.agent_id == current_user.id)
+        .first()
+    )
+    # Same answer for another agent's vessel as for one that does not exist.
+    if vessel is None:
+        raise HTTPException(status_code=404, detail="Vessel not found")
+    return vessel
+
+
+def _movement_out(assignment, *, reused: bool) -> "MovementOut":
+    return MovementOut(
+        assignment_id=assignment.id,
+        vessel_call_id=assignment.vessel_call_id,
+        reference=assignment.public_ref,
+        crew_name=assignment.crew_name,
+        source=assignment.source,
+        signed_on_at=assignment.signed_on_at,
+        signed_off_at=assignment.signed_off_at,
+        ended_at=assignment.ended_at,
+        reused_existing=reused,
+    )
+
+
+@router.post("/crew/sign-on", response_model=MovementOut, status_code=201)
+def sign_crew_on(
+    body: SignOnIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Sign a joining crew member on to this vessel's active call."""
+    from app.services import crew_movement
+    from app.services.historical_context import active_vessel_call
+
+    vessel = _agent_vessel(db, current_user, body.vessel_id)
+    before = crew_movement.assignment_on_call_for_passport(
+        db,
+        vessel_call_id=getattr(
+            active_vessel_call(db, vessel, create=False), "id", 0
+        ),
+        passport_number=body.passport_number,
+    )
+    try:
+        assignment = crew_movement.sign_on(
+            db, vessel=vessel, crew_name=body.crew_name,
+            passport_number=body.passport_number, nationality=body.nationality,
+            rank=body.rank, shore_pass_eligible=body.shore_pass_eligible,
+            actor=current_user,
+        )
+    except crew_movement.MovementError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    db.commit()
+    db.refresh(assignment)
+    return _movement_out(assignment, reused=before is not None)
+
+
+@router.post("/crew/{assignment_id}/sign-off", response_model=MovementOut)
+def sign_crew_off(
+    assignment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """End an assignment, keeping its reference as history (§5.1)."""
+    from app.services import crew_movement
+
+    if current_user.role != "agent":
+        raise HTTPException(status_code=403, detail="Only agents can do this")
+    assignment = (
+        db.query(CrewAssignment)
+        .join(VesselCall, VesselCall.id == CrewAssignment.vessel_call_id)
+        .join(Vessel, Vessel.id == VesselCall.vessel_id)
+        .filter(
+            CrewAssignment.id == assignment_id,
+            Vessel.agent_id == current_user.id,
+        )
+        .first()
+    )
+    if assignment is None:
+        raise HTTPException(status_code=404, detail="Crew assignment not found")
+    try:
+        crew_movement.sign_off(db, assignment=assignment, actor=current_user)
+    except crew_movement.MovementError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    db.commit()
+    db.refresh(assignment)
+    return _movement_out(assignment, reused=True)

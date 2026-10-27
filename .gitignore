@@ -20,6 +20,7 @@ env/
 scripts/
 !scripts/
 scripts/*
+!scripts/audit_hpid_consistency.py
 !scripts/audit_operational_data.py
 !scripts/repair_hpid_links.py
 !scripts/consolidate_ports.py
@@ -31,6 +32,11 @@ scripts/*
 !scripts/audit_safety_record_vessel_names.py
 !scripts/repair_sos_vessel_call.py
 !scripts/repair_vessel_agency_assignment.py
+!scripts/backfill_assignment_public_ref.py
+!scripts/harden_app_secrets.py
+!scripts/seed_test_logins.py
+!scripts/seed_shore_leave_dev.py
+!scripts/seed_company_dashboard_dev.py
 apply_port_id_migration.py
 migrations/
 seeds/
@@ -44,3 +50,9 @@ logs/
 # Local verification artifacts
 output/
 .playwright-cli/
+app-spec-hardened.json
+
+# Uploaded files. "uploads/" is served by an unauthenticated static mount;
+# "uploads-private/" deliberately is not, and neither belongs in the repository.
+uploads/
+uploads-private/

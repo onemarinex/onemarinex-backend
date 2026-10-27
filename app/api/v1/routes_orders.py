@@ -163,8 +163,13 @@ def list_orders(
     elif me.role == "vendor":
         q = q.filter(Order.vendor_user_id == me.id)
     elif me.role == "agent":
-        # Agents see all; change if needed
-        pass
+        # Was: "Agents see all; change if needed" -- and it saw all. Every
+        # order carries line items and negotiated totals, so any agent could
+        # read every shipping company's pricing with every vendor, across all
+        # tenants. Neither Order nor RFQ has an agency key, so there is no
+        # rule to narrow this to; until one exists it has to be nothing.
+        # See AGENT-MARKETPLACE-ACCESS in docs/ for what has to be decided.
+        q = q.filter(False)
     else:
         # no role -> nothing
         q = q.filter(False)
@@ -190,7 +195,10 @@ def get_order(
         raise HTTPException(403, "Not allowed")
     if me.role == "vendor" and o.vendor_user_id != me.id:
         raise HTTPException(403, "Not allowed")
-    # agent allowed (or restrict if needed)
+    if me.role not in ("shipping_company", "vendor"):
+        # Previously "agent allowed (or restrict if needed)". Fail closed
+        # until the rule exists -- see list_orders.
+        raise HTTPException(403, "Not allowed")
 
     return _to_out(o)
 
@@ -210,10 +218,11 @@ def update_order_status(
         raise HTTPException(404, "Order not found")
 
     # who can update? allow buyer, vendor, or agent
+    # An agent used to satisfy this on its own, which made cancelling any
+    # tenant's order a single authenticated request.
     can = (
         (me.role == "shipping_company" and o.buyer_user_id == me.id) or
-        (me.role == "vendor" and o.vendor_user_id == me.id) or
-        (me.role == "agent")
+        (me.role == "vendor" and o.vendor_user_id == me.id)
     )
     if not can:
         raise HTTPException(403, "Not allowed")
@@ -239,8 +248,7 @@ def create_order_event(
     # permissions: vendor of this order, buyer (shipping), or agent
     allowed = (
         (me.role == "vendor" and o.vendor_user_id == me.id) or
-        (me.role == "shipping_company" and o.buyer_user_id == me.id) or
-        (me.role == "agent")
+        (me.role == "shipping_company" and o.buyer_user_id == me.id)
     )
     if not allowed:
         raise HTTPException(403, "Not allowed")
@@ -284,8 +292,7 @@ def list_order_events(
     # visibility: buyer, vendor, agent
     allowed = (
         (me.role == "shipping_company" and o.buyer_user_id == me.id) or
-        (me.role == "vendor" and o.vendor_user_id == me.id) or
-        (me.role == "agent")
+        (me.role == "vendor" and o.vendor_user_id == me.id)
     )
     if not allowed:
         raise HTTPException(403, "Not allowed")

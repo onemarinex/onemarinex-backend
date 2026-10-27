@@ -1,6 +1,35 @@
 import os
+import sys
 from dotenv import load_dotenv
+from urllib.parse import urlsplit
 load_dotenv()
+
+# Hosts that mean "this developer's machine". Kept here, with no app imports,
+# so both this module and app/db/seed_guard.py can use one definition without
+# a circular import.
+LOCAL_DB_HOSTS = frozenset({
+    "localhost", "127.0.0.1", "::1", "[::1]", "db", "postgres",
+})
+
+# The signing key shipped in this repository. Fine on a laptop, and a forged
+# token for any account -- superadmin included -- anywhere else.
+_INSECURE_SECRET_KEY = "onemarinexsecret"
+
+
+def database_is_local(url: str) -> bool:
+    """Whether a database URL points at this machine.
+
+    The host is parsed rather than matched as a substring: `localhost` appears
+    inside `notlocalhostile.example.com`, and a check that reads that as local
+    fails in the direction that matters.
+    """
+    try:
+        host = urlsplit(url).hostname
+    except Exception:
+        return False
+    if host is None:
+        return True   # a unix socket or a file-backed database is local
+    return host.lower() in LOCAL_DB_HOSTS
 
 
 def _env_flag(name: str, default: str) -> bool:
@@ -20,9 +49,13 @@ class Settings:
         "DATABASE_URL",
         "postgresql+psycopg2://onemarinex_user:onemarinex123!@localhost:5432/onemarinex",
     )
-    SECRET_KEY = os.getenv("SECRET_KEY", "onemarinexsecret")
-    ALGORITHM = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES = 20160  # 2 weeks (14 days * 24 hours * 60 minutes)
+    SECRET_KEY = os.getenv("SECRET_KEY", _INSECURE_SECRET_KEY)
+    ALGORITHM = os.getenv("ALGORITHM", "HS256")
+    # Was hardcoded at 20160 while the deployed environment set the variable,
+    # so whoever set it believed a shorter lifetime was in force and it was not.
+    ACCESS_TOKEN_EXPIRE_MINUTES = int(
+        os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "20160")  # 14 days
+    )
     REFRESH_TOKEN_EXPIRE_MINUTES = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", "43200"))  # 30 days
     APP_NAME = "OneMarinex API"
 
@@ -46,3 +79,25 @@ class Settings:
     ]
 
 settings = Settings()
+
+
+def _refuse_insecure_secret_key() -> None:
+    """Stop a deployment from signing tokens with the key in this repository.
+
+    Only the fallback is refused, and only when the database is not local, so a
+    laptop keeps working untouched. Raised at import so it fails the deploy
+    rather than surfacing later as tokens that anyone can mint.
+    """
+    if settings.SECRET_KEY != _INSECURE_SECRET_KEY:
+        return
+    if database_is_local(settings.DATABASE_URL):
+        return
+    sys.exit(
+        "Refusing to start: SECRET_KEY is unset, so the fallback in this "
+        "repository would be used to sign every token against a non-local "
+        "database. Anyone who can read the source could mint a token for any "
+        "account. Set SECRET_KEY to a secret value for this environment."
+    )
+
+
+_refuse_insecure_secret_key()

@@ -13,6 +13,15 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     role = Column(String(32), nullable=False, server_default="crew")
     must_change_password = Column(Boolean, default=False, nullable=False, server_default="false")
+    # Password-guessing counters. Until these existed, every login route
+    # compared a password and returned 401 with no counter and no cooldown,
+    # so any account could be guessed at indefinitely. Same three fields as
+    # DriverMagicLink and CabBooking carry for OTPs; one shared policy in
+    # app/services/attempt_limits reads all of them.
+    failed_auth_attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    last_auth_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    auth_locked_until = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

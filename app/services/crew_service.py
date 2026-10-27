@@ -4,16 +4,42 @@ import uuid
 def generate_hpid(passport_number: str, nationality: str, port: str) -> str:
     """
     Generate HPID using pattern: HP-{passport_number}-{NAT}-{PORT}
-    Examples: HP-P1234567-IND-MUM, HP-P7654321-PHI-DUB
+    Examples: HP-P1234567-IN-VIS, HP-P7654321-PH-DUB
+
+    An HPID is issued per port visit, not once per person, so the PORT fragment
+    is meant to differ between visits. What was not meant to differ is the
+    *rendering*: both fragments came from raw slicing, so the same person at the
+    same port produced different HPIDs depending on how the source happened to
+    be written -- "IN" and "INDIAN" gave IN and IND, "port_visakhapatnam" and
+    "Port of Visakhapatnam" gave VIS and POR.
+
+    They now go through the normalisers the rest of the codebase uses, so one
+    visit yields one HPID. Existing rows keep their old rendering, which is why
+    matching compares canonical_hpid() rather than the literal string.
+
+    New values also avoid the ambiguity in the old ones: nationality is
+    normalised to its ISO code before slicing, so INDIAN gives IN rather than
+    IND -- a fragment India and Indonesia share and which cannot be resolved
+    afterwards.
     """
+    from app.services.crew_reference import normalize_nationality
+    from app.services.port_identity import canonical_port_key
+
     # Use upper case passport number
     id_part = str(passport_number).strip().upper() if passport_number else "XXXX"
 
-    # First 3 chars of nationality
-    nat_part = str(nationality)[:3].upper() if nationality else "GEN"
+    # The country's canonical code, not the first three characters of whatever
+    # was typed. Falls back to the old slice when the value is unrecognised, so
+    # an unusual nationality still produces an identifier rather than failing.
+    normalized_nationality = normalize_nationality(nationality) if nationality else None
+    nat_part = normalized_nationality or (
+        str(nationality)[:3].upper() if nationality else "GEN"
+    )
 
-    # First 3 chars of port (stripping 'port_' prefix if present)
-    port_part = str(port).replace("port_", "")[:3].upper() if port else "GEN"
+    # The canonical port key drops "port", "of" and punctuation, so every
+    # spelling of one port gives the same three characters.
+    port_key = canonical_port_key(port)
+    port_part = port_key[:3].upper() if port_key else "GEN"
 
     return f"HP-{id_part}-{nat_part}-{port_part}"
 

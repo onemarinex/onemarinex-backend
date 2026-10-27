@@ -9,8 +9,14 @@ the manifest. So an agent could mark eight crew eligible, see eight on the
 vessel page, and have the report still show one.
 
 "Crew ashore" was answered from open shore passes alone on the dashboard, while
-the shore leave report also treats a started cab trip as evidence. Crew leaving
+the shore leave report also treated a started cab trip as evidence. Crew leaving
 by cab without a pass showed as zero ashore beside a trip that was underway.
+
+Per the owner decision of 26 October 2026 a started trip is no longer evidence
+on its own: the seats join the count when the magic-link PICKUP stop is marked
+reached and leave it at the TRIP END (PORT) stop. A started trip with no reach
+event is reported as unknown rather than counted, so these tests mark the stops
+the driver would have marked.
 
 Runs against the configured database inside a transaction that is always
 rolled back.
@@ -213,17 +219,77 @@ class CrewAshoreTests(_Base):
         self.db.flush()
         return booking
 
+    def _reach(self, booking, *stop_types):
+        """Mark itinerary stops reached, exactly as the driver link does.
+
+        The reach event stores only stop_id, so the booking needs its real
+        itinerary for the id to resolve back to a semantic type.
+        """
+        from app.db.models.driver_magic_link import (
+            DriverMagicLink, DriverMagicLinkReachEvent,
+        )
+        from app.services.magic_link_service import _default_itinerary_stops
+
+        stops = _default_itinerary_stops(booking)
+        link = DriverMagicLink(
+            booking_id=booking.id, token=_uniq("tok"), itinerary_stops=stops,
+        )
+        self.db.add(link)
+        self.db.flush()
+        for stop in stops:
+            if stop["type"] in stop_types:
+                self.db.add(DriverMagicLinkReachEvent(
+                    magic_link_id=link.id, stop_id=stop["id"],
+                    stop_name=stop["name"], latitude=stop.get("lat") or 0,
+                    longitude=stop.get("lng") or 0,
+                ))
+        self.db.flush()
+        self.db.expire(booking)
+        return link
+
+    def _breakdown(self, members):
+        from app.services.crew_ashore import crew_ashore_breakdown
+        return crew_ashore_breakdown(
+            self.db, [m.profile.id for m in members if m.profile])
+
     def _count(self, members):
         from app.services.crew_ashore import crew_ashore_count
         return crew_ashore_count(
             self.db, [m.profile.id for m in members if m.profile])
 
-    def test_a_started_trip_puts_its_crew_ashore(self):
+    def test_reaching_the_pickup_puts_its_crew_ashore(self):
         """The reported case: one trip underway, the tile read zero."""
         member = self.crew()
-        self._trip(member, status=BookingStatus.ON_TRIP)
+        booking = self._trip(member, status=BookingStatus.ON_TRIP)
+        self._reach(booking, "pickup")
 
         self.assertEqual(self._count([member]), 1)
+
+    def test_a_started_trip_with_no_reach_event_is_unknown_not_ashore(self):
+        """Owner decision: never substitute the driver state for a boarding."""
+        member = self.crew()
+        self._trip(member, status=BookingStatus.ON_TRIP, seats=4)
+
+        breakdown = self._breakdown([member])
+        self.assertEqual(breakdown.count, 0)
+        self.assertEqual(breakdown.unknown_bookings, 1)
+        self.assertEqual(breakdown.unknown_seats, 4)
+        self.assertFalse(breakdown.has_full_coverage)
+
+    def test_reaching_the_port_again_brings_them_back(self):
+        member = self.crew()
+        booking = self._trip(member, status=BookingStatus.ON_TRIP, seats=4)
+        self._reach(booking, "pickup", "trip_end")
+
+        self.assertEqual(self._count([member]), 0)
+
+    def test_reaching_the_drop_alone_does_not_bring_them_back(self):
+        """A stop in town is not the return to port, and is never read as one."""
+        member = self.crew()
+        booking = self._trip(member, status=BookingStatus.ON_TRIP, seats=4)
+        self._reach(booking, "pickup", "drop")
+
+        self.assertEqual(self._count([member]), 4)
 
     def test_a_driver_merely_assigned_does_not(self):
         """Waiting for a cab is not being ashore."""
@@ -264,8 +330,9 @@ class CrewAshoreTests(_Base):
     def test_group_passengers_count_when_the_caller_resolves_them(self):
         booker = self.crew()
         rider = self.crew()
-        self._trip(booker, status=BookingStatus.ON_TRIP,
-                   passengers=[rider.assignment.hpid])
+        booking = self._trip(booker, status=BookingStatus.ON_TRIP,
+                             passengers=[rider.assignment.hpid])
+        self._reach(booking, "pickup")
 
         from app.services.crew_ashore import crew_ashore_count
 
@@ -292,7 +359,8 @@ class CrewAshoreTests(_Base):
         agent had no way to tell which of the two was lying.
         """
         member = self.crew()
-        self._trip(member, status=BookingStatus.ON_TRIP, seats=4)
+        booking = self._trip(member, status=BookingStatus.ON_TRIP, seats=4)
+        self._reach(booking, "pickup")
 
         self.assertEqual(self._count([member]), 4)
 
@@ -300,8 +368,9 @@ class CrewAshoreTests(_Base):
         """Four seats, all four named: four people, not eight."""
         booker = self.crew()
         riders = [self.crew() for _ in range(3)]
-        self._trip(booker, status=BookingStatus.ON_TRIP, seats=4,
-                   passengers=[r.assignment.hpid for r in riders])
+        booking = self._trip(booker, status=BookingStatus.ON_TRIP, seats=4,
+                             passengers=[r.assignment.hpid for r in riders])
+        self._reach(booking, "pickup")
 
         from app.services.crew_ashore import crew_ashore_count
 

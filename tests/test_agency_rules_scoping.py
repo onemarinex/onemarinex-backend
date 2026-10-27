@@ -83,6 +83,8 @@ class AgencyRulesScopingTests(unittest.TestCase):
         self.db.add(user)
         self.db.flush()
         hpid = _uniq("HP")
+        # Passport and nationality are the matching pair (HPID spec §4.1).
+        passport = _uniq("P")
         profile = CrewProfile(
             user_id=user.id,
             full_name="Crew",
@@ -91,12 +93,15 @@ class AgencyRulesScopingTests(unittest.TestCase):
             hpid=hpid,
             current_port=PORT,
             vessel=vessel.name,
+            passport_number=passport,
         )
         manifest = VesselCrew(
             vessel_id=vessel.id,
             name="Crew",
             rank="able_seaman",
             hp_id=hpid,
+            passport_number=passport,
+            nationality="IN",
         )
         self.db.add_all([profile, manifest])
         self.db.flush()

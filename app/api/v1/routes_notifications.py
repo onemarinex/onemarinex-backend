@@ -1,4 +1,6 @@
 from typing import List, Optional
+from fastapi import Response
+from app.services.result_limits import capped_response
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import and_, cast, false, func, or_
 from sqlalchemy.dialects.postgresql import JSONB
@@ -179,6 +181,8 @@ def create_notification(
 
 @router.get("/admin", response_model=List[NotificationOut])
 def list_notifications_admin(
+    response: Response,
+    limit: Optional[int] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -189,12 +193,22 @@ def list_notifications_admin(
         # History is the agent's own outbox. Matching on port as well meant he
         # saw — and could edit — notifications raised by every other agency
         # berthed at the same port.
-        rows = db.query(Notification).filter(
-            Notification.created_by == current_user.id
-        ).order_by(Notification.created_at.desc()).all()
+        rows = capped_response(
+            response,
+            db.query(Notification).filter(
+                Notification.created_by == current_user.id
+            ).order_by(Notification.created_at.desc()),
+            limit=limit,
+        )
         return [_serialize_notification(db, row) for row in rows]
 
-    rows = db.query(Notification).order_by(Notification.created_at.desc()).all()
+    # A Super Admin asking for this gets every notification the platform has
+    # ever sent. Newest first, so the ceiling drops the oldest.
+    rows = capped_response(
+        response,
+        db.query(Notification).order_by(Notification.created_at.desc()),
+        limit=limit,
+    )
     return [_serialize_notification(db, row) for row in rows]
 
 

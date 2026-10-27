@@ -247,9 +247,11 @@ def list_quotes_for_rfq(
     if not rfq:
         raise HTTPException(status_code=404, detail="RFQ not found")
 
-    # Only the RFQ owner (shipping company that created it) can view
-    if me.id != rfq.user_id and me.role != "agent":
-        # (allow agent if you want them to see on behalf; remove role check if not desired)
+    # Only the RFQ owner (shipping company that created it) can view. The
+    # agent exemption here was the same placeholder as the one in
+    # routes_orders, and it exposed every vendor's bid on every RFQ -- the one
+    # thing a sealed quote is for.
+    if me.id != rfq.user_id:
         raise HTTPException(status_code=403, detail="Not allowed")
 
     quotes = (

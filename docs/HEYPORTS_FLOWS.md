@@ -8,6 +8,12 @@ All backend paths are under `/api/v1`. All email steps require `SMTP_*` to be
 configured — otherwise the message is only logged and the flow can't complete
 in prod (see §6).
 
+> **Crew on a vessel with no agency behave differently from everything below,
+> and the three specification documents never mention the case.** Before
+> changing anything that assumes a crew member has an agency, an assignment or
+> an agent to wait for, read
+> [UNMANAGED-VESSELS.md](UNMANAGED-VESSELS.md).
+
 ---
 
 ## 1. Registration with email OTP ("block at signup") — NEW

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.deps import get_current_driver
 from app.api.v1.routes_auth import get_current_user
 from app.db.models.booking_timeline import BookingTimeline, TimelineEventType
+from app.services import attempt_limits
 from app.db.models.cab_booking import CabBooking, BookingStatus
 from app.db.models.driver import Driver
 from app.db.models.driver_magic_link import DriverMagicLink, DriverMagicLinkReachEvent
@@ -40,7 +41,9 @@ from app.services.booking_service import (
 )
 from app.services.magic_link_service import (
     add_stop_to_magic_link,
+    assert_link_usable,
     create_or_refresh_magic_link,
+    rotate_magic_link,
     get_magic_link_by_token,
     mark_stop_reached,
     serialize_magic_link_public_payload,
@@ -90,9 +93,8 @@ _MAGIC_LINK_TERMINAL_STATUSES = {
     BookingStatus.CANCELLED.value,
     BookingStatus.PROVIDER_REJECTED.value,
 }
-_OTP_MAX_FAILED_ATTEMPTS = 5
-_OTP_LOCKOUT_DURATION = timedelta(minutes=15)
-_OTP_ATTEMPT_COOLDOWN = timedelta(seconds=1)
+# The policy itself lives in app/services/otp_attempts, shared with the
+# authenticated driver route, which had none of it.
 
 
 def _require_magic_link_otp(magic_link) -> None:
@@ -322,7 +324,7 @@ def mark_magic_link_stop_reached(
                         matched_stop, booking.port,
                     )
     except Exception:
-        logger.exception("WhatsApp stop-reached notify failed for magic link %s stop %s", token, stop_id)
+        logger.exception("WhatsApp stop-reached notify failed for magic link id=%s stop %s", magic_link.id, stop_id)
 
     refreshed = get_magic_link_by_token(db, token)
     return serialize_magic_link_public_payload(refreshed)
@@ -344,56 +346,28 @@ def verify_magic_link_otp(
     )
     if not magic_link:
         raise HTTPException(status_code=404, detail="Magic link not found")
+    # This handler locks the row itself rather than going through
+    # get_magic_link_by_token, so it has to apply the same lifecycle check.
+    assert_link_usable(magic_link)
     booking = _require_magic_link_active(magic_link)
 
     if magic_link.otp_verified_at:
         return {"verified": True}
 
     now = datetime.now(timezone.utc)
-    locked_until = magic_link.otp_locked_until
-    if locked_until and _aware_utc(locked_until) > now:
-        retry_after = max(1, int((_aware_utc(locked_until) - now).total_seconds()))
-        raise HTTPException(
-            status_code=429,
-            detail="Too many invalid OTP attempts. Try again later.",
-            headers={"Retry-After": str(retry_after)},
-        )
-
-    if locked_until:
-        magic_link.otp_failed_attempts = 0
-        magic_link.otp_locked_until = None
-
-    last_attempt_at = magic_link.otp_last_attempt_at
-    if last_attempt_at:
-        retry_in = _OTP_ATTEMPT_COOLDOWN - (now - _aware_utc(last_attempt_at))
-        if retry_in.total_seconds() > 0:
-            raise HTTPException(
-                status_code=429,
-                detail="Please wait before trying the OTP again.",
-                headers={"Retry-After": str(max(1, int(retry_in.total_seconds()) + 1))},
-            )
-
-    magic_link.otp_last_attempt_at = now
+    attempt_limits.assert_attempt_allowed(magic_link, now=now)
 
     crew_otp = booking.crew.ride_otp if booking.crew else None
     booking_otp = booking.otp
     if body.otp != (crew_otp or "") and body.otp != (booking_otp or ""):
-        failed_attempts = (magic_link.otp_failed_attempts or 0) + 1
-        magic_link.otp_failed_attempts = failed_attempts
-        if failed_attempts >= _OTP_MAX_FAILED_ATTEMPTS:
-            magic_link.otp_locked_until = now + _OTP_LOCKOUT_DURATION
-            db.commit()
-            raise HTTPException(
-                status_code=429,
-                detail="Too many invalid OTP attempts. Try again later.",
-                headers={"Retry-After": str(int(_OTP_LOCKOUT_DURATION.total_seconds()))},
-            )
+        locked = attempt_limits.record_failure(magic_link, now=now)
         db.commit()
+        if locked:
+            raise attempt_limits.locked_out_error()
         raise HTTPException(status_code=400, detail="Invalid OTP")
 
     magic_link.otp_verified_at = now
-    magic_link.otp_failed_attempts = 0
-    magic_link.otp_locked_until = None
+    attempt_limits.record_success(magic_link)
     if not booking.trip_started_at:
         booking.trip_started_at = now
         booking.status = BookingStatus.ON_TRIP
@@ -920,6 +894,13 @@ def assign_driver_endpoint(
         drop_lat=booking.drop_lat,
         drop_lng=booking.drop_lng,
     )
+    # The trip changed hands, so the previous driver's URL must stop working.
+    # Rotating the token is the revocation: booking_id is unique, so there is
+    # one link per booking and the old token resolves to nothing afterwards.
+    # OTP state goes with it, so the new driver verifies for themselves.
+    if already_assigned_driver_id and already_assigned_driver_id != driver.id:
+        rotate_magic_link(db, booking)
+
     magic_link = create_or_refresh_magic_link(
         db,
         booking=updated,

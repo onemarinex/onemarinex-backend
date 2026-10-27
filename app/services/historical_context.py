@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models.agent_profile import AgentProfile
@@ -20,10 +21,12 @@ from app.db.models.port import Port
 from app.db.models.vessel import Vessel
 from app.db.models.vessel_call import VesselCall
 from app.db.models.vessel_crew import VesselCrew
+from app.services.assignment_ref import issue_assignment_ref
 from app.services.crew_identity import (
     normalize_passport_number,
     normalized_passport_expression,
 )
+from app.services.crew_reference import normalize_nationality
 
 
 def _utcnow() -> datetime:
@@ -88,14 +91,45 @@ def active_vessel_call(
         started_at=vessel.eta or vessel.created_at or _utcnow(),
         status="ACTIVE",
     )
-    db.add(call)
-    db.flush()
+    # The select above and this insert are not atomic, so two writers can both
+    # find no open call. uq_vessel_calls_active_vessel keeps the data correct;
+    # the savepoint keeps the loser's wider operation alive instead of failing
+    # it with an IntegrityError. Opening a call happens on read paths too --
+    # _resolve_report_call reaches here -- so two report loads can collide.
+    try:
+        with db.begin_nested():
+            db.add(call)
+            db.flush()
+    except IntegrityError:
+        existing = (
+            db.query(VesselCall)
+            .filter(VesselCall.vessel_id == vessel.id, VesselCall.ended_at.is_(None))
+            .order_by(VesselCall.id.desc())
+            .first()
+        )
+        if existing is None:
+            raise
+        return existing
     # Reassigning an existing vessel starts a new call while keeping the
     # manifest rows. Materialise fresh call-specific assignments so subsequent
     # events do not fall back to person identity alone.
     manifests = db.query(VesselCrew).filter(VesselCrew.vessel_id == vessel.id).all()
     for manifest in manifests:
-        assignment_for_manifest(db, vessel, manifest)
+        # Each in its own savepoint. A manifest can hold two rows that resolve
+        # to one person -- an older entry the agent never removed, and the
+        # current one -- and both want the same (call, profile), which the
+        # partial unique index refuses. Without the savepoint that refusal
+        # aborted the whole transaction and the vessel could not open a call
+        # at all: one stale row made the ship unusable.
+        #
+        # Skipping the loser is right rather than merely convenient. The row
+        # that won is an assignment for that person on that call, which is
+        # exactly what the second row would have created.
+        try:
+            with db.begin_nested():
+                assignment_for_manifest(db, vessel, manifest)
+        except IntegrityError:
+            continue
     return call
 
 
@@ -144,21 +178,79 @@ def refresh_active_vessel_call(db: Session, vessel: Vessel) -> Optional[VesselCa
 def crew_profile_for_manifest(
     db: Session, manifest: VesselCrew
 ) -> Optional[CrewProfile]:
-    clauses = []
-    if (manifest.hp_id or "").strip():
-        clauses.append(
-            func.upper(func.trim(CrewProfile.hpid))
-            == manifest.hp_id.strip().upper()
-        )
-    if (manifest.passport_number or "").strip():
-        clauses.append(
-            normalized_passport_expression(CrewProfile.passport_number)
-            == normalize_passport_number(manifest.passport_number)
-        )
-    if not clauses:
+    """The one registered person this manifest row is, or nobody.
+
+    HPID specification §4.1: the matching evidence is the normalised passport
+    number **and** the normalised nationality, together. Two things this used
+    to do and no longer does.
+
+    It matched on either field alone, joined by OR. A passport number is not
+    unique across issuing states, so two different people holding the same
+    number could match — and because the comparison was a bare equality, the
+    second one was indistinguishable from a repeat visit by the first.
+
+    It also matched on the legacy HPID. That identifier is derived from the
+    passport, so using it as a key made the public reference an identity
+    credential, which §4.1 forbids by name: "HPID is never the identity-
+    matching key". Nothing is lost by dropping it, because every HPID that
+    could have matched encodes the passport that still does.
+
+    Nationality rather than passport-issuing country is deliberate. The two are
+    not legally interchangeable and the specification is explicit that issuing
+    country must not be added in this release; the existing field is used,
+    normalised through the alias table so India, Indian and IN all reduce to
+    IN. A value the table cannot resolve -- IND, which is both India and
+    Indonesia -- returns nothing rather than a guess, and the row stays
+    unlinked for review. Refusing to link costs a person a PENDING card;
+    guessing wrong attaches them to a stranger's voyage.
+    """
+    passport = normalize_passport_number(manifest.passport_number)
+    nationality = normalize_nationality(manifest.nationality)
+    if not passport or not nationality:
         return None
-    matches = db.query(CrewProfile).filter(or_(*clauses)).limit(2).all()
+
+    # Passport narrows in SQL; nationality is compared in Python because the
+    # alias table has no SQL equivalent and the candidate set here is tiny.
+    candidates = (
+        db.query(CrewProfile)
+        .filter(
+            normalized_passport_expression(CrewProfile.passport_number) == passport
+        )
+        .limit(10)
+        .all()
+    )
+    matches = [
+        candidate
+        for candidate in candidates
+        if normalize_nationality(candidate.nationality) == nationality
+    ]
+    # Two matches is an identity conflict, not a tie to break.
     return matches[0] if len(matches) == 1 else None
+
+
+def _open_assignment_for_passport(
+    db: Session, *, vessel_call_id: int, passport_number
+) -> Optional[CrewAssignment]:
+    """An open assignment on this call for this passport, with no manifest row.
+
+    Restricted to rows that are not already tied to a manifest entry, so this
+    can only ever adopt a sign-on or self-selected row -- never steal another
+    manifest row's assignment.
+    """
+    passport = normalize_passport_number(passport_number)
+    if not passport:
+        return None
+    return (
+        db.query(CrewAssignment)
+        .filter(
+            CrewAssignment.vessel_call_id == vessel_call_id,
+            CrewAssignment.ended_at.is_(None),
+            CrewAssignment.vessel_crew_id.is_(None),
+            normalized_passport_expression(CrewAssignment.passport_number) == passport,
+        )
+        .order_by(CrewAssignment.id)
+        .first()
+    )
 
 
 def assignment_for_manifest(
@@ -183,7 +275,51 @@ def assignment_for_manifest(
     )
     if assignment is not None or not create:
         return assignment
+
+    # H20: the same person may already be on this call from a sign-on that
+    # preceded the manifest. That row has no vessel_crew_id, so the query
+    # above cannot see it, and creating a second would give one person two
+    # references for one call. Adopt it instead -- "resolve existing
+    # assignment; no duplicate HPID" (§8).
+    adopted = _open_assignment_for_passport(
+        db, vessel_call_id=call.id, passport_number=manifest.passport_number
+    )
+    if adopted is not None:
+        adopted.vessel_crew_id = manifest.id
+        if adopted.crew_profile_id is None:
+            resolved = profile or crew_profile_for_manifest(db, manifest)
+            if resolved is not None:
+                adopted.crew_profile_id = resolved.id
+        if manifest.shore_pass_eligible:
+            # The manifest is the agent's word on eligibility; a sign-on row
+            # carries none of its own.
+            adopted.shore_pass_eligible = True
+        db.flush()
+        return adopted
+
     profile = profile or crew_profile_for_manifest(db, manifest)
+
+    # One person, one call, one assignment -- §10. A manifest can name the
+    # same person twice: an older entry the agent never removed and the
+    # current one. The second must resolve to the first rather than mint a
+    # second reference, which the partial unique index would refuse anyway.
+    #
+    # The existing row keeps its own vessel_crew_id. Repointing it would
+    # rewrite which manifest entry the history was built from, to no benefit.
+    if profile is not None:
+        held = (
+            db.query(CrewAssignment)
+            .filter(
+                CrewAssignment.vessel_call_id == call.id,
+                CrewAssignment.crew_profile_id == profile.id,
+                CrewAssignment.ended_at.is_(None),
+            )
+            .order_by(CrewAssignment.id)
+            .first()
+        )
+        if held is not None:
+            return held
+
     assignment = CrewAssignment(
         vessel_call_id=call.id,
         crew_profile_id=profile.id if profile else None,
@@ -192,12 +328,94 @@ def assignment_for_manifest(
         rank=manifest.rank,
         nationality=manifest.nationality,
         hpid=manifest.hp_id,
+        # Issued per assignment, so the same person joining a later call is a
+        # different public reference. The legacy hpid above is copied from the
+        # manifest and still carries the passport; this replaces it.
+        public_ref=issue_assignment_ref(db),
         passport_number=manifest.passport_number,
         shore_pass_eligible=bool(manifest.shore_pass_eligible),
         started_at=manifest.created_at or call.started_at or _utcnow(),
     )
     db.add(assignment)
     db.flush()
+    return assignment
+
+
+def self_selected_assignment(
+    db: Session,
+    profile: Optional[CrewProfile],
+    call: Optional[VesselCall],
+) -> Optional[CrewAssignment]:
+    """The assignment a crew member gets on a vessel no agency runs — §9.
+
+    An unmanaged ("Other") vessel has no agent, no manifest and no
+    agent-issued eligibility, so nothing here ever created an assignment and
+    these bookings carried no call-specific reference at all. The
+    specification's target is one `SELF_SELECTED_UNMANAGED` assignment per
+    profile per call, reused by every later login and booking on that call,
+    and a fresh one -- with a fresh reference -- for the next call even when
+    the vessel and port are the same.
+
+    **It records self-selection and nothing more.** The source says so by
+    name, because this is not an agent confirming crew membership and not an
+    immigration clearance. Anything that treats an assignment as evidence of
+    either must check `assignment_source.is_agent_attested` first.
+
+    No active call means nothing is created: §9 is explicit that a missing
+    call must not be papered over with an invented booking context.
+    """
+    from app.services.assignment_source import SELF_SELECTED_UNMANAGED
+
+    if profile is None or call is None:
+        return None
+
+    existing = (
+        db.query(CrewAssignment)
+        .filter(
+            CrewAssignment.vessel_call_id == call.id,
+            CrewAssignment.crew_profile_id == profile.id,
+            CrewAssignment.ended_at.is_(None),
+        )
+        .first()
+    )
+    if existing is not None:
+        return existing
+
+    assignment = CrewAssignment(
+        vessel_call_id=call.id,
+        crew_profile_id=profile.id,
+        vessel_crew_id=None,
+        crew_name=profile.full_name or "",
+        rank=profile.rank,
+        nationality=profile.nationality,
+        # No manifest, so no legacy identifier to copy. The opaque reference
+        # is the only public one these ever have, which is the point.
+        hpid=None,
+        public_ref=issue_assignment_ref(db),
+        passport_number=profile.passport_number,
+        # An agency grants shore leave. There is no agency here, so this
+        # claims nothing about one.
+        shore_pass_eligible=False,
+        source=SELF_SELECTED_UNMANAGED,
+        started_at=call.started_at or _utcnow(),
+    )
+    db.add(assignment)
+    try:
+        with db.begin_nested():
+            db.flush()
+    except IntegrityError:
+        # Two devices selecting the same call at once. The partial unique
+        # index on (call, profile) refuses the second, and the row the first
+        # one wrote is the answer -- §11.2 requires exactly one.
+        return (
+            db.query(CrewAssignment)
+            .filter(
+                CrewAssignment.vessel_call_id == call.id,
+                CrewAssignment.crew_profile_id == profile.id,
+                CrewAssignment.ended_at.is_(None),
+            )
+            .first()
+        )
     return assignment
 
 

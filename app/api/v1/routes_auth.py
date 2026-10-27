@@ -1,5 +1,5 @@
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import (
@@ -157,11 +157,44 @@ def record_login(db: Session, *, role: str, email: str,
         logging.getLogger("app.auth").exception("could not record login event")
 
 
+def _check_credential(db: Session, row, password: str, hashed: str) -> bool:
+    """Verify a password under the shared attempt policy.
+
+    Returns True on success. Raises 429 when the account is locked or the
+    attempt is too soon after the last, and returns False for a wrong
+    password — which the caller turns into the same 401 an unknown email
+    gets, so a failure still says nothing about whether the account exists.
+
+    `row` is None for an unknown email. There is nothing to count against, and
+    inventing a record for every string anyone types is its own problem, so
+    those are simply not counted. The rate an attacker can enumerate addresses
+    is an infrastructure limit, not this one.
+    """
+    from app.services import attempt_limits
+
+    if row is None:
+        return False
+
+    now = datetime.now(timezone.utc)
+    attempt_limits.assert_attempt_allowed(row, now=now, fields=attempt_limits.AUTH)
+
+    if verify_password(password, hashed):
+        attempt_limits.record_success(row, fields=attempt_limits.AUTH)
+        db.commit()
+        return True
+
+    locked = attempt_limits.record_failure(row, now=now, fields=attempt_limits.AUTH)
+    db.commit()
+    if locked:
+        raise attempt_limits.locked_out_error()
+    return False
+
+
 @router.post("/login", response_model=AuthOut)
 def login(body: LoginIn, db: Session = Depends(get_db)):
     email = body.email.lower().strip()
     user = db.query(User).filter(User.email == email).first()
-    if not user or not verify_password(body.password, user.hashed_password):
+    if not _check_credential(db, user, body.password, user.hashed_password if user else ""):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = create_access_token(
@@ -189,7 +222,7 @@ def login_unified(body: LoginIn, db: Session = Depends(get_db)):
 
     # First, check the users table (crew, agent, aggregator, superadmin)
     user = db.query(User).filter(User.email == email).first()
-    if user and verify_password(body.password, user.hashed_password):
+    if _check_credential(db, user, body.password, user.hashed_password if user else ""):
         token = create_access_token(
             subject=user.email,
             expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
@@ -209,7 +242,7 @@ def login_unified(body: LoginIn, db: Session = Depends(get_db)):
 
     # If not in users table, check the drivers table
     driver = db.query(Driver).filter(Driver.email == email).first()
-    if driver and verify_password(body.password, driver.hashed_password):
+    if _check_credential(db, driver, body.password, driver.hashed_password if driver else ""):
         token = create_access_token(
             subject=driver.email,
             expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),

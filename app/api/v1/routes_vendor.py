@@ -28,7 +28,7 @@ async def create_vendor_profile(
     if existing:
         raise HTTPException(status_code=409, detail="Profile already exists")
 
-    logo_url = await save_upload(logo) if logo else None
+    logo_url = await save_upload(logo, public=True) if logo else None
 
     profile = VendorProfile(
         user_id=user.id,
@@ -58,10 +58,13 @@ async def upload_vendor_documents(
     if not profile:
         raise HTTPException(status_code=404, detail="Vendor profile not found")
 
-    if trade_license:       profile.trade_license_url = await save_upload(trade_license)
-    if gst_vat:             profile.gst_vat_url = await save_upload(gst_vat)
-    if bank_details:        profile.bank_details_url = await save_upload(bank_details)
-    if iso_certifications:  profile.iso_certifications_url = await save_upload(iso_certifications)
+    # Verification documents, not brand assets: a trade licence, a GST
+    # certificate and bank details identify a business and its money. These
+    # were public-read by default and under a guessable name on local disk.
+    if trade_license:       profile.trade_license_url = await save_upload(trade_license, public=False)
+    if gst_vat:             profile.gst_vat_url = await save_upload(gst_vat, public=False)
+    if bank_details:        profile.bank_details_url = await save_upload(bank_details, public=False)
+    if iso_certifications:  profile.iso_certifications_url = await save_upload(iso_certifications, public=False)
 
     if any([profile.trade_license_url, profile.gst_vat_url, profile.bank_details_url, profile.iso_certifications_url]):
         profile.verification_status = "under_review"
