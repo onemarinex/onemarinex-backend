@@ -96,6 +96,8 @@ No production database, staging target or deployment was used for this implement
 
 Use the isolation instructions in `company-operations.md`. Database tests and the browser fixture must run in separate phases because the HTTP fixtures reset synthetic tables.
 
+The welfare call participation list uses SQL paging. Complete period totals are calculated independently of that page. Management snapshots omit the duplicate display-page structure and retain their complete report call set.
+
 New tests cover administration, onboarding, event-time call scope, activity paging, structured survey privacy, country/provider filters, granular disclosure, preview/source races, expiry/revocation, frozen reports, shortened tenure and additive migrations. The connected browser fixture now supports all new route families, synthetic survey identities and a synthetic escalated case. Email stays in memory and external networking is blocked.
 
 The fixture is loopback-only: PostgreSQL `55957`, API `18080`, frontend `15173`. No public staging URL is created. Final counts and merge records are recorded in the task completion report after verification.

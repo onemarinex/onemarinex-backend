@@ -228,6 +228,8 @@ def prepare(db, company, body):
         payload["operations"] = operational(
             db, body.start, body.end, company.id, body.port_id, body.vessel_id
         )
+        for display_key in ("calls", "calls_total", "call_offset", "call_limit"):
+            payload["operations"].pop(display_key, None)
         payload["service_reviews"] = review_summary(
             db, body.start, body.end, company.id, body.port_id, body.vessel_id
         )

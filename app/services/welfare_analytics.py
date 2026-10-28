@@ -1,7 +1,7 @@
 """Operational participation and service reviews. No welfare score is inferred."""
 
 from datetime import timezone
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, case
 from fastapi import HTTPException
 from sqlalchemy.orm import selectinload
 from app.db.models.cab_booking import CabBooking, BookingStatus
@@ -34,7 +34,15 @@ def merged_minutes(intervals):
 
 
 def operational(
-    db, start, end, company_id=None, port_id=None, vessel_id=None, country_code=None
+    db,
+    start,
+    end,
+    company_id=None,
+    port_id=None,
+    vessel_id=None,
+    country_code=None,
+    call_offset=0,
+    call_limit=25,
 ):
     query = (
         db.query(CabBooking)
@@ -59,10 +67,34 @@ def operational(
             occurred_column=CabBooking.trip_started_at,
         )
     query = filter_country(query, VesselCall.port_id, country_code)
+    call_groups = query.with_entities(
+        VesselCall.id.label("call_id"),
+        VesselCall.vessel_id,
+        VesselCall.port_id,
+        VesselCall.vessel_name,
+        VesselCall.port_name,
+        func.sum(
+            case((CabBooking.num_passengers > 0, CabBooking.num_passengers), else_=0)
+        ).label("participation"),
+        func.count(CabBooking.id).label("rides"),
+    ).group_by(
+        VesselCall.id,
+        VesselCall.vessel_id,
+        VesselCall.port_id,
+        VesselCall.vessel_name,
+        VesselCall.port_name,
+        VesselCall.started_at,
+    )
+    call_total = call_groups.count()
+    displayed = (
+        call_groups.order_by(VesselCall.started_at.desc(), VesselCall.id.desc())
+        .offset(call_offset)
+        .limit(call_limit)
+        .all()
+    )
     query = query.options(
         selectinload(CabBooking.magic_link).selectinload(DriverMagicLink.reach_events)
     )
-    groups = {}
     seats = 0
     call_ids = set()
     spans = {}
@@ -73,21 +105,6 @@ def operational(
         volume = max(0, b.num_passengers or 0)
         seats += volume
         call_ids.add(call.id)
-        key = (call.port_id, call.vessel_id, call.id)
-        row = groups.setdefault(
-            key,
-            {
-                "call_id": call.id,
-                "vessel_id": call.vessel_id,
-                "port_id": call.port_id,
-                "vessel_name": call.vessel_name,
-                "port_name": call.port_name,
-                "participation": 0,
-                "rides": 0,
-            },
-        )
-        row["participation"] += volume
-        row["rides"] += 1
         link = b.magic_link
         if not link:
             continue
@@ -166,7 +183,10 @@ def operational(
         "facilities_visited": facilities,
         "welfare_service_bookings": None,
         "service_coverage": "No approved service-category mapping is recorded. Reached facilities are not completed service orders.",
-        "calls": list(groups.values()),
+        "calls": [dict(r._mapping) for r in displayed],
+        "calls_total": call_total,
+        "call_offset": call_offset,
+        "call_limit": call_limit,
     }
 
 

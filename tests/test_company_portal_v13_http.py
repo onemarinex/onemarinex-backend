@@ -612,3 +612,58 @@ class PortalAcceptanceHTTP(unittest.TestCase):
             "GET", "/api/v1/shipping-company/fleet/registry", self.admin
         ).json()
         self.assertEqual(data["items"][0]["imo_number"], self.vessel.imo_number)
+
+    def test_welfare_call_sql_pages_keep_full_period_totals(self):
+        for index in range(26):
+            if index == 0:
+                vessel, call = self.vessel, self.call
+            else:
+                vessel = fixture.Vessel(
+                    name=f"Page vessel {index}",
+                    imo_number=f"IMO-PAGE-{index}",
+                    vessel_type="Fixture",
+                    agent_id=self.agent.id,
+                )
+                self.db.add(vessel)
+                self.db.flush()
+                call = fixture.VesselCall(
+                    vessel_id=vessel.id,
+                    agency_id=self.agency.id,
+                    port_id=self.port.id,
+                    vessel_name=vessel.name,
+                    port_name=self.port.name,
+                    started_at=fixture.JAN,
+                )
+                self.db.add(call)
+                self.db.flush()
+                self.db.add(
+                    VesselRoleClaim(
+                        company_id=self.company.id,
+                        vessel_id=vessel.id,
+                        role="ISM_MANAGER",
+                        effective_start=fixture.JAN,
+                        status="APPROVED",
+                    )
+                )
+            self.booking(
+                vessel_id=vessel.id, vessel_call_id=call.id, trip_started_at=fixture.NOW
+            )
+        self.db.commit()
+        path = (
+            "/api/v1/shipping-company/welfare-intelligence/operations?" + self.period()
+        )
+        first = self.request(
+            "GET", path + "&call_offset=0&call_limit=25", self.admin
+        ).json()["operations"]
+        second = self.request(
+            "GET", path + "&call_offset=25&call_limit=25", self.admin
+        ).json()["operations"]
+        self.assertEqual((len(first["calls"]), len(second["calls"])), (25, 1))
+        self.assertEqual(first["calls_total"], 26)
+        self.assertEqual(second["calls_total"], 26)
+        self.assertEqual(first["crew_participation"], 78)
+        self.assertEqual(second["crew_participation"], 78)
+        self.assertFalse(
+            {c["call_id"] for c in first["calls"]}
+            & {c["call_id"] for c in second["calls"]}
+        )
