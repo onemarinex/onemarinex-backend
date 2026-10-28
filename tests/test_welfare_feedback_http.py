@@ -169,3 +169,20 @@ class WelfareHTTP(unittest.TestCase):
             ).json()["total"],
             1,
         )
+
+    def test_legacy_feedback_contract_and_invalid_message_validation(self):
+        from app.api.v1 import routes_crew
+
+        self.client.app.include_router(routes_crew.router, prefix="/api/v1/crew")
+        path = "/api/v1/crew/feedback"
+        result = self.request(
+            "POST",
+            path,
+            self.crew,
+            {"message": "Retain the original feedback response"},
+        ).json()
+        self.assertEqual(result, {"status": "success", "message": "Feedback received"})
+        self.request("POST", path, self.crew, {"message": "   "}, 422)
+        self.request("POST", path, self.crew, {"message": "X" * 5001}, 422)
+        self.assertEqual(self.db.query(WelfareFeedback).count(), 1)
+        self.assertEqual(self.db.query(Incident).count(), 0)
