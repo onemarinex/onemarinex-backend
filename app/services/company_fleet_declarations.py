@@ -217,8 +217,6 @@ def group_query(db, company_id):
     from sqlalchemy import String, cast
 
     group = func.concat(
-        func.coalesce(VesselRoleClaim.fleet_group, "legacy"),
-        "/",
         VesselRoleClaim.vessel_id,
         "/",
         cast(VesselRoleClaim.effective_start, String),
@@ -227,7 +225,7 @@ def group_query(db, company_id):
         "/",
         case((VesselRoleClaim.status.in_(OPEN), "open"), else_=VesselRoleClaim.status),
         "/",
-        func.coalesce(cast(VesselRoleClaim.revoked_at, String), "live"),
+        case((VesselRoleClaim.revoked_at.is_(None), "live"), else_="revoked"),
     )
     return (
         db.query(VesselRoleClaim).filter(VesselRoleClaim.company_id == company_id),

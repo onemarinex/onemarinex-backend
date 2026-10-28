@@ -33,6 +33,63 @@ class FleetAcceptanceHTTP(unittest.TestCase):
     booking = fixture.OperationsHTTP.booking
     period = portal_fixture.PortalAcceptanceHTTP.period
 
+    def test_voided_role_combination_stays_one_historical_row(self):
+        body = self.declaration()
+        body.update(commercial_manager=True)
+        entry = self.add(body)
+        self.request(
+            "POST",
+            BASE + f"/entries/{entry['id']}/change",
+            self.admin,
+            {
+                "action": "VOID",
+                "revision": entry["revision"],
+                "reason": "Both role declarations were added by mistake",
+            },
+        )
+        history = self.request(
+            "GET", BASE + "/entries?view=historical", self.admin
+        ).json()["items"]
+        self.assertEqual(len(history), 1)
+        self.assertTrue(history[0]["owner"])
+        self.assertTrue(history[0]["commercial_manager"])
+
+    def test_separately_added_roles_share_one_row_and_edit_as_one_combination(self):
+        first = self.add()
+        second_body = self.declaration()
+        second_body.update(owner=False, commercial_manager=True)
+        self.add(second_body)
+        rows = self.request("GET", BASE + "/entries", self.admin).json()["items"]
+        combined = next(r for r in rows if r["id"] == first["id"])
+        self.assertEqual(
+            len(rows), 2
+        )  # The original fixture's differently timed legacy period stays separate.
+        self.assertTrue(combined["owner"])
+        self.assertTrue(combined["commercial_manager"])
+        self.assertFalse(combined["ism_manager"])
+        self.assertNotEqual(combined["revision"], first["revision"])
+        result = self.request(
+            "POST",
+            BASE + f"/entries/{first['id']}/change",
+            self.admin,
+            {
+                "action": "ROLES",
+                "revision": combined["revision"],
+                "effective_date": "2026-07-01",
+                "owner": False,
+                "commercial_manager": True,
+                "ism_manager": False,
+                "reason": "Owner ends and commercial management continues at handover",
+            },
+        ).json()
+        self.assertEqual(set(result["entry"]["accepted_roles"]), {"COMMERCIAL_MANAGER"})
+        historical = self.request(
+            "GET", BASE + "/entries?view=historical", self.admin
+        ).json()["items"]
+        self.assertEqual(len(historical), 1)
+        self.assertTrue(historical[0]["owner"])
+        self.assertTrue(historical[0]["commercial_manager"])
+
     def setUp(self):
         portal_fixture.PortalAcceptanceHTTP.setUp(self)
         self.vessel.imo_number = number(0)
