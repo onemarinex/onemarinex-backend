@@ -498,7 +498,7 @@ def operational_passes_approved(db, *, company_id, period=None):
 COMPUTABLE_FIGURES["passes_approved"] = operational_passes_approved
 
 
-def _ashore_snapshot(db, company_id, period=None):
+def _ashore_snapshot(db, company_id, period=None, *, vessel_call_id=None):
     """Snapshot only within a continuous approved tenure covering the instant.
 
     A claim gap must never let a historic pickup follow a returning company.
@@ -586,6 +586,8 @@ def _ashore_snapshot(db, company_id, period=None):
             )
         )
     )
+    if vessel_call_id is not None:
+        query = query.filter(CabBooking.vessel_call_id == vessel_call_id)
     seats = uncertain = 0
     for booking in query.yield_per(500):
         start, _ = windows[booking.vessel_id]

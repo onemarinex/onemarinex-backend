@@ -1427,3 +1427,26 @@ app.include_router(
 from app.services.collection_pages import collection_paging
 
 app.middleware("http")(collection_paging)
+
+from app.api.v1 import routes_company_intelligence
+app.include_router(routes_company_intelligence.router, prefix="/api/v1/shipping-company/intelligence", tags=["company-intelligence"])
+from app.api.v1 import routes_company_administration
+app.include_router(routes_company_administration.router, prefix='/api/v1/shipping-company/administration', tags=['company-administration'])
+from app.api.v1 import routes_company_onboarding
+app.include_router(routes_company_onboarding.router, prefix='/api/v1/superadmin/company-onboarding', tags=['company-onboarding'])
+from app.api.v1 import routes_welfare
+app.include_router(routes_welfare.crew_router, prefix='/api/v1/crew', tags=['crew-welfare'])
+app.include_router(routes_welfare.company_router, prefix='/api/v1/shipping-company/welfare-intelligence', tags=['company-welfare'])
+app.include_router(routes_welfare.admin_router, prefix='/api/v1/superadmin/welfare-intelligence', tags=['welfare-intelligence'])
+from app.api.v1 import routes_company_disclosure
+app.include_router(routes_company_disclosure.company_router, prefix='/api/v1/shipping-company', tags=['company-disclosure'])
+app.include_router(routes_company_disclosure.admin_router, prefix='/api/v1/superadmin', tags=['company-disclosure-review'])
+from app.api.v1 import routes_company_reports
+app.include_router(routes_company_reports.router, prefix='/api/v1/shipping-company/report-centre', tags=['company-reports'])
+
+from app.api.v1 import routes_company_fleet
+app.include_router(routes_company_fleet.router, prefix="/api/v1/shipping-company/fleet", tags=["Company fleet"])
+app.include_router(routes_company_fleet.admin_router, prefix="/api/v1/superadmin", tags=["Fleet change review"])
+
+from app.services.company_private_responses import company_private_responses
+app.middleware("http")(company_private_responses)
