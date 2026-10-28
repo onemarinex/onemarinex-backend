@@ -1476,47 +1476,9 @@ def submit_feedback(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Store user feedback and log it.
-    """
-    print(f"[FEEDBACK] From: {current_user.email}, Message: {body.message}")
-    
-    # Optionally store in DB
-    from app.db.models.incident import Incident
-    incident_id = f"INC-{uuid.uuid4().hex[:6].upper()}"
-    crew = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
-    from app.services.historical_context import event_context
-
-    historical = event_context(db, profile=crew)
-    feedback_incident = Incident(
-        incident_id=incident_id,
-        type=IncidentType.CREW,
-        title="Crew Feedback",
-        description=body.message,
-        status=IncidentStatus.ACTIVE,
-        reporter_name=current_user.name,
-        reporter_role=crew.rank if crew else "Crew",
-        reporter_id=crew.hpid or crew.passport_number if crew else None,
-        port_name=crew.current_port if crew else None,
-        vessel_id=historical["vessel_id"],
-        vessel_call_id=(
-            historical["vessel_call"].id if historical["vessel_call"] else None
-        ),
-        agency_id=historical["agency_id"],
-        crew_profile_id=crew.id if crew else None,
-        crew_assignment_id=historical["crew_assignment_id"],
-        port_id=historical["port_id"],
-        context_resolution=historical["context_resolution"],
-    )
-    db.add(feedback_incident)
-    
-    try:
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        # Non-critical failure
-        
-    return {"status": "success", "message": "Feedback received"}
+    """Retain the general feedback API without creating a safety incident."""
+    from app.api.v1.routes_welfare import SurveyIn, submit
+    return submit(SurveyIn(message=body.message), db=db, actor=current_user)
 
 class GenerateShorePassIn(BaseModel):
     crew_assignment_id: Optional[int] = Field(default=None, gt=0)

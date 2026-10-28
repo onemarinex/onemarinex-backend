@@ -68,3 +68,9 @@ from app.db.models.data_deletion import DataDeletionRequest  # noqa: F401
 
 from app.db.models import company_invitation  # noqa: F401
 from app.db.models import agency_transfer  # noqa: F401
+from app.db.models import company_profile  # noqa: F401
+from app.db.models import welfare_feedback  # noqa: F401
+from app.db.models import company_disclosure  # noqa: F401
+
+from app.db.models import port_geography  # noqa: F401
+from app.db.models import company_fleet_change  # noqa: F401

@@ -179,6 +179,8 @@ class OperationsHTTP(unittest.TestCase):
         )
         self.db.commit()
         app = FastAPI()
+        from app.services.company_private_responses import company_private_responses
+        app.middleware("http")(company_private_responses)
         app.middleware("http")(collection_paging)
         for router, prefix in [
             (routes_shipping_company.router, "/api/v1/shipping-company"),
@@ -818,7 +820,8 @@ class OperationsHTTP(unittest.TestCase):
         self.assertEqual(figures["returned_seats"]["value"], 4)
         self.assertIn("not unique crew", figures["booked_seats"]["caveat"])
         self.assertEqual(figures["booked_seats"]["suppression_threshold"], 0)
-        self.assertEqual(figures["sos_raised"]["suppression_threshold"], 5)
+        self.assertNotIn("sos_raised", figures)
+        self.assertNotIn("incidents_raised", figures)
         for f in figures.values():
             self.assertTrue(f["source_version"])
             self.assertTrue(f["event_time"])
@@ -987,10 +990,7 @@ class OperationsHTTP(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("operations_migration", path)
         migration = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(migration)
-        self.assertEqual(
-            ScriptDirectory.from_config(Config("alembic.ini")).get_heads(),
-            [migration.revision],
-        )
+        self.assertEqual(len(ScriptDirectory.from_config(Config("alembic.ini")).get_heads()), 1)
         before = self.db.execute(
             text("SELECT id, email, hashed_password FROM users ORDER BY id")
         ).all()

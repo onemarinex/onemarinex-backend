@@ -1372,19 +1372,7 @@ def shore_leave_report(
             continue
         spans.setdefault(person, []).append((start, end))
 
-    def _merged_minutes(intervals) -> float:
-        total = 0.0
-        current_start, current_end = None, None
-        for start, end in sorted(intervals):
-            if current_end is not None and start <= current_end:
-                current_end = max(current_end, end)
-                continue
-            if current_end is not None:
-                total += (current_end - current_start).total_seconds()
-            current_start, current_end = start, end
-        if current_end is not None:
-            total += (current_end - current_start).total_seconds()
-        return total / 60
+    from app.services.welfare_analytics import merged_minutes as _merged_minutes
 
     person_minutes = [
         _merged_minutes(intervals)

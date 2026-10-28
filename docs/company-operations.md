@@ -1,3 +1,5 @@
+> Update, 28 October 2026: [The v13/v9 extension](company-portal-v13-v9.md) describes the revised portal, disclosure, welfare, report and schema contracts. The text below records the earlier operational release.
+
 # Company operations completion contract — 27 October 2026
 
 This release implements the selected gaps in the consolidated completion review. It does not certify a deployment or silently repair old production data.

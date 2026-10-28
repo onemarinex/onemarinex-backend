@@ -245,7 +245,7 @@ class DataSectionTests(CompanyApiTests):
             ("overview", 1),
             ("crew_shore_leave", 5),
             ("crew_movements", 9),
-            ("safety_and_incident_oversight", 3),
+            ("safety_and_incident_oversight", 0),
             ("welfare_intelligence", 1),
         ):
             with self.subTest(section=name):
@@ -266,10 +266,10 @@ class DataSectionTests(CompanyApiTests):
         self.assertTrue(keys["sign_on_off"].available)
         self.assertEqual(keys["sign_on_off"].display, "0")
 
-    def test_a_labelled_figure_is_flagged_for_the_renderer(self):
-        keys = {f.key: f for f in self._section("safety_and_incident_oversight").figures}
-        self.assertTrue(keys["incidents_reported"].needs_caveat)
-        self.assertFalse(keys["sos_raised"].needs_caveat)
+    def test_unescalated_safety_counts_are_not_disclosed(self):
+        section = self._section("safety_and_incident_oversight")
+        self.assertEqual(section.figures, [])
+        self.assertTrue(section.nothing_to_show)
 
     def test_every_figure_carries_a_caveat(self):
         for section in ("overview", "crew_movements", "safety_and_incident_oversight"):

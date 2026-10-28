@@ -26,3 +26,8 @@ anthropic==0.120.2
 
 # Crew manifest upload (Excel workbooks)
 openpyxl==3.1.5
+
+# Tenant logo validation and metadata stripping
+Pillow>=11.3.0,<12
+# Text-based, paginated company management reports
+reportlab==4.4.3

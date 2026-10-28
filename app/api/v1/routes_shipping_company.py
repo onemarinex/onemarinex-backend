@@ -300,6 +300,9 @@ def _section(
 ) -> SectionOut:
     from datetime import datetime, timezone
 
+    if section == "safety_and_incident_oversight":
+        # v13: only explicit recipient-specific case escalations are visible.
+        return SectionOut(section=section, figures=[], nothing_to_show=True)
     figures: List[FigureOut] = []
     ashore_snapshot = None
     for definition in metrics_for(section):
