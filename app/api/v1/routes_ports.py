@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -147,7 +148,11 @@ def port_quality_report(
 @router.get("/", response_model=List[PortOut])
 def get_ports(db: Session = Depends(get_db)):
     """Get list of active ports"""
-    ports = db.query(Port).filter(Port.is_active == True).all()
+    ports = page_all(
+        db.query(Port).filter(Port.is_active == True),
+        collection="routes_ports.get_ports.0",
+        label="Ports",
+    )
     return ports
 
 def _visible_rules(

@@ -50,7 +50,6 @@ def normalized_passport_expression(column):
     return func.replace(func.upper(func.trim(column)), " ", "")
 
 
-
 # --- HPID shape -------------------------------------------------------------
 #
 # The HPID is HP-{passport}-{NAT}-{PORT}, and it is **not** permanent. A crew
@@ -351,6 +350,8 @@ def identity_fingerprint(proposed_identity: dict) -> str:
             proposed_identity.get("passport_number")
         ),
     }
+    if "assignment_id" in proposed_identity:
+        payload["assignment_id"] = proposed_identity["assignment_id"]
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 

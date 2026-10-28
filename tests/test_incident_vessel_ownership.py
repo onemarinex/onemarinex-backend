@@ -24,6 +24,7 @@ from app.db.models.user import User
 from app.db.models.vessel import Vessel
 from app.db.models.vessel_crew import VesselCrew
 from app.db.session import engine
+from tests.context_fixtures import immutable_call
 
 
 def _uniq(prefix):
@@ -58,12 +59,21 @@ class IncidentVesselOwnershipTests(unittest.TestCase):
         self.db.add(self.crew_row)
 
         self.incident = Incident(
-            incident_id=_uniq("INC"), type=IncidentType.CREW,
-            title="Late pickup", description="Cab was late.",
-            status=IncidentStatus.ACTIVE, category="driver_vehicle",
-            sub_category="late_pickup", severity="medium",
-            reporter_name="Yogesh Kothavale", reporter_id=self.hpid,
-            vessel_id=self.vessel.id, agency_id=self.agent_profile.id,
+            incident_id=_uniq("INC"),
+            type=IncidentType.CREW,
+            title="Late pickup",
+            description="Cab was late.",
+            status=IncidentStatus.ACTIVE,
+            category="driver_vehicle",
+            sub_category="late_pickup",
+            severity="medium",
+            reporter_name="Yogesh Kothavale",
+            reporter_id=self.hpid,
+            vessel_id=self.vessel.id,
+            agency_id=self.agent_profile.id,
+            vessel_call_id=immutable_call(
+                self.db, self.vessel, self.agent_profile.id
+            ).id,
             context_resolution="vessel_id",
         )
         self.db.add(self.incident)

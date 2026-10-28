@@ -35,6 +35,7 @@ from app.db.models.shipping_company import (
     CompanyUserMembership, ShippingCompany, VesselRoleClaim,
 )
 from app.db.models.user import User
+from app.db.models.vessel_call import VesselCall
 from app.db.models.vessel import Vessel
 from app.db.session import engine
 
@@ -103,12 +104,34 @@ class CompanyReportTests(unittest.TestCase):
         self.connection.close()
 
     def _booking(self, when):
+        call = self.db.query(VesselCall).filter_by(vessel_id=self.vessel.id).first()
+        if call is None:
+            call = VesselCall(
+                vessel_id=self.vessel.id,
+                vessel_name=self.vessel.name,
+                agency_name="Other",
+                started_at=YEAR_START,
+            )
+            self.db.add(call)
+            self.db.flush()
         booking = CabBooking(
-            booking_id=_uniq("CAB"), crew_id=self.crew.id, vessel_id=self.vessel.id,
-            pickup_address="Gate", pickup_lat=0, pickup_lng=0,
-            drop_address="City", drop_lat=0, drop_lng=0,
-            vehicle_type=VehicleType.AC, vehicle_name="Sedan", estimated_price=100,
-            distance_km=5, status=BookingStatus.COMPLETED, created_at=when,
+            vessel_call_id=call.id,
+            context_resolution="CONFIRMED_UNMANAGED",
+            booking_id=_uniq("CAB"),
+            crew_id=self.crew.id,
+            vessel_id=self.vessel.id,
+            pickup_address="Gate",
+            pickup_lat=0,
+            pickup_lng=0,
+            drop_address="City",
+            drop_lat=0,
+            drop_lng=0,
+            vehicle_type=VehicleType.AC,
+            vehicle_name="Sedan",
+            estimated_price=100,
+            distance_km=5,
+            status=BookingStatus.COMPLETED,
+            created_at=when,
         )
         self.db.add(booking)
         self.db.flush()

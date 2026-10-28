@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 import io
 import uuid
 
@@ -283,7 +284,7 @@ def get_dashboard_data(
 ):
     if current_user.role != "agent":
         raise HTTPException(status_code=403, detail="Only agents can access dashboard data")
-    
+
     # Resolve lifecycle from backend time before any status-based query.
     from app.services.vessel_lifecycle import (
         belongs_to_call,
@@ -300,15 +301,15 @@ def get_dashboard_data(
     total_vessels = vessels_query.filter(
         Vessel.status.in_(["Active", "Departing"])
     ).count()
-    
+
     # Vessels this week (simple approach: created in last 7 days)
     from datetime import timedelta
     seven_days_ago = datetime.utcnow() - timedelta(days=7)
     vessels_this_week = vessels_query.filter(Vessel.created_at >= seven_days_ago).count()
-    
+
     # Active Vessels (Active + Departing — still in port)
     active_vessels_list = vessels_query.filter(Vessel.status.in_(["Active", "Departing"])).limit(5).all()
-    
+
     # Every tile below is limited to this agent's own ships. Anything unscoped
     # reports the whole platform's activity, which is what made Crew Ashore and
     # Active Trips show the same number for every agent.
@@ -317,22 +318,10 @@ def get_dashboard_data(
         AgentProfile.user_id == current_user.id
     ).scalar()
 
-    def _current_event_scope(model, *, legacy_identity_clause=None):
-        """Prefer immutable event ownership; isolate legacy identity fallback."""
-        clauses = []
-        if agency_profile_id is not None and vessel_ids:
-            clauses.append(and_(
-                model.agency_id == agency_profile_id,
-                model.vessel_id.in_(vessel_ids),
-            ))
-        legacy = [model.agency_id.is_(None)]
-        if vessel_ids:
-            legacy.append(model.vessel_id.in_(vessel_ids))
-        if legacy_identity_clause is not None:
-            legacy.append(and_(model.vessel_id.is_(None), legacy_identity_clause))
-        if len(legacy) > 1:
-            clauses.append(and_(legacy[0], or_(*legacy[1:])))
-        return or_(*clauses) if clauses else None
+    def _current_event_scope(model, *args, **kwargs):
+        from app.services.event_origin import agency_scope
+
+        return agency_scope(model, agency_profile_id)
 
     # Crew ashore: they have actually left the ship and not come back.
     #
@@ -577,7 +566,7 @@ def get_shore_pass_requests(
 ):
     if current_user.role != "agent":
         raise HTTPException(status_code=403, detail="Only agents can access shore pass requests")
-    
+
     # Scoped to the agent's own vessels. Filtering by port showed — and let the
     # agent act on — shore passes belonging to every other agency berthed at
     # the same port.
@@ -585,9 +574,13 @@ def get_shore_pass_requests(
     if not crew_profile_ids:
         return []
 
-    requests = db.query(ShorePass).filter(
-        ShorePass.crew_profile_id.in_(crew_profile_ids)
-    ).order_by(ShorePass.created_at.desc()).all()
+    requests = page_all(
+        db.query(ShorePass)
+        .filter(ShorePass.crew_profile_id.in_(crew_profile_ids))
+        .order_by(ShorePass.created_at.desc()),
+        collection="routes_agents.get_shore_pass_requests.0",
+        label="Shore pass requests",
+    )
 
     return requests
 
@@ -792,43 +785,9 @@ def get_agent_bookings(
     )
     query = query.outerjoin(Driver, CabBooking.assigned_driver_id == Driver.id)
 
-    ownership = []
-    if agency_profile_id is not None:
-        ownership.append(CabBooking.agency_id == agency_profile_id)
+    from app.services.event_origin import agency_scope
 
-    # The legacy arm, aligned with `_agent_may_view_booking`, which is the
-    # rule the audit already examined under R04.
-    #
-    # This list used to ask only "is the agency null and is this crew member on
-    # one of my current manifests", with no condition on the booking's own
-    # vessel. So a booking for a ship this agency has never operated appeared
-    # here -- including its ride OTP -- while opening that same booking by id
-    # was refused, because the detail check requires the stored vessel to be
-    # one of theirs. Narrowing the list to the detail rule removes the
-    # inconsistency without removing the fallback, which the audit says must
-    # not happen before its impact is measured.
-    agent_vessel_ids = [
-        row[0] for row in db.query(Vessel.id).filter(Vessel.agent_id == current_user.id).all()
-    ]
-    legacy_alternatives = []
-    if agent_vessel_ids:
-        legacy_alternatives.append(CabBooking.vessel_id.in_(agent_vessel_ids))
-    if crew_profile_ids:
-        # Only where the booking records no vessel of its own; a booking that
-        # names someone else's ship is not theirs because the passenger is.
-        legacy_alternatives.append(and_(
-            CabBooking.vessel_id.is_(None),
-            CabBooking.crew_id.in_(crew_profile_ids),
-        ))
-    if legacy_alternatives:
-        ownership.append(and_(
-            CabBooking.agency_id.is_(None),
-            or_(*legacy_alternatives),
-        ))
-
-    if not ownership:
-        return []
-    query = query.filter(or_(*ownership))
+    query = query.filter(agency_scope(CabBooking, agency_profile_id))
 
     if status_filter:
         query = query.filter(cast(CabBooking.status, String) == status_filter.lower())
@@ -839,7 +798,11 @@ def get_agent_bookings(
     if date_to:
         query = query.filter(CabBooking.created_at <= date_to)
 
-    bookings = query.order_by(CabBooking.created_at.desc(), CabBooking.id.desc()).all()
+    bookings = page_all(
+        query.order_by(CabBooking.created_at.desc(), CabBooking.id.desc()),
+        collection="routes_agents.get_agent_bookings.0",
+        label="Agent bookings",
+    )
 
     response: List[Dict[str, Any]] = []
     for booking in bookings:
@@ -1205,11 +1168,18 @@ def shore_leave_report(
     # Shore passes predate vessel-call ownership. Use them only for the current
     # call; historical reports must not guess which concurrent assignment a
     # profile-level pass belonged to.
-    passes = db.query(ShorePass).filter(
-        ShorePass.crew_profile_id.in_(crew_profile_ids),
-        ShorePass.out_time >= day_start,
-        ShorePass.out_time < day_end,
-    ).all() if crew_profile_ids and call.ended_at is None else []
+    passes = (
+        db.query(ShorePass)
+        .filter(
+            ShorePass.crew_profile_id.in_(crew_profile_ids),
+            ShorePass.vessel_call_id == call.id,
+            ShorePass.out_time >= day_start,
+            ShorePass.out_time < day_end,
+        )
+        .all()
+        if crew_profile_ids and call.ended_at is None
+        else []
+    )
 
     # A trip belongs to the day it ran. That is what a shore pass's out_time
     # already means, and anchoring trips on created_at instead disagreed with
@@ -1220,26 +1190,33 @@ def shore_leave_report(
     # A trip that never started put nobody ashore and has no running time, so
     # it stays on the day it was booked rather than disappearing from the count.
     trip_start = func.coalesce(CabBooking.trip_started_at, CabBooking.started_at)
-    booking_scope = [CabBooking.vessel_call_id == call.id]
-    if not strict_call_scope:
-        booking_scope.append(CabBooking.vessel_id == vessel.id)
-        if crew_profile_ids:
-            booking_scope.append(and_(
-                CabBooking.vessel_call_id.is_(None),
-                CabBooking.vessel_id.is_(None),
-                CabBooking.crew_id.in_(crew_profile_ids),
-            ))
-    day_trips = db.query(CabBooking).filter(
-        or_(*booking_scope),
-        or_(
-            and_(trip_start.isnot(None), trip_start >= day_start, trip_start < day_end),
-            and_(
-                trip_start.is_(None),
-                CabBooking.created_at >= day_start,
-                CabBooking.created_at < day_end,
+    from app.services.event_origin import agency_scope
+
+    booking_scope = [
+        and_(
+            CabBooking.vessel_call_id == call.id,
+            agency_scope(CabBooking, agent_profile.id),
+        )
+    ]
+    day_trips = (
+        db.query(CabBooking)
+        .filter(
+            or_(*booking_scope),
+            or_(
+                and_(
+                    trip_start.isnot(None),
+                    trip_start >= day_start,
+                    trip_start < day_end,
+                ),
+                and_(
+                    trip_start.is_(None),
+                    CabBooking.created_at >= day_start,
+                    CabBooking.created_at < day_end,
+                ),
             ),
-        ),
-    ).all()
+        )
+        .all()
+    )
 
     assignment_ids = {t.crew_assignment_id for t in day_trips if t.crew_assignment_id}
     assignments = {
@@ -1440,7 +1417,6 @@ def shore_leave_report(
         Incident.created_at >= day_start,
         Incident.created_at < day_end,
     ).all()
-
 
     from app.services import incident_taxonomy as tax
 

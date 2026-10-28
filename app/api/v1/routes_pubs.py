@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 import os
 import qrcode
 import io
@@ -95,7 +96,11 @@ def get_pubs(
     query = db.query(Vendors).filter(vendor_category_text().ilike("pub"), Vendors.status == "Active")
     if port_id:
         query = query.filter(Vendors.port_id == port_id)
-    vendors = apply_vendor_commission_ranking(query).all()
+    vendors = page_all(
+        apply_vendor_commission_ranking(query),
+        collection="routes_pubs.get_pubs.0",
+        label="Pubs",
+    )
     results = []
     for v in vendors:
         other = v.other_information or {}

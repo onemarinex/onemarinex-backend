@@ -41,6 +41,7 @@ from app.db.models.user import User
 from app.db.models.vessel import Vessel
 from app.db.models.vessel_crew import VesselCrew
 from app.db.session import engine
+from tests.context_fixtures import immutable_call
 
 
 def _uniq(prefix):
@@ -86,12 +87,20 @@ class IncidentDetailScopingTests(unittest.TestCase):
 
         created = datetime.utcnow() - timedelta(hours=3)
         incident = Incident(
-            incident_id=_uniq("INC"), type=IncidentType.CREW,
-            title="Lost wallet", description="Wallet left in the cab.",
+            incident_id=_uniq("INC"),
+            type=IncidentType.CREW,
+            title="Lost wallet",
+            description="Wallet left in the cab.",
             status=IncidentStatus.RESOLVED if resolved else IncidentStatus.ACTIVE,
-            category="general_support", sub_category="lost_property", severity="low",
-            reporter_name="Rahul Menon", reporter_id=hpid, vessel_id=vessel.id,
-            agency_id=agent_profile.id, context_resolution="vessel_id",
+            category="general_support",
+            sub_category="lost_property",
+            severity="low",
+            reporter_name="Rahul Menon",
+            reporter_id=hpid,
+            vessel_id=vessel.id,
+            agency_id=agent_profile.id,
+            vessel_call_id=immutable_call(self.db, vessel, agent_profile.id).id,
+            context_resolution="CONFIRMED_AGENCY",
             created_at=created,
             resolved_at=created + timedelta(hours=1) if resolved else None,
         )
@@ -267,7 +276,8 @@ class IncidentDetailScopingTests(unittest.TestCase):
             vessel=self.incident_a.vessel.name,
             vessel_id=self.incident_a.vessel_id,
             agency_id=self.incident_a.agency_id,
-            context_resolution="vessel_id",
+            vessel_call_id=self.incident_a.vessel_call_id,
+            context_resolution="CONFIRMED_AGENCY",
             status="ACTIVE",
             lat=17.7019,
             lng=83.2897,

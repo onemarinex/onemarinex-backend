@@ -1,54 +1,10 @@
-"""A ceiling on how many rows one response can carry.
+"""Bound public result pages without changing array response contracts.
 
-The read-only audit: "no shared pagination/rate-limit policy for all reviewed
-identity/report endpoints was established. Several list paths end in unbounded
-`.all()`."
-
-This is the ceiling half. It is **not** pagination, and saying so matters:
-pagination is a product change — the screen needs pages, the caller needs a
-cursor, and 117 list endpoints would each need a decision. A ceiling is a
-safety limit that needs none of that. It stops one query from trying to
-materialise an entire table into memory and into a JSON response, which is the
-failure the audit is pointing at.
-
-Two rules make it safe to apply without auditing every screen:
-
-  - the ceiling is far above anything the system holds today, so no caller's
-    behaviour changes now. It is there for the table that grows by a factor of
-    a thousand, not for next week;
-  - when it *is* hit, the response says so in its headers rather than quietly
-    returning a prefix. A truncated list that looks complete is worse than a
-    slow one, because the reader draws conclusions from it.
-
-The shape of the response is unchanged — still a bare array — so no caller
-needs updating. A caller that wants more passes `?limit=`.
-
-Deliberately not applied to queries that feed internal logic. A cleanup loop
-or an aggregate that silently processed the first N rows would be a
-correctness bug wearing a safety limit's clothes.
-
-Three places this must not be used, each found by classifying the rest of the
-application's list queries rather than by reasoning about it here:
-
-  **An oldest-first list.** A ceiling keeps the rows it reaches first, so on
-  `ORDER BY id` it keeps the oldest and drops the newest -- the opposite of
-  what anyone wants from a truncated audit trail. `company_review`'s audit
-  events are ordered that way. Order newest-first before capping, or do not
-  cap.
-
-  **A list with no ORDER BY at all.** The ceiling then returns whichever rows
-  the database happened to produce, which is not an answer. `/incidents/` was
-  in this state and was ordered as part of capping it.
-
-  **A list nested inside another object.** These headers describe one
-  response. A claim that carries its conflicting claim ids inside it cannot
-  say *which* nested list was cut, so truncating one tells the reader nothing
-  about what they are missing. Paginate the parent or expand the child on
-  demand instead.
-
-And one that is not about correctness: a count beside a list must be computed
-over the whole query, not over the capped rows, or the page reports that it is
-showing 2,000 of 2,000.
+HTTP requests default to 100 rows. collection/collection_offset/collection_limit
+select subsequent SQL pages; X-Collection-Pages exposes navigation metadata.
+Legacy X-Result-* headers remain available. Direct internal callers retain the
+2,000-row default. Never use display pagination for authorization, validation,
+updates or totals; those queries must remain complete.
 """
 
 from __future__ import annotations
@@ -92,6 +48,21 @@ def apply_headers(response: Response, rows: list, truncated: bool, ceiling: int)
 
 def capped_response(response: Response, query, *, limit: Optional[int] = None) -> list:
     """The common case: cap, label the response, return the rows."""
-    rows, truncated, ceiling = capped(query, limit=limit)
+    from app.services.collection_pages import (
+        options,
+        note,
+        result_collection,
+        existing_offset,
+        is_selected,
+    )
+
+    collection, label = result_collection()
+    offset, page_size = options(collection)
+    if not is_selected(collection):
+        offset = existing_offset(query)
+    ceiling = min(resolve_limit(limit), page_size)
+    rows = query.offset(offset).limit(ceiling + 1).all()
+    truncated = len(rows) > ceiling
+    rows = note(collection, rows, offset, ceiling, label=label)
     apply_headers(response, rows, truncated, ceiling)
     return rows

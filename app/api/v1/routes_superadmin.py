@@ -1,4 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, Response, status, Form, File, UploadFile
+from app.services.collection_pages import page_all
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Response,
+    status,
+    Form,
+    File,
+    UploadFile,
+)
 from fastapi.encoders import jsonable_encoder
 import os
 import shutil
@@ -147,7 +157,6 @@ class VendorUpdate(BaseModel):
     commission_percentage: Optional[float] = Field(default=None, ge=0, le=100)
 
 
-
 class VendorOut(BaseModel):
     id: int
     name: str
@@ -227,7 +236,7 @@ class IdentityConflictResolutionIn(BaseModel):
         if len(normalized) < 10:
             raise ValueError("reason must be at least 10 non-whitespace characters")
         return normalized
-    
+
 # --- Helpers ---
 
 def verify_superadmin(current_user: User):
@@ -304,9 +313,19 @@ def _identity_conflict_payload(db: Session, row, *, include_audit: bool = False)
         audits = (
             db.query(CrewIdentityConflictAudit)
             .filter(CrewIdentityConflictAudit.conflict_id == row.id)
-            .order_by(CrewIdentityConflictAudit.created_at, CrewIdentityConflictAudit.id)
+            .order_by(
+                CrewIdentityConflictAudit.created_at.desc(),
+                CrewIdentityConflictAudit.id.desc(),
+            )
+            .limit(20)
             .all()
         )
+        payload["audit_total"] = (
+            db.query(CrewIdentityConflictAudit)
+            .filter(CrewIdentityConflictAudit.conflict_id == row.id)
+            .count()
+        )
+        payload["audits_truncated"] = payload["audit_total"] > 20
         payload["audits"] = [
             {
                 "id": audit.id,
@@ -533,8 +552,11 @@ db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if port_id:
         query = query.filter(Restaurant.port_id == port_id)
     if search is not None:
-        query = query.filter(Restaurant.name.ilike(f"%{search}%"))    
-    return query.all()
+        query = query.filter(Restaurant.name.ilike(f"%{search}%"))
+    return page_all(
+        query, collection="routes_superadmin.list_restaurants.0", label="Restaurants"
+    )
+
 
 @router.post("/restaurants")
 def create_restaurant(body: RestaurantCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -578,8 +600,9 @@ def list_hotels(port_id: Optional[int] = None,search : Optional[str]=None, db: S
     if port_id:
         query = query.filter(Hotel.port_id == port_id)
     if search is not None:
-        query = query.filter(Hotel.name.ilike(f"%{search}%")) 
-    return query.all()
+        query = query.filter(Hotel.name.ilike(f"%{search}%"))
+    return page_all(query, collection="routes_superadmin.list_hotels.0", label="Hotels")
+
 
 @router.post("/hotels")
 def create_hotel(body: HotelCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -619,7 +642,8 @@ def list_pubs(port_id: Optional[int] = None, search : Optional[str]=None ,db: Se
     if search is not None:
         query = query.filter(Pub.name.ilike(f"%{search}%")) 
 
-    return query.all()
+    return page_all(query, collection="routes_superadmin.list_pubs.0", label="Pubs")
+
 
 @router.post("/pubs")
 def create_pub(body: PubCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -661,8 +685,11 @@ def list_sightseeing(port_id: Optional[int] = None, search : Optional[str]=None,
         query = query.filter(Sightseeing.port_id == port_id)
     if search is not None:
         query = query.filter(Sightseeing.name.ilike(f"%{search}%"))
-    
-    return query.all()
+
+    return page_all(
+        query, collection="routes_superadmin.list_sightseeing.0", label="Sightseeing"
+    )
+
 
 @router.post("/sightseeing")
 def create_sightseeing(body: SightseeingCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -805,7 +832,11 @@ def track_cab_bookings(
     if date_to:
         query = query.filter(CabBooking.created_at <= date_to)
 
-    bookings = query.order_by(CabBooking.created_at.desc(), CabBooking.id.desc()).all()
+    bookings = page_all(
+        query.order_by(CabBooking.created_at.desc(), CabBooking.id.desc()),
+        collection="routes_superadmin.track_cab_bookings.0",
+        label="Cab bookings",
+    )
     response: List[Dict[str, Any]] = []
     for booking in bookings:
         status_value = (booking.status or "").lower() if booking.status else None
@@ -898,7 +929,13 @@ def track_magic_links(
             )
         )
 
-    link_rows = link_query.order_by(DriverMagicLink.updated_at.desc(), DriverMagicLink.id.desc()).all()
+    link_rows = page_all(
+        link_query.order_by(
+            DriverMagicLink.updated_at.desc(), DriverMagicLink.id.desc()
+        ),
+        collection="routes_superadmin.track_magic_links.0",
+        label="Magic links",
+    )
     link_ids = [row.id for row in link_rows]
 
     events_by_link: Dict[int, List[Dict[str, Any]]] = {}
@@ -1008,7 +1045,11 @@ def track_aggregators(
                 )
             )
 
-        providers = query.order_by(AggregatorProfile.company_name.asc()).all()
+        providers = page_all(
+            query.order_by(AggregatorProfile.company_name.asc()),
+            collection="routes_superadmin.track_aggregators.0",
+            label="Aggregators",
+        )
         provider_ids = [provider.id for provider, _, _ in providers]
         active_statuses = [
             BookingStatus.PENDING_PROVIDER_RESPONSE.value,
@@ -1190,7 +1231,11 @@ def list_contact_messages(
                 ContactMessage.message.ilike(pattern),
             )
         )
-    return query.order_by(ContactMessage.created_at.desc()).all()
+    return page_all(
+        query.order_by(ContactMessage.created_at.desc()),
+        collection="routes_superadmin.list_contact_messages.0",
+        label="Contact messages",
+    )
 
 
 @router.get("/vendor-tags", response_model=List[VendorTagOut])
@@ -1204,7 +1249,11 @@ def list_vendor_tags(
     query = db.query(VendorTag)
     if not include_inactive:
         query = query.filter(VendorTag.is_active.is_(True))
-    return query.order_by(VendorTag.sort_order.asc(), VendorTag.name.asc()).all()
+    return page_all(
+        query.order_by(VendorTag.sort_order.asc(), VendorTag.name.asc()),
+        collection="routes_superadmin.list_vendor_tags.0",
+        label="Vendor tags",
+    )
 
 
 @router.post("/vendor-tags", response_model=VendorTagOut)
@@ -1342,7 +1391,12 @@ def get_vendors(
     if search is not None:
         query = query.filter(Vendors.name.ilike(f"%{search}%"))     
 
-    return apply_vendor_commission_ranking(query).all()
+    return page_all(
+        apply_vendor_commission_ranking(query),
+        collection="routes_superadmin.get_vendors.0",
+        label="Vendors",
+    )
+
 
 @router.put("/vendors/{vendor_id}", response_model=VendorOut)
 def update_place(
@@ -1432,7 +1486,11 @@ def list_agents_superadmin(
     current_user: User = Depends(get_current_user)
 ):
     verify_superadmin(current_user)
-    agents = db.query(User).filter(User.role == "agent").all()
+    agents = page_all(
+        db.query(User).filter(User.role == "agent"),
+        collection="routes_superadmin.list_agents_superadmin.0",
+        label="Agents superadmin",
+    )
     out = []
     for u in agents:
         prof = db.query(AgentProfile).filter(AgentProfile.user_id == u.id).first()
@@ -1615,7 +1673,11 @@ def list_all_vessels_superadmin(
     current_user: User = Depends(get_current_user)
 ):
     verify_superadmin(current_user)
-    vessels = db.query(Vessel).order_by(Vessel.id.desc()).all()
+    vessels = page_all(
+        db.query(Vessel).order_by(Vessel.id.desc()),
+        collection="routes_superadmin.list_all_vessels_superadmin.0",
+        label="All vessels superadmin",
+    )
     output = []
     for vessel in vessels:
         serialized = vessel_out(vessel)
@@ -1971,7 +2033,11 @@ def list_all_reviews(
         if port_obj:
             query = query.filter(CabBookingModel.port.ilike(f"%{port_obj.name}%"))
 
-    rows = query.order_by(BookingReview.created_at.desc()).all()
+    rows = page_all(
+        query.order_by(BookingReview.created_at.desc()),
+        collection="routes_superadmin.list_all_reviews.0",
+        label="All reviews",
+    )
 
     return [
         {
@@ -1984,7 +2050,9 @@ def list_all_reviews(
             "booking_id": row.booking_id,
             "port": row.port,
             "vehicle_name": row.vehicle_name,
-            "estimated_price": float(row.estimated_price) if row.estimated_price else None,
+            "estimated_price": (
+                float(row.estimated_price) if row.estimated_price else None
+            ),
             "crew_name": row.crew_name,
             "crew_hpid": row.crew_hpid,
             "driver_name": row.driver_name,
@@ -2242,34 +2310,39 @@ def _context_dict(record) -> dict:
 
 
 def _needs_context_reconciliation(record, call) -> bool:
-    if record.vessel_call_id is None or record.vessel_id is None or record.agency_id is None:
-        return True
-    if call is None:
-        return True
-    return record.vessel_id != call.vessel_id or record.agency_id != call.agency_id
+    from app.services.event_origin import classify, CONFIRMED
+
+    return classify(record, call) not in CONFIRMED
 
 
 def _unresolved_context_filter(model, vessel_call_model):
-    return or_(
-        model.vessel_call_id.is_(None),
-        model.vessel_id.is_(None),
-        model.agency_id.is_(None),
-        vessel_call_model.id.is_(None),
-        vessel_call_model.vessel_id.is_(None),
-        vessel_call_model.agency_id.is_(None),
-        model.vessel_id != vessel_call_model.vessel_id,
-        model.agency_id != vessel_call_model.agency_id,
-    )
+    from app.services.event_origin import resolved_origin
+
+    return ~resolved_origin(model)
 
 
 def _unresolved_context_select(model, vessel_call_model, *, kind: str):
+    from app.services.event_origin import origin_expression
+
     reference = (
         model.incident_id
         if kind == "incident"
-        else literal("SOS-") + cast(model.id, String)
+        else (
+            model.booking_id
+            if kind == "booking"
+            else literal("SOS-") + cast(model.id, String)
+        )
     )
-    title = model.title if kind == "incident" else literal("Crew SOS alert")
-    reporter = model.reporter_id if kind == "incident" else model.crew_email
+    title = (
+        model.title
+        if kind == "incident"
+        else literal("Cab booking") if kind == "booking" else literal("Crew SOS alert")
+    )
+    reporter = (
+        model.reporter_id
+        if kind == "incident"
+        else literal(None) if kind == "booking" else model.crew_email
+    )
     return (
         select(
             literal(kind).label("record_kind"),
@@ -2277,15 +2350,16 @@ def _unresolved_context_select(model, vessel_call_model, *, kind: str):
             reference.label("reference"),
             model.created_at.label("created_at"),
             title.label("title"),
-            model.trip_id.label("trip_id"),
+            (model.booking_id if kind == "booking" else model.trip_id).label("trip_id"),
             reporter.label("reporter_reference"),
-            model.port_name.label("port_name"),
+            (model.port if kind == "booking" else model.port_name).label("port_name"),
             model.vessel_id.label("vessel_id"),
             model.vessel_call_id.label("vessel_call_id"),
             model.agency_id.label("agency_id"),
             model.crew_assignment_id.label("crew_assignment_id"),
             model.port_id.label("port_id"),
             model.context_resolution.label("context_resolution"),
+            origin_expression(model).label("origin_classification"),
         )
         .outerjoin(vessel_call_model, vessel_call_model.id == model.vessel_call_id)
         .where(_unresolved_context_filter(model, vessel_call_model))
@@ -2309,8 +2383,10 @@ def list_unresolved_historical_context(
     from app.db.models.vessel_call import VesselCall
 
     kind = (record_kind or "").strip().lower()
-    if kind and kind not in {"incident", "sos"}:
-        raise HTTPException(status_code=400, detail="record_kind must be incident or sos")
+    if kind and kind not in {"incident", "sos", "booking"}:
+        raise HTTPException(
+            status_code=400, detail="record_kind must be incident, sos or booking"
+        )
 
     if not 1 <= record_limit <= 500 or record_offset < 0:
         raise HTTPException(status_code=422, detail="Invalid record pagination")
@@ -2322,6 +2398,11 @@ def list_unresolved_historical_context(
         record_selects.append(_unresolved_context_select(Incident, VesselCall, kind="incident"))
     if kind in {"", "sos"}:
         record_selects.append(_unresolved_context_select(CrewSos, VesselCall, kind="sos"))
+
+    if kind in {"", "booking"}:
+        record_selects.append(
+            _unresolved_context_select(CabBooking, VesselCall, kind="booking")
+        )
 
     unresolved = (
         union_all(*record_selects).subquery()
@@ -2342,7 +2423,6 @@ def list_unresolved_historical_context(
 
     calls_query = db.query(VesselCall).filter(
         VesselCall.vessel_id.isnot(None),
-        VesselCall.agency_id.isnot(None),
     ).order_by(VesselCall.started_at.desc(), VesselCall.id.desc())
     vessel_call_total = calls_query.count()
     calls = calls_query.offset(vessel_call_offset).limit(vessel_call_limit).all()
@@ -2355,6 +2435,7 @@ def list_unresolved_historical_context(
             {
                 "record_kind": row["record_kind"],
                 "record_id": row["record_id"],
+                "classification": row["origin_classification"],
                 "reference": row["reference"],
                 "created_at": row["created_at"],
                 "title": row["title"],
@@ -2408,7 +2489,11 @@ def reconcile_historical_context(
     from app.db.models.vessel_call import VesselCall
 
     kind = record_kind.strip().lower()
-    model = Incident if kind == "incident" else CrewSos if kind == "sos" else None
+    model = (
+        Incident
+        if kind == "incident"
+        else CrewSos if kind == "sos" else CabBooking if kind == "booking" else None
+    )
     if model is None:
         raise HTTPException(status_code=404, detail="Historical record not found")
     evidence_type = body.evidence_type.strip().lower()
@@ -2439,14 +2524,20 @@ def reconcile_historical_context(
         raise HTTPException(status_code=409, detail="Historical record is already resolved")
 
     call = db.query(VesselCall).filter(VesselCall.id == body.vessel_call_id).first()
-    if call is None or call.vessel_id is None or call.agency_id is None:
-        raise HTTPException(status_code=422, detail="Selected vessel call has incomplete ownership")
+    if call is None or call.vessel_id is None:
+        raise HTTPException(
+            status_code=422, detail="Selected vessel call has incomplete ownership"
+        )
 
-    booking = None
+    booking = record if kind == "booking" else None
     if kind == "sos" and record.cab_booking_id:
-        booking = db.query(CabBooking).filter(CabBooking.id == record.cab_booking_id).first()
-    if booking is None and record.trip_id:
-        booking = db.query(CabBooking).filter(CabBooking.booking_id == record.trip_id).first()
+        booking = (
+            db.query(CabBooking).filter(CabBooking.id == record.cab_booking_id).first()
+        )
+    if booking is None and getattr(record, "trip_id", None):
+        booking = (
+            db.query(CabBooking).filter(CabBooking.booking_id == record.trip_id).first()
+        )
     if booking is not None and booking.vessel_call_id is not None:
         if booking.vessel_call_id != call.id:
             raise HTTPException(
@@ -2477,18 +2568,22 @@ def reconcile_historical_context(
     record.agency_id = call.agency_id
     record.port_id = call.port_id
     record.crew_assignment_id = assignment.id if assignment else None
-    record.context_resolution = f"manual_{evidence_type}"
+    record.context_resolution = (
+        "CONFIRMED_AGENCY" if call.agency_id is not None else "CONFIRMED_UNMANAGED"
+    )
     resolved = _context_dict(record)
-    db.add(EventContextReconciliation(
-        record_kind=kind,
-        record_id=record.id,
-        previous_context=previous,
-        resolved_context=resolved,
-        evidence_type=evidence_type,
-        evidence_reference=(body.evidence_reference or "").strip() or None,
-        notes=body.notes.strip(),
-        reconciled_by_user_id=current_user.id,
-    ))
+    db.add(
+        EventContextReconciliation(
+            record_kind=kind,
+            record_id=record.id,
+            previous_context=previous,
+            resolved_context=resolved,
+            evidence_type=evidence_type,
+            evidence_reference=(body.evidence_reference or "").strip() or None,
+            notes=body.notes.strip(),
+            reconciled_by_user_id=current_user.id,
+        )
+    )
     db.commit()
     return {
         "record_kind": kind,
@@ -2524,3 +2619,47 @@ def list_historical_context_audit(
         }
         for row in rows
     ]
+
+
+@router.get("/identity-conflicts/{conflict_id}/audit")
+def identity_audit_page(
+    conflict_id: int,
+    offset: int = 0,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    verify_superadmin(current_user)
+    from app.db.models.crew_identity_conflict import (
+        CrewIdentityConflictRecord,
+        CrewIdentityConflictAudit,
+    )
+
+    if offset < 0 or not 1 <= limit <= 100:
+        raise HTTPException(422, "Invalid audit pagination")
+    if db.get(CrewIdentityConflictRecord, conflict_id) is None:
+        raise HTTPException(404, "Identity conflict not found")
+    query = db.query(CrewIdentityConflictAudit).filter_by(conflict_id=conflict_id)
+    rows = (
+        query.order_by(
+            CrewIdentityConflictAudit.created_at.desc(),
+            CrewIdentityConflictAudit.id.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "action": r.action,
+                "created_at": r.created_at,
+                "reason": r.reason,
+            }
+            for r in rows
+        ],
+        "total": query.count(),
+        "offset": offset,
+        "limit": limit,
+    }

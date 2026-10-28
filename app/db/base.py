@@ -65,3 +65,6 @@ from app.db.models.chat_moderation_event import ChatModerationEvent # noqa: F401
 from app.db.models.chat_moderation_setting import ChatModerationSetting # noqa: F401
 from app.db.models import shipping_company  # noqa: F401
 from app.db.models.data_deletion import DataDeletionRequest  # noqa: F401
+
+from app.db.models import company_invitation  # noqa: F401
+from app.db.models import agency_transfer  # noqa: F401

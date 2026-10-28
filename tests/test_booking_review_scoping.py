@@ -30,6 +30,8 @@ from app.db.models.cab_booking import BookingStatus, CabBooking, VehicleType
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.user import User
 from app.db.session import engine
+from app.db.models.vessel import Vessel
+from tests.context_fixtures import immutable_call
 
 
 def _uniq(prefix):
@@ -144,6 +146,16 @@ class BookingReviewScopingTests(unittest.TestCase):
         profile = AgentProfile(user_id=user.id, agency_name="Theirs", location="Visakhapatnam")
         self.db.add(profile)
         self.db.flush()
+        vessel = Vessel(
+            name=_uniq("MV"),
+            imo_number=_uniq("IMO"),
+            vessel_type="Bulk Carrier",
+            agent_id=user.id,
+        )
+        self.db.add(vessel)
+        self.db.flush()
+        self.booking.vessel_id = vessel.id
+        self.booking.vessel_call_id = immutable_call(self.db, vessel, profile.id).id
         self.booking.agency_id = profile.id
         self.db.flush()
         self.assertEqual(len(self.read(SimpleNamespace(id=user.id, role="agent"))), 1)

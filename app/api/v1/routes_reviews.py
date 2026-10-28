@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
@@ -72,14 +73,15 @@ def get_reviews(
     db: Session = Depends(get_db),
 ):
     """Get all reviews for a specific hotel or restaurant."""
-    reviews = (
+    reviews = page_all(
         db.query(VenueReview)
         .filter(
             VenueReview.venue_type == venue_type,
             VenueReview.venue_id == venue_id,
         )
-        .order_by(VenueReview.created_at.desc())
-        .all()
+        .order_by(VenueReview.created_at.desc()),
+        collection="routes_reviews.get_reviews.0",
+        label="Reviews",
     )
 
     results = []

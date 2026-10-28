@@ -39,6 +39,7 @@ class Quality:
     RECORDED_NOT_OCCURRED = "recorded_not_occurred"
     # Nothing in the schema answers the question. The policy must deny rather
     # than substitute a timestamp that happens to be nearby.
+    PLANNED = "planned"  # scheduled transport, never a physical movement
     UNAVAILABLE = "unavailable"
 
 
@@ -58,7 +59,8 @@ class EventTime:
 EVENT_DICTIONARY: dict[str, EventTime] = {
     "cab_booking_placed": EventTime(
         family="cab_booking_placed",
-        table="cab_bookings", column="created_at",
+        table="cab_bookings",
+        column="created_at",
         quality=Quality.AUTHORITATIVE,
         caveat=(
             "The booking was placed when the row was made, so this is the event. "
@@ -67,7 +69,8 @@ EVENT_DICTIONARY: dict[str, EventTime] = {
     ),
     "trip_started": EventTime(
         family="trip_started",
-        table="cab_bookings", column="trip_started_at",
+        table="cab_bookings",
+        column="trip_started_at",
         quality=Quality.AUTHORITATIVE,
         caveat=(
             "`cab_bookings.started_at` also exists and is a different column. It "
@@ -77,7 +80,8 @@ EVENT_DICTIONARY: dict[str, EventTime] = {
     ),
     "trip_completed": EventTime(
         family="trip_completed",
-        table="cab_bookings", column="trip_completed_at",
+        table="cab_bookings",
+        column="trip_completed_at",
         quality=Quality.AUTHORITATIVE,
         caveat=(
             "`cab_bookings.completed_at` also exists and is unpopulated, same as "
@@ -86,7 +90,8 @@ EVENT_DICTIONARY: dict[str, EventTime] = {
     ),
     "shore_pass_approved": EventTime(
         family="shore_pass_approved",
-        table="shore_passes", column=None,
+        table="shore_passes",
+        column=None,
         quality=Quality.UNAVAILABLE,
         caveat=(
             "The document allows this 'if actually recorded'. It is not: "
@@ -97,7 +102,8 @@ EVENT_DICTIONARY: dict[str, EventTime] = {
     ),
     "shore_pass_exit": EventTime(
         family="shore_pass_exit",
-        table="shore_passes", column="out_time",
+        table="shore_passes",
+        column="out_time",
         quality=Quality.RECORDED_NOT_OCCURRED,
         caveat=(
             "Recorded by a person at the gate, so it is a recording of an exit "
@@ -107,7 +113,8 @@ EVENT_DICTIONARY: dict[str, EventTime] = {
     ),
     "shore_pass_return": EventTime(
         family="shore_pass_return",
-        table="shore_passes", column="in_time",
+        table="shore_passes",
+        column="in_time",
         quality=Quality.RECORDED_NOT_OCCURRED,
         caveat=(
             "Same as the exit, and thinner: of 8 passes in the development "
@@ -117,7 +124,8 @@ EVENT_DICTIONARY: dict[str, EventTime] = {
     ),
     "incident_occurred": EventTime(
         family="incident_occurred",
-        table="incidents", column="occurred_at",
+        table="incidents",
+        column="occurred_at",
         quality=Quality.AUTHORITATIVE,
         caveat=(
             "When the incident happened, as stated by whoever reported it. "
@@ -129,7 +137,8 @@ EVENT_DICTIONARY: dict[str, EventTime] = {
     ),
     "incident_reported": EventTime(
         family="incident_reported",
-        table="incidents", column="created_at",
+        table="incidents",
+        column="created_at",
         quality=Quality.RECORDED_NOT_OCCURRED,
         caveat=(
             "When we were told, which is the fallback for a row with no stated "
@@ -141,7 +150,8 @@ EVENT_DICTIONARY: dict[str, EventTime] = {
     ),
     "sos_raised": EventTime(
         family="sos_raised",
-        table="crew_sos_requests", column="created_at",
+        table="crew_sos_requests",
+        column="created_at",
         quality=Quality.AUTHORITATIVE,
         caveat=(
             "An SOS is raised by the crew member in the moment, so creation is "
@@ -149,19 +159,45 @@ EVENT_DICTIONARY: dict[str, EventTime] = {
             "measure the response rather than the emergency."
         ),
     ),
+    "crew_signed_on": EventTime(
+        family="crew_signed_on",
+        table="crew_assignments",
+        column="signed_on_at",
+        quality=Quality.AUTHORITATIVE,
+        caveat="Explicit agent confirmation; not inferred from transport.",
+    ),
+    "crew_signed_off": EventTime(
+        family="crew_signed_off",
+        table="crew_assignments",
+        column="signed_off_at",
+        quality=Quality.AUTHORITATIVE,
+        caveat="Explicit agent confirmation; not inferred from transport.",
+    ),
     "crew_sign_on_off": EventTime(
         family="crew_sign_on_off",
-        table=None, column=None,
-        quality=Quality.UNAVAILABLE,
-        caveat=(
-            "No table records this. Owner question Q11 assigns who captures it "
-            "and it is unbuilt, so it must not be derived from roster or "
-            "assignment changes -- section 12 names that substitution directly."
-        ),
+        table="crew_assignments",
+        column=None,
+        quality=Quality.AUTHORITATIVE,
+        caveat="Combined metric counts sign-on and sign-off timestamps independently.",
+    ),
+    "pickup_reached": EventTime(
+        family="pickup_reached",
+        table="driver_magic_link_reach_events",
+        column="reached_at",
+        quality=Quality.AUTHORITATIVE,
+        caveat="Explicit pickup/port-end stop reach; a recording, not independently verified physical boarding.",
+    ),
+    "transfer_planned": EventTime(
+        family="transfer_planned",
+        table="agency_transfers",
+        column="travel_at",
+        quality=Quality.PLANNED,
+        caveat="Scheduled travel time on a request; never an actual sign-on/off event.",
     ),
     "port_call": EventTime(
         family="port_call",
-        table="vessel_calls", column="started_at",
+        table="vessel_calls",
+        column="started_at",
         quality=Quality.AUTHORITATIVE,
         caveat=(
             "The call's own range, for display. Section 7 is explicit that it "

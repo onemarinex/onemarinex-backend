@@ -299,3 +299,17 @@ def correct_claim(
     _audit(db, actor=actor, claim=claim, action="corrected",
            before=before, after=_interval(replacement), reason=reason)
     return replacement
+
+
+def claim_intervals_cover(claims, start, end):
+    """Union coverage, without double-counting multiple roles or bridging gaps."""
+    cursor = start
+    for claim in sorted(claims, key=lambda c: c.effective_start):
+        if claim.effective_start > cursor:
+            return False
+        if claim.effective_end is None:
+            return True
+        cursor = max(cursor, claim.effective_end)
+        if end is not None and cursor >= end:
+            return True
+    return False

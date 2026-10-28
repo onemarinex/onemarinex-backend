@@ -183,8 +183,8 @@ class VesselPageCallScopingTests(unittest.TestCase):
         titles = [record["title"] for record in self.safety()]
         self.assertEqual(titles, ["This visit"])
 
-    def test_records_with_no_call_are_placed_by_when_they_happened(self):
-        """Rows predating the column: admitted only inside this call's window."""
+    def test_records_with_no_call_require_reconciliation(self):
+        """Call-less rows remain in owned history but never inherit today's call."""
         self._trip(call=None, created=NOW - timedelta(hours=6))
         self._trip(call=None, created=NOW - timedelta(days=29))
         self._incident(call=None, created=NOW - timedelta(hours=6),
@@ -192,9 +192,9 @@ class VesselPageCallScopingTests(unittest.TestCase):
         self._incident(call=None, created=NOW - timedelta(days=29),
                        title="Unattributed, long ago")
 
-        self.assertEqual(len(self.trips()), 1)
+        self.assertEqual(len(self.trips()), 0)
         titles = [record["title"] for record in self.safety()]
-        self.assertEqual(titles, ["Unattributed, this visit"])
+        self.assertEqual(titles, [])
 
 
 if __name__ == "__main__":

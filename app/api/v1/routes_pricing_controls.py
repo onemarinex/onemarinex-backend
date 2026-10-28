@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
@@ -510,44 +511,56 @@ def get_pricing_bootstrap(
         .order_by(PricingRideType.sort_order.asc())
         .all()
     )
-    vehicle_categories = (
+    vehicle_categories = page_all(
         db.query(PricingVehicleCategory)
         .filter(PricingVehicleCategory.port_id == port_id)
-        .order_by(PricingVehicleCategory.name.asc())
-        .all()
+        .order_by(PricingVehicleCategory.name.asc()),
+        collection="routes_pricing_controls.get_pricing_bootstrap.1",
+        label="Pricing bootstrap",
     )
-    durations = (
+    durations = page_all(
         db.query(PricingDuration)
         .filter(PricingDuration.port_id == port_id)
-        .order_by(PricingDuration.sort_order.asc(), PricingDuration.duration_minutes.asc())
-        .all()
+        .order_by(
+            PricingDuration.sort_order.asc(), PricingDuration.duration_minutes.asc()
+        ),
+        collection="routes_pricing_controls.get_pricing_bootstrap.2",
+        label="Pricing bootstrap",
     )
-    provider_settings = (
-        db.query(PricingProviderSetting)
-        .filter(PricingProviderSetting.port_id == port_id)
-        .all()
+    provider_settings = page_all(
+        db.query(PricingProviderSetting).filter(
+            PricingProviderSetting.port_id == port_id
+        ),
+        collection="routes_pricing_controls.get_pricing_bootstrap.3",
+        label="Pricing bootstrap",
     )
-    adjustment_types = (
+    adjustment_types = page_all(
         db.query(PricingAdjustmentType)
         .filter(PricingAdjustmentType.port_id == port_id)
-        .order_by(PricingAdjustmentType.name.asc())
-        .all()
+        .order_by(PricingAdjustmentType.name.asc()),
+        collection="routes_pricing_controls.get_pricing_bootstrap.4",
+        label="Pricing bootstrap",
     )
-    rules = (
+    rules = page_all(
         db.query(PricingRule)
         .filter(PricingRule.port_id == port_id)
-        .order_by(PricingRule.updated_at.desc())
-        .all()
+        .order_by(PricingRule.updated_at.desc()),
+        collection="routes_pricing_controls.get_pricing_bootstrap.5",
+        label="Pricing bootstrap",
     )
-    duration_visibility = (
-        db.query(PricingDurationVisibility)
-        .filter(PricingDurationVisibility.port_id == port_id)
-        .all()
+    duration_visibility = page_all(
+        db.query(PricingDurationVisibility).filter(
+            PricingDurationVisibility.port_id == port_id
+        ),
+        collection="routes_pricing_controls.get_pricing_bootstrap.6",
+        label="Pricing bootstrap",
     )
-    vehicle_visibility = (
-        db.query(PricingVehicleVisibility)
-        .filter(PricingVehicleVisibility.port_id == port_id)
-        .all()
+    vehicle_visibility = page_all(
+        db.query(PricingVehicleVisibility).filter(
+            PricingVehicleVisibility.port_id == port_id
+        ),
+        collection="routes_pricing_controls.get_pricing_bootstrap.7",
+        label="Pricing bootstrap",
     )
 
     return {
@@ -570,11 +583,12 @@ def list_vehicle_categories(
     current_user: User = Depends(get_current_user),
 ):
     verify_superadmin(current_user)
-    return (
+    return page_all(
         db.query(PricingVehicleCategory)
         .filter(PricingVehicleCategory.port_id == port_id)
-        .order_by(PricingVehicleCategory.name.asc())
-        .all()
+        .order_by(PricingVehicleCategory.name.asc()),
+        collection="routes_pricing_controls.list_vehicle_categories.0",
+        label="Vehicle categories",
     )
 
 
@@ -685,7 +699,13 @@ def list_durations(
     if ride_type_code:
         ride_type = get_ride_type_or_404(db, ride_type_code)
         query = query.filter(PricingDuration.ride_type_id == ride_type.id)
-    return query.order_by(PricingDuration.sort_order.asc(), PricingDuration.duration_minutes.asc()).all()
+    return page_all(
+        query.order_by(
+            PricingDuration.sort_order.asc(), PricingDuration.duration_minutes.asc()
+        ),
+        collection="routes_pricing_controls.list_durations.0",
+        label="Durations",
+    )
 
 
 @router.post("/pricing-controls/durations")
@@ -793,13 +813,13 @@ def list_provider_settings(
 ):
     verify_superadmin(current_user)
     ride_type = get_ride_type_or_404(db, ride_type_code)
-    return (
-        db.query(PricingProviderSetting)
-        .filter(
+    return page_all(
+        db.query(PricingProviderSetting).filter(
             PricingProviderSetting.port_id == port_id,
             PricingProviderSetting.ride_type_id == ride_type.id,
-        )
-        .all()
+        ),
+        collection="routes_pricing_controls.list_provider_settings.0",
+        label="Provider settings",
     )
 
 
@@ -860,14 +880,15 @@ def list_adjustment_types(
 ):
     verify_superadmin(current_user)
     ride_type = get_ride_type_or_404(db, ride_type_code)
-    return (
+    return page_all(
         db.query(PricingAdjustmentType)
         .filter(
             PricingAdjustmentType.port_id == port_id,
             PricingAdjustmentType.ride_type_id == ride_type.id,
         )
-        .order_by(PricingAdjustmentType.name.asc())
-        .all()
+        .order_by(PricingAdjustmentType.name.asc()),
+        collection="routes_pricing_controls.list_adjustment_types.0",
+        label="Adjustment types",
     )
 
 
@@ -981,7 +1002,14 @@ def list_pricing_rules(
         query = query.filter(PricingRule.ride_type_id == ride_type.id)
     if provider_type:
         query = query.filter(PricingRule.provider_type == provider_type)
-    return [build_rule_snapshot(db, item) for item in query.order_by(PricingRule.updated_at.desc()).all()]
+    return [
+        build_rule_snapshot(db, item)
+        for item in page_all(
+            query.order_by(PricingRule.updated_at.desc()),
+            collection="routes_pricing_controls.list_pricing_rules.0",
+            label="Pricing rules",
+        )
+    ]
 
 
 @router.post("/pricing-controls/rules")

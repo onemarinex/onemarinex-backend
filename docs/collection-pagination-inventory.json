@@ -1,0 +1,410 @@
+[
+  {
+    "file": "app/api/v1/routes_agents.py",
+    "function": "get_shore_pass_requests",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_agents.py",
+    "function": "get_agent_bookings",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_aggregators.py",
+    "function": "get_pricing_plans",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_bookings.py",
+    "function": "list_eligible_drivers",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_chat.py",
+    "function": "get_channels",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_chat_moderation.py",
+    "function": "export_restricted_words",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_company_review.py",
+    "function": "_overlapping_approved",
+    "status": "20-row inline preview plus authorized /company-claims/{id}/conflicts pages; complete overlap count",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_company_review.py",
+    "function": "review_queue",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_company_review.py",
+    "function": "claim_audit",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_company_review.py",
+    "function": "access_request_queue",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_company_review.py",
+    "function": "access_request_audit",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_company_review.py",
+    "function": "company_queue",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_company_review.py",
+    "function": "company_audit",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_crew.py",
+    "function": "get_shorepass_history",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_crew.py",
+    "function": "get_cab_estimates",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_crew.py",
+    "function": "get_booking_history",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_expenses.py",
+    "function": "linkable_trips",
+    "status": "SQL-paginated",
+    "sites": 2
+  },
+  {
+    "file": "app/api/v1/routes_facilities.py",
+    "function": "get_massage_wellness",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_facilities.py",
+    "function": "get_shopping_utility",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_hotels.py",
+    "function": "get_hotels",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_hotels.py",
+    "function": "get_hotels_by_filters",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_incidents.py",
+    "function": "agent_incident_list",
+    "status": "Incident-only SQL page or one combined incident/SOS UNION page",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_incidents.py",
+    "function": "_agent_sos_records",
+    "status": "SQL-paginated when standalone; bounded selected-ID enrichment for combined feed",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_incidents.py",
+    "function": "agent_safety_report_records",
+    "status": "Incident/SOS UNION keys SQL-paginated before bounded record enrichment",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_incidents.py",
+    "function": "agent_incident_detail",
+    "status": "SQL-paginated",
+    "sites": 2
+  },
+  {
+    "file": "app/api/v1/routes_itinerary.py",
+    "function": "list_itinerary_tags",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_orders.py",
+    "function": "list_orders",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_orders.py",
+    "function": "list_order_events",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_ports.py",
+    "function": "get_ports",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_pricing_controls.py",
+    "function": "get_pricing_bootstrap",
+    "status": "SQL-paginated",
+    "sites": 7
+  },
+  {
+    "file": "app/api/v1/routes_pricing_controls.py",
+    "function": "list_vehicle_categories",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_pricing_controls.py",
+    "function": "list_durations",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_pricing_controls.py",
+    "function": "list_provider_settings",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_pricing_controls.py",
+    "function": "list_adjustment_types",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_pricing_controls.py",
+    "function": "list_pricing_rules",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_privacy.py",
+    "function": "deletion_queue",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_pubs.py",
+    "function": "get_pubs",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_quotes.py",
+    "function": "list_my_quotes",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_restaurants.py",
+    "function": "get_restaurants",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_reviews.py",
+    "function": "get_reviews",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_rfqs.py",
+    "function": "list_rfqs",
+    "status": "SQL-paginated",
+    "sites": 2
+  },
+  {
+    "file": "app/api/v1/routes_rfqs.py",
+    "function": "vendor_market",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_shipping_company.py",
+    "function": "company_fleet",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_shipping_company.py",
+    "function": "vessel_calls",
+    "status": "SQL-paginated after exact claim-overlap authorization",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_shipping_company.py",
+    "function": "list_members",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_shipping_company.py",
+    "function": "my_access_requests",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_sightseeing.py",
+    "function": "get_sightseeing",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_sightseeing.py",
+    "function": "get_sightseeing_by_filters",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_sos.py",
+    "function": "list_sos_requests",
+    "status": "SQL-paginated",
+    "sites": 2
+  },
+  {
+    "file": "app/api/v1/routes_sos.py",
+    "function": "get_sos_timeline",
+    "status": "SQL-paginated",
+    "sites": 2
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "_identity_conflict_payload",
+    "status": "20-row inline audit preview plus authorized /identity-conflicts/{id}/audit pages; complete audit count",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "list_restaurants",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "list_hotels",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "list_pubs",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "list_sightseeing",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "track_cab_bookings",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "track_magic_links",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "track_aggregators",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "list_contact_messages",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "list_vendor_tags",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "get_vendors",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "list_agents_superadmin",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "list_all_vessels_superadmin",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_superadmin.py",
+    "function": "list_all_reviews",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_trips.py",
+    "function": "get_trip_monitoring",
+    "status": "Raw SQL LIMIT/OFFSET plus collection metadata; totals computed independently",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_vessels.py",
+    "function": "get_crew_profile",
+    "status": "SQL-paginated",
+    "sites": 2
+  },
+  {
+    "file": "app/api/v1/routes_vessels.py",
+    "function": "get_vessels",
+    "status": "SQL-paginated",
+    "sites": 1
+  },
+  {
+    "file": "app/api/v1/routes_vessels.py",
+    "function": "get_public_vessels",
+    "status": "SQL-paginated",
+    "sites": 1
+  }
+]

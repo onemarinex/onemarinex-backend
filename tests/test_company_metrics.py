@@ -93,17 +93,18 @@ class WhatCannotBeComputedTests(unittest.TestCase):
     def test_the_three_with_no_source(self):
         self.assertEqual(
             set(unavailable_metrics()),
-            {"passes_approved", "sign_on_off", "welfare_engagement"},
+            {"welfare_engagement"},
         )
 
     def test_shore_pass_approval_has_no_timestamp_to_slice_by(self):
-        self.assertEqual(metric("passes_approved").availability, Availability.UNAVAILABLE)
+        self.assertEqual(metric("passes_approved").availability, Availability.LABELLED)
+        self.assertIn("proxy", metric("passes_approved").label)
 
     def test_sign_on_off_invents_no_count(self):
         """TEN-18: Crew Movements without an actual event source."""
         m = metric("sign_on_off")
-        self.assertEqual(m.availability, Availability.UNAVAILABLE)
-        self.assertIn("no source", m.missing_data.lower())
+        self.assertEqual(m.availability, Availability.LABELLED)
+        self.assertIn("planned transport", m.missing_data.lower())
 
     def test_welfare_claims_no_wellbeing_outcome(self):
         """Section 22 forbids inferring wellbeing from rides."""
@@ -143,7 +144,15 @@ class SuppressionTests(unittest.TestCase):
     def test_every_metric_carries_a_threshold(self):
         for m in METRICS:
             with self.subTest(metric=m.key):
-                self.assertGreaterEqual(m.suppression_threshold, 2)
+                if m.key in {
+                    "incidents_reported",
+                    "incidents_resolved",
+                    "sos_raised",
+                    "welfare_engagement",
+                }:
+                    self.assertEqual(m.suppression_threshold, 5)
+                else:
+                    self.assertEqual(m.suppression_threshold, 0)
 
     def test_the_default_is_above_the_case_the_document_names(self):
         """Document 2: on a vessel with three crew an incident rate names the

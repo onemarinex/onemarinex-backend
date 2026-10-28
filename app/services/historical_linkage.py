@@ -62,15 +62,10 @@ OPERATION = "HISTORICAL_LINKAGE"
 
 
 def _nationality_agrees(profile: CrewProfile, assignment: CrewAssignment) -> bool:
-    """Both sides normalised, with an unrecorded nationality counting as agreement.
-
-    An assignment written before nationality was captured carries none. That
-    is an absence of evidence, not evidence of a different person, and the
-    passport still had to match to get here.
-    """
+    """Require recorded nationality agreement; absence is not identity proof."""
     assignment_nationality = normalize_nationality(assignment.nationality)
     if not assignment_nationality:
-        return True
+        return False
     return assignment_nationality == normalize_nationality(profile.nationality)
 
 
@@ -90,8 +85,10 @@ def candidate_assignments(db: Session, profile: CrewProfile) -> List[CrewAssignm
     )
 
 
-def link_historical_assignments(db: Session, profile: CrewProfile) -> dict:
-    """Attach `profile` to the assignments that are unambiguously theirs.
+def link_historical_assignments(
+    db: Session, profile: CrewProfile, *, require_review: bool = True
+) -> dict:
+    """Propose evidence-backed reviews for historical assignments by default.
 
     Returns a summary rather than raising: registration must not fail because
     a historical record is untidy. The caller commits.
@@ -104,6 +101,26 @@ def link_historical_assignments(db: Session, profile: CrewProfile) -> dict:
     candidates = candidate_assignments(db, profile)
     disagreeing = [a for a in candidates if not _nationality_agrees(profile, a)]
     agreeing = [a for a in candidates if _nationality_agrees(profile, a)]
+
+    if require_review:
+        reviewable = []
+        for assignment in candidates:
+            held = (
+                db.query(CrewAssignment.id)
+                .filter(
+                    CrewAssignment.vessel_call_id == assignment.vessel_call_id,
+                    CrewAssignment.crew_profile_id == profile.id,
+                    CrewAssignment.id != assignment.id,
+                )
+                .first()
+            )
+            if held is not None:
+                summary["skipped_occupied_call"].append(assignment.id)
+            else:
+                reviewable.append(assignment)
+        summary["conflicts"] = _raise_conflicts(db, profile, reviewable)
+        db.flush()
+        return summary
 
     for assignment in agreeing:
         # One person, one open assignment per call -- the rule the live path
@@ -140,12 +157,10 @@ def link_historical_assignments(db: Session, profile: CrewProfile) -> dict:
 
 def _raise_conflicts(db: Session, profile: CrewProfile, assignments) -> List[int]:
     raised = []
-    seen_vessels = set()
     for assignment in assignments:
         vessel_id = _vessel_id_for(db, assignment)
-        if vessel_id is None or vessel_id in seen_vessels:
+        if vessel_id is None:
             continue
-        seen_vessels.add(vessel_id)
         record = persist_identity_conflict(
             db,
             operation=OPERATION,
@@ -162,9 +177,8 @@ def _raise_conflicts(db: Session, profile: CrewProfile, assignments) -> List[int
             },
             message=(
                 "A seafarer registered after this voyage ended and their passport "
-                f"matches assignment {assignment.id}, but the nationality recorded "
-                f"on that assignment ({assignment.nationality or 'none'}) does not "
-                f"match the one on their account ({profile.nationality or 'none'}). "
+                f"matches assignment {assignment.id}. Historical linkage requires "
+                "separate evidence-backed review, including nationality agreement. "
                 "The assignment has not been attached to anyone."
             ),
         )

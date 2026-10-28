@@ -152,7 +152,12 @@ app.add_middleware(
     # response side, and without it the result-ceiling headers reach the
     # browser and are invisible to the code that has to act on them -- a list
     # silently truncated at the ceiling would render as a complete one.
-    expose_headers=["X-Result-Count", "X-Result-Limit", "X-Result-Truncated"],
+    expose_headers=[
+        "X-Result-Count",
+        "X-Result-Limit",
+        "X-Result-Truncated",
+        "X-Collection-Pages",
+    ],
 )
 
 # WebSocket connection logging middleware
@@ -584,7 +589,6 @@ def ensure_vendor_commission_schema():
         log.exception(
             "ensure_vendor_commission_schema failed — vendor ranking may be degraded"
         )
-
 
 
 def ensure_agent_dashboard_schema():
@@ -1354,9 +1358,24 @@ app.include_router(routes_hotels.router,   prefix="/api/v1/hotels",       tags=[
 app.include_router(routes_sightseeing.router, prefix="/api/v1/sightseeing", tags=["sightseeing"])
 app.include_router(routes_restaurants.router, prefix="/api/v1/restaurants",   tags=["restaurants"])
 app.include_router(routes_vessels.router,     prefix="/api/v1/vessels",       tags=["vessels"])
-app.include_router(routes_shipping_company.router, prefix="/api/v1/shipping-company", tags=["shipping-company"])
-app.include_router(routes_company_review.router, prefix="/api/v1/superadmin", tags=["company-review"])
-app.include_router(routes_vendor_review.router, prefix="/api/v1/superadmin", tags=["vendor-review"])
+app.include_router(
+    routes_shipping_company.router,
+    prefix="/api/v1/shipping-company",
+    tags=["shipping-company"],
+)
+from app.api.v1 import routes_company_staff
+
+app.include_router(
+    routes_company_staff.router,
+    prefix="/api/v1/shipping-company",
+    tags=["company-staff"],
+)
+app.include_router(
+    routes_company_review.router, prefix="/api/v1/superadmin", tags=["company-review"]
+)
+app.include_router(
+    routes_vendor_review.router, prefix="/api/v1/superadmin", tags=["vendor-review"]
+)
 app.include_router(routes_privacy.router, prefix="/api/v1", tags=["privacy"])
 app.include_router(routes_privacy.admin_router, prefix="/api/v1/superadmin", tags=["privacy-review"])
 app.include_router(routes_trips.router,       prefix="/api/v1/trips",         tags=["trips"])
@@ -1391,3 +1410,20 @@ def health_check():
 # --- Static uploads ---
 os.makedirs("uploads", exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+from app.api.v1 import routes_agency_transfers
+
+app.include_router(
+    routes_agency_transfers.router,
+    prefix="/api/v1/agency-transfers",
+    tags=["agency-transfers"],
+)
+app.include_router(
+    routes_agency_transfers.public_router,
+    prefix="/api/v1/agency-transfer-trip",
+    tags=["agency-transfer-trip"],
+)
+
+from app.services.collection_pages import collection_paging
+
+app.middleware("http")(collection_paging)

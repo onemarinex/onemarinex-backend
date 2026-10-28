@@ -88,6 +88,7 @@ def sign_on(
     rank: Optional[str] = None,
     shore_pass_eligible: bool = False,
     actor=None,
+    confirmed: bool = True,
 ) -> CrewAssignment:
     """Put a joining crew member on the vessel's active call.
 
@@ -110,20 +111,31 @@ def sign_on(
             "This vessel has no active port call to sign anyone on to"
         )
 
+    # Serialize manifest/transfer confirmations on the immutable call.
+    from app.db.models.vessel_call import VesselCall
+
+    db.query(VesselCall).filter_by(id=call.id).with_for_update().one()
     existing = assignment_on_call_for_passport(
         db, vessel_call_id=call.id, passport_number=passport_number
     )
     if existing is not None:
+        supplied = normalize_nationality(nationality)
+        recorded = normalize_nationality(existing.nationality)
+        if supplied and recorded and supplied != recorded:
+            raise MovementError(
+                "Nationality conflicts with the existing call assignment; request identity review"
+            )
         # Already here. Record the movement without touching the identifier.
-        if existing.signed_on_at is None:
+        if confirmed and existing.signed_on_at is None:
             existing.signed_on_at = _utcnow()
+            _audit_movement(db, existing, actor, "SIGN_ON", existing.signed_on_at)
         db.flush()
         return existing
 
     assignment = CrewAssignment(
         vessel_call_id=call.id,
         # §8: left null until the person registers and is safely linked.
-        crew_profile_id=None,
+        crew_profile_id=_registered_profile_id(db, passport_number, nationality),
         vessel_crew_id=None,
         crew_name=crew_name.strip(),
         rank=rank,
@@ -134,11 +146,11 @@ def sign_on(
         shore_pass_eligible=bool(shore_pass_eligible),
         source=assignment_source.SIGN_ON,
         started_at=_utcnow(),
-        signed_on_at=_utcnow(),
+        signed_on_at=_utcnow() if confirmed else None,
     )
-    db.add(assignment)
     try:
         with db.begin_nested():
+            db.add(assignment)
             db.flush()
     except IntegrityError:
         # Two agents signing the same person on at once. The partial unique
@@ -150,7 +162,32 @@ def sign_on(
         if found is None:
             raise
         return found
+    if confirmed:
+        _audit_movement(db, assignment, actor, "SIGN_ON", assignment.signed_on_at)
     return assignment
+
+
+def _registered_profile_id(db, passport_number, nationality):
+    from types import SimpleNamespace
+    from app.services.historical_context import crew_profile_for_manifest
+
+    profile = crew_profile_for_manifest(
+        db, SimpleNamespace(passport_number=passport_number, nationality=nationality)
+    )
+    return profile.id if profile is not None else None
+
+
+def _audit_movement(db, assignment, actor, action, moment):
+    from app.db.models.agency_transfer import CrewMovementEvent
+
+    db.add(
+        CrewMovementEvent(
+            assignment_id=assignment.id,
+            actor_user_id=getattr(actor, "id", None),
+            action=action,
+            occurred_at=moment,
+        )
+    )
 
 
 def sign_off(db: Session, *, assignment: CrewAssignment, actor=None) -> CrewAssignment:
@@ -163,8 +200,12 @@ def sign_off(db: Session, *, assignment: CrewAssignment, actor=None) -> CrewAssi
         raise MovementError("There is no assignment to sign off")
     if assignment.ended_at is not None:
         raise MovementError("This crew member is already signed off")
+    db.refresh(assignment, with_for_update=True)
+    if assignment.ended_at is not None:
+        raise MovementError("This crew member is already signed off")
     now = _utcnow()
     assignment.signed_off_at = now
     assignment.ended_at = now
+    _audit_movement(db, assignment, actor, "SIGN_OFF", now)
     db.flush()
     return assignment

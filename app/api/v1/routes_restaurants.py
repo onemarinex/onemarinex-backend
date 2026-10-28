@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 import os
 import qrcode
 import io
@@ -44,15 +45,19 @@ def get_restaurants(
         query = query.filter(Vendors.distance_from_port <= max_dist)
     if search is not None:
         query = query.filter(Vendors.name.ilike(f"%{search}%"))
-        
-    vendors = apply_vendor_commission_ranking(query).all()
+
+    vendors = page_all(
+        apply_vendor_commission_ranking(query),
+        collection="routes_restaurants.get_restaurants.0",
+        label="Restaurants",
+    )
     results = []
     for v in vendors:
         other = v.other_information or {}
         price = other.get("price_per_person", 0.0)
         if max_price is not None and price > max_price:
             continue
-        
+
         results.append({
             "id": v.id,
             "port_id": v.port_id,

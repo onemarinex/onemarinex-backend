@@ -16,9 +16,9 @@ Two things every figure carries, rather than returning a bare number:
 * **whether it was suppressed**, because a withheld figure and a zero are
   different answers and must not look the same.
 
-Only the five metrics marked READY in the dictionary are computed here. The
-labelled five are computable but need their caveat surfaced in the UI first;
-the unavailable three have no source and must read "not available".
+Ready and labelled metrics use their explicitly declared event sources.
+Labelled estimates/proxies always surface their caveats. Unavailable sources
+remain "not available" rather than an invented zero.
 """
 
 from __future__ import annotations
@@ -121,13 +121,19 @@ def tenure_scoped(
     return query
 
 
-def _suppressed(definition: Metric, value: int) -> Figure:
+def _suppressed(
+    definition: Metric, value: int, cohort_size: Optional[int] = None
+) -> Figure:
     """Apply the threshold once, in one place.
 
     Zero is never suppressed: withholding "none happened" tells the reader
     nothing and hides nothing.
     """
-    if 0 < value < definition.suppression_threshold:
+    if (
+        value > 0
+        and (cohort_size if cohort_size is not None else value)
+        < definition.suppression_threshold
+    ):
         return Figure(metric=definition, value=None, suppressed=True)
     return Figure(metric=definition, value=value)
 
@@ -146,11 +152,27 @@ def _counted(
     if extra is not None:
         query = query.filter(extra)
     query = tenure_scoped(
-        db, query, company_id=company_id,
-        vessel_column=vessel_column, occurred_column=occurred_column,
+        db,
+        query,
+        company_id=company_id,
+        vessel_column=vessel_column,
+        occurred_column=occurred_column,
         period=period,
     )
-    return _suppressed(definition, query.scalar() or 0)
+    if hasattr(model, "context_resolution"):
+        from app.services.event_origin import resolved_origin
+
+        query = query.filter(resolved_origin(model))
+    value = query.scalar() or 0
+    cohort = None
+    if definition.suppression_threshold and hasattr(model, "crew_profile_id"):
+        cohort = (
+            query.with_entities(
+                func.count(func.distinct(model.crew_profile_id))
+            ).scalar()
+            or 0
+        )
+    return _suppressed(definition, value, cohort)
 
 
 # --- the five ready metrics --------------------------------------------------
@@ -230,11 +252,33 @@ def qualifying_calls(db: Session, *, company_id: int, period: Optional['Period']
     """
     from app.db.models.vessel_call import VesselCall
 
-    return _counted(
-        db, metric_key="qualifying_calls", company_id=company_id, period=period,
-        model=VesselCall, occurred_column=VesselCall.started_at,
-        vessel_column=VesselCall.vessel_id,
+    covering = db.query(VesselRoleClaim.id).filter(
+        VesselRoleClaim.company_id == company_id,
+        VesselRoleClaim.status == "APPROVED",
+        VesselRoleClaim.revoked_at.is_(None),
+        VesselRoleClaim.vessel_id == VesselCall.vessel_id,
+        VesselRoleClaim.effective_start
+        < func.coalesce(VesselCall.ended_at, func.now()),
+        or_(
+            VesselRoleClaim.effective_end.is_(None),
+            VesselRoleClaim.effective_end > VesselCall.started_at,
+        ),
     )
+    if period:
+        covering = covering.filter(
+            VesselRoleClaim.effective_start < period.end,
+            or_(
+                VesselRoleClaim.effective_end.is_(None),
+                VesselRoleClaim.effective_end > period.start,
+            ),
+        )
+    query = db.query(func.count(VesselCall.id)).filter(covering.exists())
+    if period:
+        query = query.filter(
+            VesselCall.started_at < period.end,
+            func.coalesce(VesselCall.ended_at, func.now()) > period.start,
+        )
+    return Figure(metric("qualifying_calls"), query.scalar() or 0)
 
 
 def eligible_crew(db: Session, *, company_id: int, period: Optional['Period'] = None) -> Figure:
@@ -306,15 +350,14 @@ def incidents_reported(db: Session, *, company_id: int, period: Optional['Period
     """
     from app.db.models.incident import Incident
 
-    definition = metric("incidents_reported")
-    occurrence = func.coalesce(Incident.occurred_at, Incident.created_at)
-    query = db.query(func.count(func.distinct(Incident.id)))
-    query = tenure_scoped(
-        db, query, company_id=company_id,
-        vessel_column=Incident.vessel_id, occurred_column=occurrence,
+    return _counted(
+        db,
+        metric_key="incidents_reported",
+        company_id=company_id,
+        occurred_column=func.coalesce(Incident.occurred_at, Incident.created_at),
+        model=Incident,
         period=period,
     )
-    return _suppressed(definition, query.scalar() or 0)
 
 
 def incidents_resolved(db: Session, *, company_id: int, period: Optional['Period'] = None) -> Figure:
@@ -327,14 +370,97 @@ def incidents_resolved(db: Session, *, company_id: int, period: Optional['Period
     """
     from app.db.models.incident import Incident
 
-    definition = metric("incidents_resolved")
-    query = db.query(func.count(func.distinct(Incident.id)))
-    query = tenure_scoped(
-        db, query, company_id=company_id,
-        vessel_column=Incident.vessel_id, occurred_column=Incident.resolved_at,
+    return _counted(
+        db,
+        metric_key="incidents_resolved",
+        company_id=company_id,
+        occurred_column=Incident.resolved_at,
+        model=Incident,
         period=period,
     )
-    return _suppressed(definition, query.scalar() or 0)
+
+
+def _movement_count(db, company_id, column, key, period=None):
+    from app.db.models.crew_assignment import CrewAssignment
+    from app.db.models.vessel_call import VesselCall
+
+    query = db.query(func.count(CrewAssignment.id)).join(
+        VesselCall, VesselCall.id == CrewAssignment.vessel_call_id
+    )
+    query = tenure_scoped(
+        db,
+        query,
+        company_id=company_id,
+        vessel_column=VesselCall.vessel_id,
+        occurred_column=column,
+        period=period,
+    )
+    return Figure(metric(key), query.scalar() or 0)
+
+
+def sign_ons(db, *, company_id, period=None):
+    from app.db.models.crew_assignment import CrewAssignment
+
+    return _movement_count(
+        db, company_id, CrewAssignment.signed_on_at, "sign_ons", period
+    )
+
+
+def sign_offs(db, *, company_id, period=None):
+    from app.db.models.crew_assignment import CrewAssignment
+
+    return _movement_count(
+        db, company_id, CrewAssignment.signed_off_at, "sign_offs", period
+    )
+
+
+def sign_on_off(db, *, company_id, period=None):
+    return Figure(
+        metric("sign_on_off"),
+        sign_ons(db, company_id=company_id, period=period).value
+        + sign_offs(db, company_id=company_id, period=period).value,
+    )
+
+
+def _seats(db, company_id, key, occurred_column, period=None):
+    from app.services.event_origin import resolved_origin
+
+    query = db.query(func.coalesce(func.sum(CabBooking.num_passengers), 0)).filter(
+        resolved_origin(CabBooking)
+    )
+    query = tenure_scoped(
+        db,
+        query,
+        company_id=company_id,
+        vessel_column=CabBooking.vessel_id,
+        occurred_column=occurred_column,
+        period=period,
+    )
+    return Figure(metric(key), query.scalar() or 0)
+
+
+def booked_seats(db, *, company_id, period=None):
+    return _seats(db, company_id, "booked_seats", CabBooking.created_at, period)
+
+
+def returned_seats(db, *, company_id, period=None):
+    from app.db.models.cab_booking import BookingStatus
+
+    # Completion timestamp alone is not enough for the owner's COMPLETED proxy.
+    from app.services.event_origin import resolved_origin
+
+    query = db.query(func.coalesce(func.sum(CabBooking.num_passengers), 0)).filter(
+        resolved_origin(CabBooking), CabBooking.status == BookingStatus.COMPLETED
+    )
+    query = tenure_scoped(
+        db,
+        query,
+        company_id=company_id,
+        vessel_column=CabBooking.vessel_id,
+        occurred_column=CabBooking.trip_completed_at,
+        period=period,
+    )
+    return Figure(metric("returned_seats"), query.scalar() or 0)
 
 
 READY_FIGURES = {
@@ -353,4 +479,188 @@ LABELLED_FIGURES = {
     "incidents_resolved": incidents_resolved,
 }
 
-COMPUTABLE_FIGURES = {**READY_FIGURES, **LABELLED_FIGURES}
+COMPUTABLE_FIGURES = {
+    **READY_FIGURES,
+    **LABELLED_FIGURES,
+    "sign_ons": sign_ons,
+    "sign_offs": sign_offs,
+    "sign_on_off": sign_on_off,
+    "booked_seats": booked_seats,
+    "returned_seats": returned_seats,
+}
+
+
+def operational_passes_approved(db, *, company_id, period=None):
+    value = eligible_crew(db, company_id=company_id, period=period).value
+    return Figure(metric("passes_approved"), value)
+
+
+COMPUTABLE_FIGURES["passes_approved"] = operational_passes_approved
+
+
+def _ashore_snapshot(db, company_id, period=None):
+    """Snapshot only within a continuous approved tenure covering the instant.
+
+    A claim gap must never let a historic pickup follow a returning company.
+    All facts are time-filtered before counting; no private participant DTOs leave.
+    """
+    from datetime import timedelta
+    from sqlalchemy.orm import selectinload
+    from app.db.models.driver_magic_link import (
+        DriverMagicLink,
+        DriverMagicLinkReachEvent,
+    )
+    from app.db.models.cab_booking import BookingStatus
+    from app.services.event_origin import resolved_origin
+
+    at = (
+        min(_aware(period.end) - timedelta(microseconds=1), datetime.now(timezone.utc))
+        if period
+        else datetime.now(timezone.utc)
+    )
+    claims = (
+        db.query(VesselRoleClaim)
+        .filter(
+            VesselRoleClaim.company_id == company_id,
+            VesselRoleClaim.status == "APPROVED",
+            VesselRoleClaim.revoked_at.is_(None),
+            VesselRoleClaim.effective_start <= at,
+        )
+        .order_by(VesselRoleClaim.vessel_id, VesselRoleClaim.effective_start)
+        .all()
+    )
+    merged = {}
+    for c in claims:
+        rows = merged.setdefault(c.vessel_id, [])
+        start, end = _aware(c.effective_start), _aware(c.effective_end)
+        if rows and (rows[-1][1] is None or rows[-1][1] >= start):
+            previous = rows[-1]
+            rows[-1] = (
+                previous[0],
+                None if previous[1] is None or end is None else max(previous[1], end),
+            )
+        else:
+            rows.append((start, end))
+    windows = {
+        v: (start, end)
+        for v, intervals in merged.items()
+        for start, end in intervals
+        if start <= at and (end is None or at < end)
+    }
+    if not windows:
+        return 0, 0
+    predicates = []
+    for vessel_id, (start, _) in windows.items():
+        recorded = (
+            db.query(DriverMagicLink.id)
+            .join(
+                DriverMagicLinkReachEvent,
+                DriverMagicLink.id == DriverMagicLinkReachEvent.magic_link_id,
+            )
+            .filter(
+                DriverMagicLink.booking_id == CabBooking.id,
+                DriverMagicLinkReachEvent.reached_at >= start,
+                DriverMagicLinkReachEvent.reached_at <= at,
+            )
+            .exists()
+        )
+        predicates.append(
+            and_(
+                CabBooking.vessel_id == vessel_id,
+                or_(
+                    and_(CabBooking.created_at >= start, CabBooking.created_at <= at),
+                    recorded,
+                ),
+            )
+        )
+    query = (
+        db.query(CabBooking)
+        .filter(
+            resolved_origin(CabBooking),
+            CabBooking.status != BookingStatus.CANCELLED,
+            or_(*predicates),
+        )
+        .options(
+            selectinload(CabBooking.magic_link).selectinload(
+                DriverMagicLink.reach_events
+            )
+        )
+    )
+    seats = uncertain = 0
+    for booking in query.yield_per(500):
+        start, _ = windows[booking.vessel_id]
+        link = booking.magic_link
+        types = {
+            str(stop.get("id")): stop.get("type")
+            for stop in (link.itinerary_stops if link else [])
+            if isinstance(stop, dict)
+        }
+        events = [
+            e
+            for e in (link.reach_events if link else [])
+            if start <= _aware(e.reached_at) <= at
+        ]
+        pickups = [
+            _aware(e.reached_at) for e in events if types.get(e.stop_id) == "pickup"
+        ]
+        returns = [
+            _aware(e.reached_at) for e in events if types.get(e.stop_id) == "trip_end"
+        ]
+        volume = max(0, booking.num_passengers or 0)
+        if pickups:
+            returned = any(moment >= min(pickups) for moment in returns)
+            if not returned:
+                seats += volume
+                if booking.status == BookingStatus.COMPLETED:
+                    uncertain += volume
+        elif start <= _aware(booking.created_at) <= at and (
+            booking.trip_started_at
+            or booking.started_at
+            or booking.status == BookingStatus.COMPLETED
+        ):
+            uncertain += volume
+    return seats, uncertain
+
+
+def estimated_ashore_seats(db, *, company_id, period=None):
+    return Figure(
+        metric("estimated_ashore_seats"), _ashore_snapshot(db, company_id, period)[0]
+    )
+
+
+def ashore_uncertain_seats(db, *, company_id, period=None):
+    return Figure(
+        metric("ashore_uncertain_seats"), _ashore_snapshot(db, company_id, period)[1]
+    )
+
+
+COMPUTABLE_FIGURES.update(
+    estimated_ashore_seats=estimated_ashore_seats,
+    ashore_uncertain_seats=ashore_uncertain_seats,
+)
+
+
+def pending_transfers(db, *, company_id, period=None):
+    from app.db.models.agency_transfer import AgencyTransfer
+    from app.db.models.vessel_call import VesselCall
+
+    query = (
+        db.query(func.count(AgencyTransfer.id))
+        .join(VesselCall, VesselCall.id == AgencyTransfer.vessel_call_id)
+        .filter(
+            AgencyTransfer.agency_id == VesselCall.agency_id,
+            AgencyTransfer.status.notin_(("COMPLETED", "CANCELLED", "DECLINED")),
+        )
+    )
+    query = tenure_scoped(
+        db,
+        query,
+        company_id=company_id,
+        vessel_column=VesselCall.vessel_id,
+        occurred_column=AgencyTransfer.travel_at,
+        period=period,
+    )
+    return Figure(metric("pending_transfers"), query.scalar() or 0)
+
+
+COMPUTABLE_FIGURES["pending_transfers"] = pending_transfers

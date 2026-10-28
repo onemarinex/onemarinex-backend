@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func, cast, String, or_, and_
@@ -161,15 +162,16 @@ def get_pricing_plans(
         .all()
     )
     duration_by_id = {duration.id: duration for duration in durations}
-    rules = (
+    rules = page_all(
         db.query(PricingRule)
         .filter(
             PricingRule.port_id == agg_profile.operating_port_id,
             PricingRule.provider_type == pricing_provider_type,
             PricingRule.is_archived == False,
         )
-        .order_by(PricingRule.updated_at.desc())
-        .all()
+        .order_by(PricingRule.updated_at.desc()),
+        collection="routes_aggregators.get_pricing_plans.3",
+        label="Pricing plans",
     )
 
     def serialize_rule(rule: PricingRule):

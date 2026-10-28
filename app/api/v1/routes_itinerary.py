@@ -6,6 +6,7 @@ GET /api/v1/itinerary/tags
 """
 
 from __future__ import annotations
+from app.services.collection_pages import page_all
 
 import logging
 import math
@@ -849,11 +850,12 @@ def list_itinerary_tags(db: Session = Depends(get_db)):
     """Get all available tags for itineraries."""
     try:
         VendorTag.__table__.create(bind=db.get_bind(), checkfirst=True)
-        rows = (
+        rows = page_all(
             db.query(VendorTag)
             .filter(VendorTag.is_active.is_(True))
-            .order_by(VendorTag.sort_order.asc(), VendorTag.name.asc())
-            .all()
+            .order_by(VendorTag.sort_order.asc(), VendorTag.name.asc()),
+            collection="routes_itinerary.list_itinerary_tags.0",
+            label="Itinerary tags",
         )
         return [
             ItineraryTagOut(

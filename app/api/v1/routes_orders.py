@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 from typing import List, Optional, Literal, Union
 from datetime import datetime
 
@@ -14,8 +15,6 @@ from app.services.auth import decode_subject
 from typing import List, Optional, Literal
 from datetime import datetime
 from app.db.models.order_event import OrderEvent
-
-
 
 
 router = APIRouter()
@@ -177,7 +176,11 @@ def list_orders(
     if status:
         q = q.filter(Order.status == status)
 
-    rows = q.order_by(Order.id.desc()).all()
+    rows = page_all(
+        q.order_by(Order.id.desc()),
+        collection="routes_orders.list_orders.0",
+        label="Orders",
+    )
     return [_to_out(r) for r in rows]
 
 # ---- Get one order ----
@@ -297,10 +300,11 @@ def list_order_events(
     if not allowed:
         raise HTTPException(403, "Not allowed")
 
-    rows = (
+    rows = page_all(
         db.query(OrderEvent)
         .filter(OrderEvent.order_id == order_id)
-        .order_by(OrderEvent.created_at.asc(), OrderEvent.id.asc())
-        .all()
+        .order_by(OrderEvent.created_at.asc(), OrderEvent.id.asc()),
+        collection="routes_orders.list_order_events.0",
+        label="Order events",
     )
     return [OrderEventOut.model_validate(r) for r in rows]

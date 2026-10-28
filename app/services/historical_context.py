@@ -542,7 +542,7 @@ def event_context(
         resolution = "booking"
     # A booking written without immutable call context is legacy/unresolved.
     # Never create a present-day call while trying to describe its history.
-    if call is None and vessel is not None:
+    if call is None and vessel is not None and booking is None:
         call = active_vessel_call(db, vessel, create=False)
         resolution = "vessel_id" if call is not None else "unresolved"
     assignment = None
@@ -563,7 +563,15 @@ def event_context(
         "agency_id": call.agency_id if call else None,
         "port_id": call.port_id if call else None,
         "crew_assignment_id": assignment.id if assignment else None,
-        "context_resolution": resolution,
+        "context_resolution": (
+            "CONFIRMED_AGENCY"
+            if call and call.agency_id is not None
+            else (
+                "CONFIRMED_UNMANAGED"
+                if call and vessel is not None and vessel.agent_id is None
+                else resolution
+            )
+        ),
     }
 
 

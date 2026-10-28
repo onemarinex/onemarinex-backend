@@ -14,6 +14,8 @@ Approving a request authorises an erasure and records it; a person performs it
 and records what they did.
 """
 
+from app.services.collection_pages import page_all
+
 from datetime import datetime
 from typing import List, Optional
 
@@ -184,7 +186,11 @@ def deletion_queue(status: Optional[str] = None, db: Session = Depends(get_db),
         query = query.filter(
             DataDeletionRequest.status.in_(deletion.OPEN_STATUSES + ("APPROVED",))
         )
-    rows = query.order_by(DataDeletionRequest.created_at).all()
+    rows = page_all(
+        query.order_by(DataDeletionRequest.created_at),
+        collection="routes_privacy.deletion_queue.0",
+        label="Deletion queue",
+    )
     return [_admin_out(db, row) for row in rows]
 
 
