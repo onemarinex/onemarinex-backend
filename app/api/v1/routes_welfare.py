@@ -288,6 +288,7 @@ def selected_rows(
             company_id=company_id,
             vessel_column=WelfareFeedback.vessel_id,
             occurred_column=WelfareFeedback.experience_at,
+            include_declared=True,
         )
     return filter_country(query, WelfareFeedback.port_id, country_code)
 

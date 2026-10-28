@@ -65,6 +65,7 @@ def operational(
             company_id=company_id,
             vessel_column=CabBooking.vessel_id,
             occurred_column=CabBooking.trip_started_at,
+            include_declared=True,
         )
     query = filter_country(query, VesselCall.port_id, country_code)
     call_groups = query.with_entities(
@@ -124,6 +125,7 @@ def operational(
                     company_id=company_id,
                     vessel_id=call.vessel_id,
                     occurred_at=e.reached_at,
+                    include_declared=True,
                 )
             )
         ]
@@ -222,6 +224,7 @@ def reviews_query(
             company_id=company_id,
             vessel_column=CabBooking.vessel_id,
             occurred_column=BookingReview.created_at,
+            include_declared=True,
         )
     query = filter_country(query, VesselCall.port_id, country_code)
     if review_type:

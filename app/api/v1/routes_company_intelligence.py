@@ -20,7 +20,7 @@ from app.services.event_origin import resolved_origin
 
 router = APIRouter()
 UTC = timezone.utc
-PORTAL_METRIC_VERSION = "2026.10.28.portal.1"
+PORTAL_METRIC_VERSION = "2026.10.28.portal.2"
 
 
 def aware(value):
@@ -32,7 +32,7 @@ def calls_query(db, company_id, active=False):
     claims = db.query(VesselRoleClaim.id).filter(
         VesselRoleClaim.company_id == company_id,
         VesselRoleClaim.vessel_id == VesselCall.vessel_id,
-        VesselRoleClaim.status == "APPROVED",
+        VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED")),
         VesselRoleClaim.revoked_at.is_(None),
         VesselRoleClaim.effective_start < func.coalesce(VesselCall.ended_at, now),
         or_(
@@ -63,7 +63,9 @@ def selected_call(db, company_id, call_id):
     return call
 
 
-def booking_query(db, company_id, call, timestamp, period=None):
+def booking_query(
+    db, company_id, call, timestamp, period=None, *, include_declared=False
+):
     query = db.query(CabBooking).filter(
         CabBooking.vessel_call_id == call.id,
         CabBooking.vessel_id == call.vessel_id,
@@ -77,6 +79,7 @@ def booking_query(db, company_id, call, timestamp, period=None):
         vessel_column=CabBooking.vessel_id,
         occurred_column=timestamp,
         period=period,
+        include_declared=include_declared,
     )
 
 
@@ -86,16 +89,25 @@ def call_metrics(db, company_id, call, reporting_period=None):
     if reporting_period:
         end = min(end, aware(reporting_period.end) - timedelta(microseconds=1))
     period = Period(aware(call.started_at), end + timedelta(microseconds=1))
-    seats, unknown = _ashore_snapshot(db, company_id, period, vessel_call_id=call.id)
+    seats, unknown = _ashore_snapshot(
+        db, company_id, period, vessel_call_id=call.id, include_declared=True
+    )
     started = booking_query(
-        db, company_id, call, CabBooking.trip_started_at, reporting_period
+        db,
+        company_id,
+        call,
+        CabBooking.trip_started_at,
+        reporting_period,
+        include_declared=True,
     )
     return {
         "crew_ashore": seats if unknown == 0 else None,
         "ashore_recorded_seats": seats,
         "ashore_uncertain_seats": unknown,
         "active_rides": (
-            booking_query(db, company_id, call, CabBooking.trip_started_at)
+            booking_query(
+                db, company_id, call, CabBooking.trip_started_at, include_declared=True
+            )
             .filter(
                 CabBooking.trip_started_at <= end,
                 or_(
@@ -109,7 +121,12 @@ def call_metrics(db, company_id, call, reporting_period=None):
         .with_entities(func.coalesce(func.sum(CabBooking.num_passengers), 0))
         .scalar(),
         "total_booked_rides": booking_query(
-            db, company_id, call, CabBooking.created_at, reporting_period
+            db,
+            company_id,
+            call,
+            CabBooking.created_at,
+            reporting_period,
+            include_declared=True,
         ).count(),
         "as_of": end,
         "participation_unit": "Passenger seats on started rides. Repeat trips count again.",
@@ -162,7 +179,7 @@ def overview(db: Session = Depends(get_db), context=Depends(current_company_memb
         db.query(func.count(func.distinct(VesselRoleClaim.vessel_id)))
         .filter(
             VesselRoleClaim.company_id == company.id,
-            VesselRoleClaim.status == "APPROVED",
+            VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED")),
             VesselRoleClaim.revoked_at.is_(None),
             VesselRoleClaim.effective_start <= now,
             or_(
@@ -460,5 +477,5 @@ def activities(
             }
             for r in rows
         ],
-        "coverage": "Transport activity and agent-confirmed movements are separate records. No person or driver details are disclosed.",
+        "coverage": "Detailed activity requires an independently approved vessel relationship. Automatic acceptance permits aggregate figures only. Transport activity and confirmed movements are separate records.",
     }

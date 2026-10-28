@@ -44,7 +44,7 @@ MEMBERSHIP_ROLES = ("ADMIN", "ANALYST", "VIEWER")
 CLAIM_STATUSES = (
     "DRAFT", "SUBMITTED", "UNDER_REVIEW",
     "APPROVED", "REJECTED", "MORE_EVIDENCE",
-    "REVOKED", "CORRECTED",
+    "REVOKED", "CORRECTED", "AUTO_ACCEPTED",
 )
 
 
@@ -140,6 +140,11 @@ class VesselRoleClaim(Base):
     # submitted identity to survive that resolution.
     imo_number = Column(String(100), nullable=True, index=True)
     role = Column(String(ROLE_MAX_LENGTH), nullable=False, index=True)
+    # A declaration is accepted for aggregates; it is not independently verified.
+    # Nullable additions preserve every existing claim without backfill.
+    fleet_group = Column(String(36), nullable=True, index=True)
+    declared_vessel_name = Column(String(255), nullable=True)
+    fleet_import_id = Column(Integer, ForeignKey("company_fleet_imports.id"), nullable=True)
 
     effective_start = Column(DateTime(timezone=True), nullable=False)
     effective_end = Column(DateTime(timezone=True), nullable=True)

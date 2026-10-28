@@ -77,7 +77,7 @@ class Period:
 
 def tenure_scoped(
     db: Session, query, *, company_id: int, vessel_column, occurred_column,
-    period: Optional["Period"] = None,
+    period: Optional["Period"] = None, include_declared: bool = False,
 ):
     """Restrict a query to rows this company held the vessel for, at that row's
     own moment.
@@ -101,7 +101,7 @@ def tenure_scoped(
         db.query(VesselRoleClaim.id)
         .filter(
             VesselRoleClaim.company_id == company_id,
-            VesselRoleClaim.status == "APPROVED",
+            VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED") if include_declared else ("APPROVED",)),
             VesselRoleClaim.revoked_at.is_(None),
             VesselRoleClaim.vessel_id == vessel_column,
             VesselRoleClaim.effective_start <= occurred_column,
@@ -498,7 +498,7 @@ def operational_passes_approved(db, *, company_id, period=None):
 COMPUTABLE_FIGURES["passes_approved"] = operational_passes_approved
 
 
-def _ashore_snapshot(db, company_id, period=None, *, vessel_call_id=None):
+def _ashore_snapshot(db, company_id, period=None, *, vessel_call_id=None, include_declared=False):
     """Snapshot only within a continuous approved tenure covering the instant.
 
     A claim gap must never let a historic pickup follow a returning company.
@@ -522,7 +522,7 @@ def _ashore_snapshot(db, company_id, period=None, *, vessel_call_id=None):
         db.query(VesselRoleClaim)
         .filter(
             VesselRoleClaim.company_id == company_id,
-            VesselRoleClaim.status == "APPROVED",
+            VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED") if include_declared else ("APPROVED",)),
             VesselRoleClaim.revoked_at.is_(None),
             VesselRoleClaim.effective_start <= at,
         )

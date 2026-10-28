@@ -43,6 +43,9 @@ from app.services.company_roles import validate_role
 
 # Section 21's table, as code. A transition absent from here is refused.
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
+    # An accepted declaration can enter independent review. It is never
+    # promoted to APPROVED without the existing SA evidence workflow.
+    "AUTO_ACCEPTED": frozenset({"UNDER_REVIEW", "REVOKED"}),
     "DRAFT": frozenset({"SUBMITTED"}),
     "SUBMITTED": frozenset({"UNDER_REVIEW"}),
     "UNDER_REVIEW": frozenset({"APPROVED", "REJECTED", "MORE_EVIDENCE"}),

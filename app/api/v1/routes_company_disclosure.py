@@ -23,7 +23,11 @@ from app.db.models.company_disclosure import (
     CompanySafetyEscalation as Escalation,
     CompanyDisclosureRequest as Request,
 )
-from app.db.models.shipping_company import ShippingCompany, CompanyAuditEvent
+from app.db.models.shipping_company import (
+    ShippingCompany,
+    CompanyAuditEvent,
+    VesselRoleClaim,
+)
 from app.db.models.incident import Incident, IncidentNote, IncidentTimelineEvent
 from app.db.models.crew_sos import CrewSos, CrewSosNote, CrewSosTimelineEvent
 from app.db.models.crew_assignment import CrewAssignment
@@ -489,6 +493,28 @@ def scope_for(db, row, body):
             422, "Approval must stay inside the requested event window."
         )
     expiry = body.expires_at or now() + timedelta(days=7)
+    if row.source_kind == "CALL":
+        call = selected_call(db, row.company_id, row.vessel_call_id)
+        verified = (
+            db.query(VesselRoleClaim.id)
+            .filter(
+                VesselRoleClaim.company_id == row.company_id,
+                VesselRoleClaim.vessel_id == call.vessel_id,
+                VesselRoleClaim.status == "APPROVED",
+                VesselRoleClaim.revoked_at.is_(None),
+                VesselRoleClaim.effective_start < end,
+                or_(
+                    VesselRoleClaim.effective_end.is_(None),
+                    VesselRoleClaim.effective_end > start,
+                ),
+            )
+            .first()
+        )
+        if not verified:
+            raise HTTPException(
+                422,
+                "Independently review the vessel relationship before approving restricted data. Automatic acceptance permits aggregates only.",
+            )
     if expiry.tzinfo is None or not now() < expiry <= now() + timedelta(days=7):
         raise HTTPException(422, "Access must expire within seven days.")
     if any(len(t) > 1000 for t in body.redact_terms):
