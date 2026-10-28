@@ -77,6 +77,14 @@ class CorrectionIn(BaseModel):
     effective_end: Optional[datetime] = None
 
 
+class AmendmentIn(BaseModel):
+    model_config = {"str_strip_whitespace": True}
+    reason: str = Field(min_length=10, max_length=4000)
+    evidence_reference: str = Field(min_length=10, max_length=255)
+    effective_start: datetime
+    effective_end: Optional[datetime] = None
+
+
 class AuditEventOut(BaseModel):
     id: int
     action: str
@@ -106,7 +114,7 @@ def _overlap_query(db: Session, claim: VesselRoleClaim):
             VesselRoleClaim.id != claim.id,
             VesselRoleClaim.vessel_id == claim.vessel_id,
             VesselRoleClaim.role == claim.role,
-            VesselRoleClaim.status == "APPROVED",
+            VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED")),
             VesselRoleClaim.revoked_at.is_(None),
             or_(
                 VesselRoleClaim.effective_end.is_(None),
@@ -257,6 +265,78 @@ def correct(claim_id: int, body: CorrectionIn, db: Session = Depends(get_db),
         raise HTTPException(status_code=400, detail=str(exc)) from None
     db.commit()
     db.refresh(replacement)
+    return _serialize(db, replacement, company_name)
+
+
+@router.post("/company-claims/{claim_id}/amend", response_model=ReviewClaimOut)
+def amend(
+    claim_id: int,
+    body: AmendmentIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Resolve a declaration conflict by replacing its effective period.
+
+    This accepts aggregates only; independent approval remains a separate action.
+    """
+    from app.db.models.vessel import Vessel
+    from app.services import company_fleet_declarations as fleet
+
+    _require_superadmin(current_user)
+    source, company_name = _load(db, claim_id)
+    db.query(Vessel).filter_by(id=source.vessel_id).with_for_update().one()
+    claim = (
+        db.query(VesselRoleClaim)
+        .filter_by(id=claim_id)
+        .populate_existing()
+        .with_for_update()
+        .one()
+    )
+    if claim.status not in ("AUTO_ACCEPTED", *OPEN_STATUSES) or claim.revoked_at:
+        raise HTTPException(409, "Only an open declaration can be amended here.")
+    if body.effective_start.tzinfo is None or (
+        body.effective_end
+        and (
+            body.effective_end.tzinfo is None
+            or body.effective_end <= body.effective_start
+        )
+    ):
+        raise HTTPException(422, "Use a valid effective period with time zones.")
+    before = claims._interval(claim)
+    claim.status = "CORRECTED"
+    claim.revoked_at = datetime.now(timezone.utc)
+    db.flush()
+    vessel = db.get(Vessel, claim.vessel_id)
+    try:
+        replacements = fleet.declare(
+            db,
+            db.get(ShippingCompany, claim.company_id),
+            current_user,
+            fleet.DeclarationIn(
+                imo_number=vessel.imo_number,
+                vessel_name=vessel.name,
+                **{
+                    field: claim.role == role
+                    for field, role in fleet.ROLE_FIELDS.items()
+                },
+                start_date=body.effective_start.isoformat(),
+                end_date=body.effective_end.isoformat() if body.effective_end else None,
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    replacement = replacements[0]
+    fleet.audit(
+        db,
+        current_user,
+        claim.company_id,
+        claim.id,
+        "declaration_period_amended",
+        before=before,
+        after=claims._interval(replacement),
+        reason=body.reason + " Evidence: " + body.evidence_reference,
+    )
+    db.commit()
     return _serialize(db, replacement, company_name)
 
 

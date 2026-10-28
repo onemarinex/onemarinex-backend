@@ -30,6 +30,7 @@ logger = logging.getLogger("app.startup")
 # migration, with the columns that must exist for the ORM's own SELECT to
 # parse.
 GUARDED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "vessel_role_claims": ("fleet_group", "declared_vessel_name", "fleet_import_id"),
     "crew_assignments": ("public_ref", "source"),
     "driver_magic_links": ("expires_at", "revoked_at"),
     "incidents": ("occurred_at",),

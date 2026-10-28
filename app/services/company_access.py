@@ -113,6 +113,7 @@ def covering_claim(
     vessel_id: int,
     occurred_at: datetime,
     role: Optional[str] = None,
+    include_declared: bool = False,
 ) -> Optional[VesselRoleClaim]:
     """The approved claim that covers this instant, if there is one.
 
@@ -130,7 +131,7 @@ def covering_claim(
         .filter(
             VesselRoleClaim.company_id == company_id,
             VesselRoleClaim.vessel_id == vessel_id,
-            VesselRoleClaim.status == "APPROVED",
+            VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED") if include_declared else ("APPROVED",)),
             VesselRoleClaim.revoked_at.is_(None),
             VesselRoleClaim.effective_start <= moment,
             or_(

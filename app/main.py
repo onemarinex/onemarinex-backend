@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.models import OAuthFlows as OAuthFlowsModel
 from fastapi.openapi.utils import get_openapi
+from app.db.fleet_schema import ensure_fleet_schema
 import logging
 import logging.handlers
 import sys
@@ -202,6 +203,8 @@ def on_startup():
     ensure_auth_attempt_columns()
     ensure_incident_occurred_at()
     ensure_company_domain_schema()
+    with ddl_transaction() as connection:
+        ensure_fleet_schema(connection)
     ensure_alembic_baseline()
     # Last, after every guard has had its turn. Raises rather than logging, so
     # a guard that failed aborts the deployment instead of serving a broken

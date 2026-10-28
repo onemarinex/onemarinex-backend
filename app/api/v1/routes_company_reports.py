@@ -73,7 +73,7 @@ def prepare(db, company, body):
     period_claims = db.query(VesselRoleClaim.id).filter(
         VesselRoleClaim.company_id == company.id,
         VesselRoleClaim.vessel_id == VesselCall.vessel_id,
-        VesselRoleClaim.status == "APPROVED",
+        VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED")),
         VesselRoleClaim.revoked_at.is_(None),
         VesselRoleClaim.effective_start < body.end,
         or_(
@@ -126,7 +126,7 @@ def prepare(db, company, body):
         claims = db.query(VesselRoleClaim).filter(
             VesselRoleClaim.company_id == company.id,
             VesselRoleClaim.vessel_id == call.vessel_id,
-            VesselRoleClaim.status == "APPROVED",
+            VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED")),
             VesselRoleClaim.revoked_at.is_(None),
             VesselRoleClaim.effective_start < cutoff,
             or_(
@@ -165,7 +165,7 @@ def prepare(db, company, body):
     payload["executive_summary"] = (
         f"Recorded calls: {len(calls)}. Vessels: {payload['summary']['recorded_vessels']}. "
         f"Ports: {payload['summary']['recorded_ports']}. "
-        "Only recorded activity inside approved company tenure is included. Zero activity does not prove no shore leave occurred."
+        "Only recorded activity inside accepted company tenure is included. Automatic acceptance is a declaration, not independent verification. Zero activity does not prove no shore leave occurred."
     )
     if body.report_type in ("FLEET", "PORT"):
         key = "vessel" if body.report_type == "FLEET" else "port"
@@ -201,7 +201,7 @@ def prepare(db, company, body):
         source_claims = db.query(VesselRoleClaim).filter(
             VesselRoleClaim.company_id == company.id,
             VesselRoleClaim.vessel_id.in_(source_vessels),
-            VesselRoleClaim.status == "APPROVED",
+            VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED")),
             VesselRoleClaim.revoked_at.is_(None),
             VesselRoleClaim.effective_start < body.end,
             or_(
@@ -348,7 +348,7 @@ def load(db, company_id, report_id):
             .filter(
                 VesselRoleClaim.company_id == company_id,
                 VesselRoleClaim.vessel_id == source["vessel_id"],
-                VesselRoleClaim.status == "APPROVED",
+                VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED")),
                 VesselRoleClaim.revoked_at.is_(None),
             )
             .all()

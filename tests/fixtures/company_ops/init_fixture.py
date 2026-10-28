@@ -16,4 +16,8 @@ with engine.begin() as c:
             """DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_vessel_role_claims_no_overlap') THEN ALTER TABLE vessel_role_claims ADD CONSTRAINT uq_vessel_role_claims_no_overlap EXCLUDE USING gist (vessel_id WITH =, role WITH =, tstzrange(effective_start, effective_end, '[)') WITH &&) WHERE (status = 'APPROVED' AND revoked_at IS NULL); END IF; END $$"""
         )
     )
+from app.db.fleet_schema import ensure_fleet_schema
+
+with engine.begin() as c:
+    ensure_fleet_schema(c)
 print("Disposable fixture schema ready")

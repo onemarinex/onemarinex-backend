@@ -222,6 +222,9 @@ class ChangeDecisionIn(BaseModel):
     model_config = {"str_strip_whitespace": True}
     approve: bool
     reason: str = Field(min_length=10, max_length=4000)
+    evidence_reference: Optional[str] = Field(
+        default=None, min_length=10, max_length=255
+    )
 
 
 def change_out(db, change):
@@ -361,36 +364,44 @@ def decide_change(
         raise HTTPException(404, "Change request not found.")
     if change.status != "REQUESTED":
         raise HTTPException(409, "This change was already decided.")
+    claim_query = db.query(VesselRoleClaim).filter_by(id=change.claim_id)
     claim = (
-        db.query(VesselRoleClaim).filter_by(id=change.claim_id).with_for_update().one()
-    )
+        claim_query if change.action == "GROUP" else claim_query.with_for_update()
+    ).one()
     if body.approve:
-        if claim.status != "APPROVED" or claim.revoked_at:
+        if change.action == "GROUP":
+            from app.api.v1.routes_company_fleet_workspace import apply_reviewed_change
+
+            apply_reviewed_change(db, change, actor, body)
+        elif claim.status != "APPROVED" or claim.revoked_at:
             raise HTTPException(
                 409, "The source fleet record has changed. Review a new request."
             )
-        try:
-            if change.action == "VOID":
-                claims.revoke_claim(db, claim=claim, actor=actor, reason=body.reason)
-            else:
-                replacement = claims.correct_claim(
-                    db,
-                    claim=claim,
-                    actor=actor,
-                    reason=body.reason,
-                    effective_start=datetime.fromisoformat(
-                        change.payload["effective_start"]
-                    ),
-                    effective_end=(
-                        datetime.fromisoformat(change.payload["effective_end"])
-                        if change.payload["effective_end"]
-                        else None
-                    ),
-                )
-                change.replacement_claim_id = replacement.id
-        except claims.ClaimError as exc:
-            db.rollback()
-            raise HTTPException(409, str(exc)) from None
+        if change.action != "GROUP":
+            try:
+                if change.action == "VOID":
+                    claims.revoke_claim(
+                        db, claim=claim, actor=actor, reason=body.reason
+                    )
+                else:
+                    replacement = claims.correct_claim(
+                        db,
+                        claim=claim,
+                        actor=actor,
+                        reason=body.reason,
+                        effective_start=datetime.fromisoformat(
+                            change.payload["effective_start"]
+                        ),
+                        effective_end=(
+                            datetime.fromisoformat(change.payload["effective_end"])
+                            if change.payload["effective_end"]
+                            else None
+                        ),
+                    )
+                    change.replacement_claim_id = replacement.id
+            except claims.ClaimError as exc:
+                db.rollback()
+                raise HTTPException(409, str(exc)) from None
     change.status = "APPROVED" if body.approve else "REJECTED"
     change.decided_by_user_id = actor.id
     change.decision_reason = body.reason.strip()
@@ -408,3 +419,9 @@ def decide_change(
     )
     db.commit()
     return change_out(db, change)
+
+
+# The declaration workflow is additive. Legacy manual-review endpoints remain supported.
+from app.api.v1.routes_company_fleet_workspace import router as workspace_router
+
+router.include_router(workspace_router)

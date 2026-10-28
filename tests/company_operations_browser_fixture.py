@@ -109,6 +109,42 @@ fixture.db.add(
         incident_id=case.id, note="Alice synthetic private note", created_at=NOW
     )
 )
+# Canonical fleet identities for the real declaration/import browser flow.
+from app.db.models.vessel import Vessel
+from app.db.models.shipping_company import ShippingCompany, VesselRoleClaim
+
+for number, name in (
+    ("9000015", "Fleet fixture one"),
+    ("9000027", "Fleet fixture two"),
+):
+    fixture.db.add(
+        Vessel(
+            name=name,
+            imo_number=number,
+            vessel_type="Bulk Carrier",
+            status="Active",
+            agent_id=fixture.other_agent.id,
+        )
+    )
+fixture.db.flush()
+competitor = ShippingCompany(
+    legal_name="Private fleet competitor",
+    normalized_name="PRIVATE FLEET COMPETITOR",
+    status="VERIFIED",
+)
+fixture.db.add(competitor)
+fixture.db.flush()
+vessel = fixture.db.query(Vessel).filter_by(imo_number="9000027").one()
+fixture.db.add(
+    VesselRoleClaim(
+        company_id=competitor.id,
+        vessel_id=vessel.id,
+        role="REGISTERED_OWNER",
+        status="AUTO_ACCEPTED",
+        effective_start=fixture.call.started_at,
+        evidence_reference="Private competitor proof",
+    )
+)
 fixture.db.commit()
 fixture.db.close()
 app.add_middleware(
