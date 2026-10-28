@@ -34,6 +34,7 @@ from app.db.models.user import User
 from app.db.models.vessel import Vessel
 from app.db.models.vessel_crew import VesselCrew
 from app.db.session import engine
+from tests.context_fixtures import immutable_call
 
 REPORT_DATE = "2026-03-05"
 
@@ -119,6 +120,7 @@ class ShoreLeaveAverageTests(unittest.TestCase):
             passport_number=passport, nationality="IN",
         ))
         self.db.flush()
+        immutable_call(self.db, self.vessel, self.agent_profile.id)
         return profile
 
     def manifest_only_crew(self, shore_pass_eligible=True):
@@ -129,13 +131,21 @@ class ShoreLeaveAverageTests(unittest.TestCase):
             hp_id=hpid, shore_pass_eligible=shore_pass_eligible,
         ))
         self.db.flush()
+        immutable_call(self.db, self.vessel, self.agent_profile.id)
         return hpid
 
     def pass_for(self, crew, out, back):
-        self.db.add(ShorePass(
-            crew_profile_id=crew.id, shore_pass_id=_uniq("SP"),
-            out_time=out, in_time=back,
-        ))
+        self.db.add(
+            ShorePass(
+                vessel_call_id=immutable_call(
+                    self.db, self.vessel, self.agent_profile.id
+                ).id,
+                crew_profile_id=crew.id,
+                shore_pass_id=_uniq("SP"),
+                out_time=out,
+                in_time=back,
+            )
+        )
         self.db.flush()
 
     def trip_for(self, crew, started, completed, created=None, passengers=None,
@@ -144,17 +154,28 @@ class ShoreLeaveAverageTests(unittest.TestCase):
         # and nobody unaccounted for.
         extra = {} if seats is None else {"num_passengers": seats}
         booking = CabBooking(
-            booking_id=_uniq("CAB"), crew_id=crew.id,
-            pickup_address="Gate", pickup_lat=0, pickup_lng=0,
-            drop_address="City", drop_lat=0, drop_lng=0,
-            vehicle_type="ac", vehicle_name="Sedan",
-            estimated_price=100, distance_km=5,
+            booking_id=_uniq("CAB"),
+            crew_id=crew.id,
+            pickup_address="Gate",
+            pickup_lat=0,
+            pickup_lng=0,
+            drop_address="City",
+            drop_lat=0,
+            drop_lng=0,
+            vehicle_type="ac",
+            vehicle_name="Sedan",
+            estimated_price=100,
+            distance_km=5,
             status=status,
             agency_id=self.agent_profile.id,
             vessel_id=self.vessel.id,
-            context_resolution="vessel_id",
-            created_at=created or started,
-            trip_started_at=started, trip_completed_at=completed,
+            vessel_call_id=immutable_call(
+                self.db, self.vessel, self.agent_profile.id
+            ).id,
+            context_resolution="CONFIRMED_AGENCY",
+            created_at=created or started or _at(10),
+            trip_started_at=started,
+            trip_completed_at=completed,
             crew_member_ids=passengers,
             **extra,
         )
@@ -344,12 +365,11 @@ class ShoreLeaveAverageTests(unittest.TestCase):
         # Two hours and 21 minutes ashore, not the 12h 21m envelope.
         self.assertEqual(result.average_duration_minutes, 141)
 
-    def test_a_completed_trip_without_timestamps_still_counts_as_returned(self):
+    def test_unresolved_legacy_completion_is_excluded_until_review(self):
         """Legacy rows recorded the status but not the times.
 
-        The trip is finished, so the crew member is demonstrably back aboard.
-        Inferring "still ashore" from the missing end timestamp stranded them
-        ashore permanently and left the day unable to close out.
+        A completion alone does not prove whose historical call this belongs to.
+        It cannot follow the passenger's present-day crew manifest into a report.
         """
         crew = self.crew()
         self.db.add(CabBooking(
@@ -365,8 +385,8 @@ class ShoreLeaveAverageTests(unittest.TestCase):
 
         result = self.report()
 
-        self.assertEqual(result.crew_went_ashore, 1)
-        self.assertEqual(result.returned_safely, 1)
+        self.assertEqual(result.crew_went_ashore, 0)
+        self.assertEqual(result.returned_safely, 0)
         self.assertEqual(result.still_ashore, 0)
         self.assertTrue(result.all_returned)
         # Back aboard, but with no timestamps there is nothing to measure.

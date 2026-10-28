@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 import os
 import qrcode
 import io
@@ -43,8 +44,8 @@ def get_hotels(
         query = query.filter(Hotel.price_per_night >= min_price)
     if max_price is not None:
         query = query.filter(Hotel.price_per_night <= max_price)
-    
-    hotels = query.all()
+
+    hotels = page_all(query, collection="routes_hotels.get_hotels.0", label="Hotels")
     return hotels
 
 # Get hotels based on filters
@@ -68,8 +69,12 @@ def get_hotels_by_filters(
         query = query.filter(Hotel.price_per_night <= max_price)
     if min_rating is not None:
         query = query.filter(Hotel.rating >= min_rating)
-    
-    hotels = query.all()
+
+    hotels = page_all(
+        query,
+        collection="routes_hotels.get_hotels_by_filters.0",
+        label="Hotels by filters",
+    )
     return hotels
 
 # Get hotel by id

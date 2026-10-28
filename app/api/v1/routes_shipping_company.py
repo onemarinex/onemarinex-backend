@@ -16,6 +16,8 @@ section 22, and are deliberately not stubbed -- an endpoint returning an empty
 list reads as "no data" rather than "not built".
 """
 
+from app.services.collection_pages import page_all
+
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -221,11 +223,12 @@ def company_fleet(
     merely hidden from the response -- it is never selected.
     """
     company, _ = context
-    rows = (
+    rows = page_all(
         db.query(VesselRoleClaim)
         .filter(VesselRoleClaim.company_id == company.id)
-        .order_by(VesselRoleClaim.vessel_id, VesselRoleClaim.effective_start)
-        .all()
+        .order_by(VesselRoleClaim.vessel_id, VesselRoleClaim.effective_start),
+        collection="routes_shipping_company.company_fleet.0",
+        label="Company fleet",
     )
     return [_serialize(claim) for claim in rows]
 
@@ -259,6 +262,10 @@ class FigureOut(BaseModel):
     caveat: str
     # So a renderer can style a caveated figure differently without parsing it.
     needs_caveat: bool
+    source_version: str
+    event_time: str
+    aggregation_grain: str
+    suppression_threshold: int
 
 
 class SectionOut(BaseModel):
@@ -272,10 +279,18 @@ class SectionOut(BaseModel):
 
 def _figure_out(key: str, figure) -> FigureOut:
     return FigureOut(
-        key=key, label=figure.metric.label, display=figure.display,
-        value=figure.value, available=figure.available,
-        suppressed=figure.suppressed, caveat=figure.caveat,
+        key=key,
+        label=figure.metric.label,
+        display=figure.display,
+        value=figure.value,
+        available=figure.available,
+        suppressed=figure.suppressed,
+        caveat=figure.caveat,
         needs_caveat=figure.metric.availability == Availability.LABELLED,
+        source_version=figure.metric.source_version,
+        event_time=figure.metric.event_time,
+        aggregation_grain=figure.metric.aggregation_grain,
+        suppression_threshold=figure.metric.suppression_threshold,
     )
 
 
@@ -286,6 +301,7 @@ def _section(
     from datetime import datetime, timezone
 
     figures: List[FigureOut] = []
+    ashore_snapshot = None
     for definition in metrics_for(section):
         computer = aggregates.COMPUTABLE_FIGURES.get(definition.key)
         if computer is None:
@@ -296,12 +312,29 @@ def _section(
                 aggregates.Figure(metric=definition, value=None, available=False),
             ))
             continue
+        if definition.key in ("estimated_ashore_seats", "ashore_uncertain_seats"):
+            if ashore_snapshot is None:
+                ashore_snapshot = aggregates._ashore_snapshot(db, company_id, period)
+            index = 0 if definition.key == "estimated_ashore_seats" else 1
+            figures.append(
+                _figure_out(
+                    definition.key,
+                    aggregates.Figure(definition, ashore_snapshot[index]),
+                )
+            )
+            continue
         kwargs = {}
         if definition.key == "verified_vessels":
             # An instant, not a period: "how many vessels do you hold" has no
             # meaning over a range. In a report it is the period's end, so an
             # annual report answers it as at the close of the year.
-            kwargs["at"] = period.end if period else datetime.now(timezone.utc)
+            from datetime import timedelta
+
+            kwargs["at"] = (
+                min(period.end - timedelta(microseconds=1), datetime.now(timezone.utc))
+                if period
+                else datetime.now(timezone.utc)
+            )
         else:
             kwargs["period"] = period
         figures.append(_figure_out(
@@ -386,31 +419,53 @@ def vessel_calls(
         return []
 
     out: List[CompanyCallOut] = []
-    for call in (
+    from sqlalchemy import and_, or_
+
+    overlap = or_(
+        *[
+            and_(
+                c.effective_start < func.coalesce(VesselCall.ended_at, func.now()),
+                (
+                    True
+                    if c.effective_end is None
+                    else VesselCall.started_at < c.effective_end
+                ),
+            )
+            for c in claims_held
+        ]
+    )
+    for call in page_all(
         db.query(VesselCall)
-        .filter(VesselCall.vessel_id == vessel.id)
-        .order_by(VesselCall.started_at)
-        .all()
+        .filter(VesselCall.vessel_id == vessel.id, overlap)
+        .order_by(VesselCall.started_at.desc()),
+        collection="company_calls",
+        label="Port calls",
     ):
         start, end = call.started_at, call.ended_at
         if start is None:
             continue
         covering = [
-            c for c in claims_held
-            if c.effective_start <= start
+            c
+            for c in claims_held
+            if (end is None or c.effective_start < end)
             and (c.effective_end is None or c.effective_end > start)
         ]
         if not covering:
             continue
-        whole = any(
-            c.effective_end is None or (end is not None and c.effective_end >= end)
-            for c in covering
+        from app.services.company_claims import claim_intervals_cover
+
+        whole = claim_intervals_cover(covering, start, end)
+        out.append(
+            CompanyCallOut(
+                vessel_call_id=call.id,
+                vessel_name=call.vessel_name,
+                imo_number=call.imo_number,
+                port_name=call.port_name,
+                started_at=start,
+                ended_at=end,
+                fully_within_tenure=whole,
+            )
         )
-        out.append(CompanyCallOut(
-            vessel_call_id=call.id, vessel_name=call.vessel_name,
-            imo_number=call.imo_number, port_name=call.port_name,
-            started_at=start, ended_at=end, fully_within_tenure=whole,
-        ))
     return out
 
 
@@ -432,12 +487,13 @@ class MemberIn(BaseModel):
 def list_members(db: Session = Depends(get_db), context=Depends(current_company_member)):
     company, membership = context
     _require_company_admin(membership)
-    rows = (
+    rows = page_all(
         db.query(CompanyUserMembership, User.email)
         .join(User, User.id == CompanyUserMembership.user_id)
         .filter(CompanyUserMembership.company_id == company.id)
-        .order_by(User.email)
-        .all()
+        .order_by(User.email),
+        collection="routes_shipping_company.list_members.0",
+        label="Members",
     )
     return [
         MemberOut(user_id=m.user_id, email=email, role=m.role, enabled=m.enabled)
@@ -459,16 +515,36 @@ def add_member(
     user rather than creating one from an address anyone could type.
     """
     company, membership = context
-    _require_company_admin(membership)
-    if body.role not in ("ADMIN", "ANALYST", "VIEWER"):
-        raise HTTPException(status_code=400, detail="role must be ADMIN, ANALYST or VIEWER")
+    from app.api.v1.routes_company_staff import lock_admin
 
-    user = db.query(User).filter(User.email == body.email.strip().lower()).first()
+    lock_admin(db, company, membership)
+    if body.role not in ("ADMIN", "ANALYST", "VIEWER"):
+        raise HTTPException(
+            status_code=400, detail="role must be ADMIN, ANALYST or VIEWER"
+        )
+
+    user = (
+        db.query(User)
+        .filter(User.email == body.email.strip().lower())
+        .with_for_update()
+        .first()
+    )
     if user is None:
         raise HTTPException(
             status_code=404,
             detail="No account with that address. The person must register first.",
         )
+    if (
+        db.query(CompanyUserMembership)
+        .filter(
+            CompanyUserMembership.user_id == user.id,
+            CompanyUserMembership.enabled.is_(True),
+            CompanyUserMembership.company_id != company.id,
+        )
+        .first()
+        is not None
+    ):
+        raise HTTPException(409, "Account already belongs to another company")
     existing = (
         db.query(CompanyUserMembership)
         .filter(
@@ -478,10 +554,16 @@ def add_member(
         .first()
     )
     if existing is not None:
-        existing.role, existing.enabled = body.role, True
+        from app.api.v1.routes_company_staff import change_member
+
+        change_member(db, company, current_user, existing, body.role, True)
         db.commit()
-        return MemberOut(user_id=user.id, email=user.email,
-                         role=existing.role, enabled=existing.enabled)
+        return MemberOut(
+            user_id=user.id,
+            email=user.email,
+            role=existing.role,
+            enabled=existing.enabled,
+        )
 
     created = CompanyUserMembership(
         company_id=company.id, user_id=user.id, role=body.role,
@@ -690,14 +772,14 @@ def my_access_requests(
     from app.db.models.shipping_company import SensitiveAccessRequest
 
     company, _ = context
-    rows = (
+    rows = page_all(
         db.query(SensitiveAccessRequest)
         .filter(SensitiveAccessRequest.company_id == company.id)
-        .order_by(SensitiveAccessRequest.created_at.desc())
-        .all()
+        .order_by(SensitiveAccessRequest.created_at.desc()),
+        collection="routes_shipping_company.my_access_requests.0",
+        label="My access requests",
     )
     return [AccessRequestOut.model_validate(r, from_attributes=True) for r in rows]
-
 
 
 # --- registration and verification -------------------------------------------
@@ -974,20 +1056,40 @@ def company_report_export(
 
     buffer = _io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow([
-        "section", "metric", "label", "value", "state", "caveat",
-    ])
+    writer.writerow(
+        [
+            "section",
+            "metric",
+            "label",
+            "value",
+            "state",
+            "caveat",
+            "source_version",
+            "event_time",
+            "aggregation_grain",
+            "suppression_threshold",
+        ]
+    )
     for figure in _report_figures(db, company.id, period):
         state = (
             "withheld" if figure.suppressed
             else "no_source" if not figure.available
             else "counted"
         )
-        writer.writerow([
-            figure.section, figure.key, figure.label,
-            "" if figure.value is None else figure.value,
-            state, figure.caveat,
-        ])
+        writer.writerow(
+            [
+                figure.section,
+                figure.key,
+                figure.label,
+                "" if figure.value is None else figure.value,
+                state,
+                figure.caveat,
+                figure.source_version,
+                figure.event_time,
+                figure.aggregation_grain,
+                figure.suppression_threshold,
+            ]
+        )
 
     filename = (
         f"heyports-{company.id}-"

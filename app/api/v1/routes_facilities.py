@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -88,7 +89,11 @@ def get_massage_wellness(
     )
     if port_id:
         query = query.filter(Vendors.port_id == port_id)
-    vendors = apply_vendor_commission_ranking(query).all()
+    vendors = page_all(
+        apply_vendor_commission_ranking(query),
+        collection="routes_facilities.get_massage_wellness.0",
+        label="Massage wellness",
+    )
     return [_vendor_to_facility(v) for v in vendors]
 
 
@@ -104,7 +109,11 @@ def get_shopping_utility(
     )
     if port_id:
         query = query.filter(Vendors.port_id == port_id)
-    vendors = apply_vendor_commission_ranking(query).all()
+    vendors = page_all(
+        apply_vendor_commission_ranking(query),
+        collection="routes_facilities.get_shopping_utility.0",
+        label="Shopping utility",
+    )
     return [_vendor_to_facility(v) for v in vendors]
 
 

@@ -9,6 +9,8 @@ Registered under the existing `/api/v1/superadmin` prefix, matching the
 convention the rest of the Super Admin surface already uses.
 """
 
+from app.services.collection_pages import page_all
+
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -59,6 +61,8 @@ class ReviewClaimOut(BaseModel):
     review_note: Optional[str] = None
     # Both sides, which only this surface ever sees.
     conflicts_with: List[int] = []
+    conflict_count: int = 0
+    conflicts_truncated: bool = False
 
 
 class DecisionIn(BaseModel):
@@ -85,7 +89,7 @@ class AuditEventOut(BaseModel):
     created_at: datetime
 
 
-def _overlapping_approved(db: Session, claim: VesselRoleClaim) -> List[int]:
+def _overlap_query(db: Session, claim: VesselRoleClaim):
     """Approved claims this one would collide with.
 
     The same predicate as the database's exclusion constraint, expressed in
@@ -112,17 +116,36 @@ def _overlapping_approved(db: Session, claim: VesselRoleClaim) -> List[int]:
     )
     if end is not None:
         others = others.filter(VesselRoleClaim.effective_start < end)
-    return [row.id for row in others.all()]
+    return others
+
+
+def _overlapping_approved(db: Session, claim: VesselRoleClaim) -> List[int]:
+    return [
+        row.id
+        for row in _overlap_query(db, claim)
+        .order_by(VesselRoleClaim.id)
+        .limit(20)
+        .all()
+    ]
 
 
 def _serialize(db: Session, claim: VesselRoleClaim, company_name: str) -> ReviewClaimOut:
     return ReviewClaimOut(
-        id=claim.id, company_id=claim.company_id, company_name=company_name,
-        vessel_id=claim.vessel_id, imo_number=claim.imo_number, role=claim.role,
-        effective_start=claim.effective_start, effective_end=claim.effective_end,
-        status=claim.status, evidence_type=claim.evidence_type,
-        evidence_reference=claim.evidence_reference, review_note=claim.review_reason,
+        id=claim.id,
+        company_id=claim.company_id,
+        company_name=company_name,
+        vessel_id=claim.vessel_id,
+        imo_number=claim.imo_number,
+        role=claim.role,
+        effective_start=claim.effective_start,
+        effective_end=claim.effective_end,
+        status=claim.status,
+        evidence_type=claim.evidence_type,
+        evidence_reference=claim.evidence_reference,
+        review_note=claim.review_reason,
         conflicts_with=_overlapping_approved(db, claim),
+        conflict_count=_overlap_query(db, claim).count(),
+        conflicts_truncated=_overlap_query(db, claim).count() > 20,
     )
 
 
@@ -146,10 +169,15 @@ def review_queue(
     query = db.query(VesselRoleClaim, ShippingCompany.legal_name).join(
         ShippingCompany, ShippingCompany.id == VesselRoleClaim.company_id)
     query = query.filter(
-        VesselRoleClaim.status == status if status
+        VesselRoleClaim.status == status
+        if status
         else VesselRoleClaim.status.in_(OPEN_STATUSES)
     )
-    rows = query.order_by(VesselRoleClaim.created_at).all()
+    rows = page_all(
+        query.order_by(VesselRoleClaim.created_at),
+        collection="routes_company_review.review_queue.0",
+        label="Review queue",
+    )
     return [_serialize(db, claim, name) for claim, name in rows]
 
 
@@ -237,14 +265,15 @@ def claim_audit(claim_id: int, db: Session = Depends(get_db),
                 current_user: User = Depends(get_current_user)):
     """Every decision on this claim, oldest first. Append-only, so complete."""
     _require_superadmin(current_user)
-    rows = (
+    rows = page_all(
         db.query(CompanyAuditEvent)
         .filter(
             CompanyAuditEvent.target_type == "vessel_role_claim",
             CompanyAuditEvent.target_id == claim_id,
         )
-        .order_by(CompanyAuditEvent.id)
-        .all()
+        .order_by(CompanyAuditEvent.id),
+        collection="routes_company_review.claim_audit.0",
+        label="Claim audit",
     )
     return [AuditEventOut.model_validate(row, from_attributes=True) for row in rows]
 
@@ -343,7 +372,11 @@ def access_request_queue(
         query = query.filter(SensitiveAccessRequest.status == status.upper())
     else:
         query = query.filter(SensitiveAccessRequest.status.in_(access.OPEN_STATUSES))
-    rows = query.order_by(SensitiveAccessRequest.created_at).all()
+    rows = page_all(
+        query.order_by(SensitiveAccessRequest.created_at),
+        collection="routes_company_review.access_request_queue.0",
+        label="Access request queue",
+    )
     return [_serialize_request(db, row, name) for row, name in rows]
 
 
@@ -397,14 +430,15 @@ def revoke_access(request_id: int, body: DecisionIn, db: Session = Depends(get_d
 def access_request_audit(request_id: int, db: Session = Depends(get_db),
                          current_user: User = Depends(get_current_user)):
     _require_superadmin(current_user)
-    rows = (
+    rows = page_all(
         db.query(CompanyAuditEvent)
         .filter(
             CompanyAuditEvent.target_type == "sensitive_access_request",
             CompanyAuditEvent.target_id == request_id,
         )
-        .order_by(CompanyAuditEvent.id)
-        .all()
+        .order_by(CompanyAuditEvent.id),
+        collection="routes_company_review.access_request_audit.0",
+        label="Access request audit",
     )
     return [AuditEventOut.model_validate(row, from_attributes=True) for row in rows]
 
@@ -483,7 +517,11 @@ def company_queue(
         query = query.filter(ShippingCompany.status.in_(PENDING_COMPANY_STATUSES))
     return [
         _serialize_company(db, row)
-        for row in query.order_by(ShippingCompany.created_at).all()
+        for row in page_all(
+            query.order_by(ShippingCompany.created_at),
+            collection="routes_company_review.company_queue.0",
+            label="Company queue",
+        )
     ]
 
 
@@ -545,13 +583,51 @@ def close_company(company_id: int, body: DecisionIn, db: Session = Depends(get_d
 def company_audit(company_id: int, db: Session = Depends(get_db),
                   current_user: User = Depends(get_current_user)):
     _require_superadmin(current_user)
-    rows = (
+    rows = page_all(
         db.query(CompanyAuditEvent)
         .filter(
             CompanyAuditEvent.target_type == "shipping_company",
             CompanyAuditEvent.target_id == company_id,
         )
-        .order_by(CompanyAuditEvent.id)
-        .all()
+        .order_by(CompanyAuditEvent.id),
+        collection="routes_company_review.company_audit.0",
+        label="Company audit",
     )
     return [AuditEventOut.model_validate(row, from_attributes=True) for row in rows]
+
+
+@router.get("/company-claims/{claim_id}/conflicts")
+def claim_conflicts(
+    claim_id: int,
+    offset: int = 0,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_superadmin(current_user)
+    if offset < 0 or not 1 <= limit <= 100:
+        raise HTTPException(422, "Invalid conflict pagination")
+    claim, _ = _load(db, claim_id)
+    query = _overlap_query(db, claim)
+    total = query.count()
+    rows = query.order_by(VesselRoleClaim.id).offset(offset).limit(limit).all()
+    companies = {
+        c.id: c.legal_name
+        for c in db.query(ShippingCompany)
+        .filter(ShippingCompany.id.in_([r.company_id for r in rows]))
+        .all()
+    }
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "company_name": companies.get(r.company_id, ""),
+                "effective_start": r.effective_start,
+                "effective_end": r.effective_end,
+            }
+            for r in rows
+        ],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }

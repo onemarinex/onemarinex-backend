@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 from datetime import datetime
 from typing import List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
@@ -791,9 +792,9 @@ def get_crew_profile(hp_id: str, current_user: User = Depends(get_current_user),
     v_crew = query.filter(VesselCrew.hp_id == hp_id).first()
     if not v_crew:
         raise HTTPException(status_code=404, detail="Crew member not found")
-    
+
     c_profile = db.query(CrewProfile).filter(CrewProfile.hpid == hp_id).first()
-    
+
     bookings = []
     visits = []
     if c_profile:
@@ -828,12 +829,16 @@ def get_crew_profile(hp_id: str, current_user: User = Depends(get_current_user),
                 .filter(Vessel.agent_id == current_user.id)
             )
         if booking_q is not None:
-            bookings = booking_q.order_by(
-                CabBooking.created_at.desc(), CabBooking.id.desc()
-            ).all()
-        shore_passes = pass_q.order_by(
-            ShorePass.created_at.desc(), ShorePass.id.desc()
-        ).all()
+            bookings = page_all(
+                booking_q.order_by(CabBooking.created_at.desc(), CabBooking.id.desc()),
+                collection="routes_vessels.get_crew_profile.0",
+                label="Crew profile",
+            )
+        shore_passes = page_all(
+            pass_q.order_by(ShorePass.created_at.desc(), ShorePass.id.desc()),
+            collection="routes_vessels.get_crew_profile.1",
+            label="Crew profile",
+        )
         visits = [sp.port_name for sp in shore_passes if sp.port_name]
 
     return {
@@ -1107,8 +1112,12 @@ def update_vessel(vessel_id: int, body: VesselIn, current_user: User = Depends(g
 def get_vessels(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.role != "agent":
         raise HTTPException(status_code=403, detail="Only agents can access their vessels")
-    
-    vessels = db.query(Vessel).filter(Vessel.agent_id == current_user.id).all()
+
+    vessels = page_all(
+        db.query(Vessel).filter(Vessel.agent_id == current_user.id),
+        collection="routes_vessels.get_vessels.0",
+        label="Vessels",
+    )
     return [vessel_out(vessel) for vessel in vessels]
 
 @router.get("/public", response_model=List[VesselPublicOut])
@@ -1151,7 +1160,11 @@ def get_public_vessels(
     # be honest about what exists and let that decide.
     #
     # Archived is still excluded: it means removed from operations, not sailed.
-    vessels = db.query(Vessel).all()
+    vessels = page_all(
+        db.query(Vessel),
+        collection="routes_vessels.get_public_vessels.1",
+        label="Public vessels",
+    )
     out = []
     for v in vessels:
         status = effective_vessel_status(v)

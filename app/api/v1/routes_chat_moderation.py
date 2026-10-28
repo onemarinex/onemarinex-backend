@@ -3,6 +3,8 @@
 Superadmin-only CRUD for restricted words, moderation events, and settings.
 Mounted at /api/v1/superadmin alongside routes_pricing_controls.
 """
+
+from app.services.collection_pages import page_all
 import csv
 import io
 import logging
@@ -295,7 +297,11 @@ def export_restricted_words(
     if not include_inactive:
         query = query.filter(ChatRestrictedWord.is_active)
 
-    words = query.order_by(ChatRestrictedWord.word).all()
+    words = page_all(
+        query.order_by(ChatRestrictedWord.word),
+        collection="routes_chat_moderation.export_restricted_words.0",
+        label="Export restricted words",
+    )
 
     output = io.StringIO()
     writer = csv.writer(output)

@@ -104,14 +104,15 @@ class HistoricalLateRegistrationTests(unittest.TestCase):
 
     # --- the case the audit asked about ---
 
-    def test_a_voyage_that_ended_before_the_account_existed_is_attached(self):
+    def test_a_departed_voyage_requires_separate_review(self):
         profile = self.register()
 
         summary = link_historical_assignments(self.db, profile)
 
         self.db.refresh(self.assignment)
-        self.assertEqual(self.assignment.crew_profile_id, profile.id)
-        self.assertEqual(summary["linked"], [self.assignment.id])
+        self.assertIsNone(self.assignment.crew_profile_id)
+        self.assertEqual(summary["linked"], [])
+        self.assertEqual(len(summary["conflicts"]), 1)
 
     def test_the_assignment_is_attached_not_rewritten(self):
         """Only the profile link changes; the voyage's own record is evidence."""
@@ -184,7 +185,7 @@ class HistoricalLateRegistrationTests(unittest.TestCase):
         self.assertEqual(record.status, "OPEN")
         self.assertIn("has not been attached", record.conflict_message)
 
-    def test_an_assignment_with_no_recorded_nationality_is_still_attached(self):
+    def test_missing_nationality_requires_review(self):
         """Absence of evidence, not evidence of a different person."""
         self.assignment.nationality = None
         self.db.flush()
@@ -193,7 +194,7 @@ class HistoricalLateRegistrationTests(unittest.TestCase):
         link_historical_assignments(self.db, profile)
 
         self.db.refresh(self.assignment)
-        self.assertEqual(self.assignment.crew_profile_id, profile.id)
+        self.assertIsNone(self.assignment.crew_profile_id)
 
     def test_one_person_keeps_one_assignment_per_call(self):
         duplicate = CrewAssignment(
@@ -208,8 +209,9 @@ class HistoricalLateRegistrationTests(unittest.TestCase):
 
         summary = link_historical_assignments(self.db, profile)
 
-        self.assertEqual(len(summary["linked"]), 1)
-        self.assertEqual(summary["skipped_occupied_call"], [duplicate.id])
+        self.assertEqual(summary["linked"], [])
+        self.assertEqual(len(summary["conflicts"]), 2)
+        self.assertEqual(summary["skipped_occupied_call"], [])
 
     def test_several_voyages_are_all_attached(self):
         second = VesselCall(
@@ -231,7 +233,8 @@ class HistoricalLateRegistrationTests(unittest.TestCase):
 
         summary = link_historical_assignments(self.db, self.register())
 
-        self.assertEqual(sorted(summary["linked"]), sorted([self.assignment.id, older.id]))
+        self.assertEqual(summary["linked"], [])
+        self.assertEqual(len(summary["conflicts"]), 2)
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -55,34 +56,21 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _agent_may_view_booking(db: Session, agent_user_id: int, booking: CabBooking) -> bool:
-    """Authorize by the booking's event-time agency, with a legacy fallback."""
-    agency_id = db.query(AgentProfile.id).filter(
-        AgentProfile.user_id == agent_user_id
-    ).scalar()
-    if booking.agency_id is not None:
-        return agency_id is not None and booking.agency_id == agency_id
+def _agent_may_view_booking(
+    db: Session, agent_user_id: int, booking: CabBooking
+) -> bool:
+    """Only immutable, resolved event-time agency grants historical access."""
+    from app.services.event_origin import agency_scope
 
-    vessel_ids = [
-        row[0] for row in db.query(Vessel.id).filter(Vessel.agent_id == agent_user_id).all()
-    ]
-    if booking.vessel_id is not None:
-        return booking.vessel_id in vessel_ids
-    if not vessel_ids or booking.crew_id is None:
-        return False
-    hpids = [
-        row[0]
-        for row in db.query(VesselCrew.hp_id)
-        .filter(VesselCrew.vessel_id.in_(vessel_ids), VesselCrew.hp_id.isnot(None))
-        .all()
-        if row[0]
-    ]
-    if not hpids:
-        return False
-    return db.query(CrewProfile.id).filter(
-        CrewProfile.id == booking.crew_id,
-        CrewProfile.hpid.in_(hpids),
-    ).first() is not None
+    agency_id = (
+        db.query(AgentProfile.id).filter(AgentProfile.user_id == agent_user_id).scalar()
+    )
+    return (
+        db.query(CabBooking.id)
+        .filter(CabBooking.id == booking.id, agency_scope(CabBooking, agency_id))
+        .first()
+        is not None
+    )
 
 
 # Stop labels that are structural, not real venue names — a "drop" stop is
@@ -619,10 +607,10 @@ def list_eligible_drivers(
         raise HTTPException(status_code=403, detail="Unauthorized")
 
     vehicle_type = (booking.vehicle_type or "").lower()
-    drivers = (
-        db.query(Driver)
-        .filter(Driver.aggregator_id == provider.id)
-        .all()
+    drivers = page_all(
+        db.query(Driver).filter(Driver.aggregator_id == provider.id),
+        collection="routes_bookings.list_eligible_drivers.0",
+        label="Eligible drivers",
     )
     eligible = []
     for driver in drivers:

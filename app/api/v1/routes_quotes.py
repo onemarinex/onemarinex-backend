@@ -1,3 +1,5 @@
+from app.services.collection_pages import page_all
+
 # app/api/v1/routes_quotes.py
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
@@ -17,7 +19,6 @@ from app.db.models.order import Order
 from sqlalchemy.exc import IntegrityError
 
 router = APIRouter()
-
 
 
 # -------- auth dependency (same behavior as in your other routes) --------
@@ -306,7 +307,11 @@ def list_my_quotes(
     q = db.query(RFQQuote).filter(RFQQuote.vendor_user_id == me.id)
     if rfq_id:
         q = q.filter(RFQQuote.rfq_id == rfq_id)
-    rows = q.order_by(RFQQuote.id.desc()).all()
+    rows = page_all(
+        q.order_by(RFQQuote.id.desc()),
+        collection="routes_quotes.list_my_quotes.0",
+        label="My quotes",
+    )
 
     profile = db.query(VendorProfile).filter(VendorProfile.user_id == me.id).first()
     company = profile.company_name if profile else None

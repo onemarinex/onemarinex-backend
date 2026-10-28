@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import cast, String, func, or_, text
@@ -1737,10 +1738,14 @@ def get_shorepass_history(
     profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
     if not profile:
         return []
-    
-    passes = db.query(ShorePass).filter(
-        ShorePass.crew_profile_id == profile.id
-    ).order_by(ShorePass.created_at.desc()).all()
+
+    passes = page_all(
+        db.query(ShorePass)
+        .filter(ShorePass.crew_profile_id == profile.id)
+        .order_by(ShorePass.created_at.desc()),
+        collection="routes_crew.get_shorepass_history.0",
+        label="Shorepass history",
+    )
     return passes
 
 # ─── Provider-type bridge ─────────────────────────────────────────────────────
@@ -2783,7 +2788,7 @@ def book_cab(
 #     profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
 #     if not profile:
 #         return []
-#     
+#
 #     history = db.query(CabBooking).filter(CabBooking.crew_id == profile.id).order_by(CabBooking.created_at.desc()).all()
 #     return history
 
@@ -2802,9 +2807,13 @@ def get_cab_estimates(
     dynamic_estimates = get_dynamic_cab_estimates(db, distance, port, estimate_minutes=route_minutes)
     if dynamic_estimates:
         return filter_estimates_for_ride_type(db, dynamic_estimates, ride_type, port)
-    
-    pricings = db.query(CabPricing).all()
-    
+
+    pricings = page_all(
+        db.query(CabPricing),
+        collection="routes_crew.get_cab_estimates.0",
+        label="Cab estimates",
+    )
+
     # If table is empty, return default pricing
     if not pricings:
         # Seed values for initial run if empty
@@ -3000,11 +3009,11 @@ def get_booking_history(
     """Get all cab bookings for the current user (owned + invited)"""
     if current_user.role != "crew":
         raise HTTPException(status_code=403, detail="Only crew can view booking history")
-    
+
     profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Crew profile not found")
-    
+
     # Get booking IDs where user is invited
     invited_booking_ids = [
         inv.booking_id for inv in db.query(BookingInvitation).filter(
@@ -3012,7 +3021,7 @@ def get_booking_history(
             BookingInvitation.status == "active"
         ).all()
     ]
-    
+
     # Fetch bookings: owned OR invited
     from sqlalchemy import or_
     query = db.query(
@@ -3034,9 +3043,11 @@ def get_booking_history(
             CabBooking.id.in_(invited_booking_ids) if invited_booking_ids else False
         )
     ).order_by(CabBooking.created_at.desc(), CabBooking.id.desc())
-    
-    bookings = query.all()
-    
+
+    bookings = page_all(
+        query, collection="routes_crew.get_booking_history.1", label="Booking history"
+    )
+
     return [
         CabBookingOut(
             id=booking.id,

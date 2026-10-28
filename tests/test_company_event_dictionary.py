@@ -29,11 +29,15 @@ class DictionaryShapeTests(unittest.TestCase):
     def test_every_family_states_a_quality_and_a_caveat(self):
         for name, entry in EVENT_DICTIONARY.items():
             with self.subTest(family=name):
-                self.assertIn(entry.quality, (
-                    Quality.AUTHORITATIVE,
-                    Quality.RECORDED_NOT_OCCURRED,
-                    Quality.UNAVAILABLE,
-                ))
+                self.assertIn(
+                    entry.quality,
+                    (
+                        Quality.AUTHORITATIVE,
+                        Quality.RECORDED_NOT_OCCURRED,
+                        Quality.PLANNED,
+                        Quality.UNAVAILABLE,
+                    ),
+                )
                 self.assertTrue(entry.caveat.strip(), "a caveat is not optional")
 
     def test_an_unavailable_family_names_no_column(self):
@@ -78,7 +82,8 @@ class AgainstTheRealSchemaTests(unittest.TestCase):
                 "SELECT table_name FROM information_schema.columns "
                 "WHERE table_schema='public' AND column_name LIKE '%occur%'")))
         self.assertEqual(
-            found, ["incidents"],
+            found,
+            ["crew_movement_events", "incidents"],
             f"occurrence columns changed: {found} — review the dictionary",
         )
 
@@ -96,7 +101,7 @@ class ConsequenceTests(unittest.TestCase):
     def test_the_two_families_this_schema_cannot_attribute(self):
         self.assertEqual(
             families_with_no_usable_time(),
-            ("crew_sign_on_off", "shore_pass_approved"),
+            ("shore_pass_approved",),
         )
 
     def test_shore_pass_approval_is_unavailable_not_approximated(self):

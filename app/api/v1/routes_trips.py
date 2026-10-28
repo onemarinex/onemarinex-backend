@@ -80,15 +80,9 @@ def _agent_trip_scope(db: Session, agent_user_id: int):
 
 
 def _agent_owns_trip(db: Session, agent_user_id: int, booking: CabBooking) -> bool:
-    agency_id = db.query(AgentProfile.id).filter(
-        AgentProfile.user_id == agent_user_id
-    ).scalar()
-    if booking.agency_id is not None:
-        return agency_id is not None and booking.agency_id == agency_id
-    vessel_ids, crew_profile_ids = _agent_trip_scope(db, agent_user_id)
-    if booking.vessel_id is not None:
-        return booking.vessel_id in vessel_ids
-    return booking.crew_id is not None and booking.crew_id in crew_profile_ids
+    from app.api.v1.routes_bookings import _agent_may_view_booking
+
+    return _agent_may_view_booking(db, agent_user_id, booking)
 
 
 @router.get("/monitoring", response_model=MonitoringResponse)
@@ -109,71 +103,44 @@ def get_trip_monitoring(
             detail="Only agents can access trip monitoring"
         )
 
-    # Get crew profile IDs for this agent's vessels
-    vessel_ids = [v.id for v in db.query(Vessel).filter(Vessel.agent_id == current_user.id).all()]
     call = None
     if vessel_id is not None:
-        if vessel_id not in vessel_ids:
-            raise HTTPException(status_code=404, detail="Vessel not found")
-        vessel_ids = [vessel_id]
-        # One ship means one call: the page asking for it is showing the call
-        # the vessel is on. A returning vessel was carrying its previous calls'
-        # trips into the new one.
-        call = current_call_for(db, vessel_id)
-
-    crew_hpids = []
-    if vessel_ids:
-        crew_hpids = [
-            c.hp_id for c in db.query(VesselCrew).filter(
-                VesselCrew.vessel_id.in_(vessel_ids),
-                VesselCrew.hp_id.isnot(None),
-            ).all()
-            if c.hp_id
-        ]
-
-    crew_profile_ids = []
-    if crew_hpids:
-        crew_profile_ids = [
-            cp.id for cp in db.query(CrewProfile).filter(CrewProfile.hpid.in_(crew_hpids)).all()
-        ]
-
-    if not vessel_ids:
-        return MonitoringResponse(ongoing=[], requested=[], completed=[])
-
-    # Use raw SQL to avoid SQLEnum deserialization errors from inconsistent DB data
-    vessel_placeholders = ",".join([str(value) for value in vessel_ids])
-    legacy_crew_clause = "FALSE"
-    if crew_profile_ids:
-        crew_placeholders = ",".join([str(value) for value in crew_profile_ids])
-        legacy_crew_clause = f"cb.crew_id IN ({crew_placeholders})"
-    agency_profile_id = db.query(AgentProfile.id).filter(
-        AgentProfile.user_id == current_user.id
-    ).scalar()
-    strong_clause = "FALSE"
-    if agency_profile_id is not None:
-        strong_clause = (
-            f"cb.agency_id = {int(agency_profile_id)} "
-            f"AND cb.vessel_id IN ({vessel_placeholders})"
+        vessel = (
+            db.query(Vessel.id)
+            .filter(Vessel.id == vessel_id, Vessel.agent_id == current_user.id)
+            .first()
         )
-    # Trips of this call only. Rows stamped with another call are out; rows from
-    # before the column existed carry no call and are admitted only if they ran
-    # inside this call's window.
+        if vessel is None:
+            raise HTTPException(status_code=404, detail="Vessel not found")
+        call = current_call_for(db, vessel_id)
+        if call is None:
+            return MonitoringResponse(ongoing=[], requested=[], completed=[])
+    agency_profile_id = (
+        db.query(AgentProfile.id)
+        .filter(AgentProfile.user_id == current_user.id)
+        .scalar()
+    )
+    if agency_profile_id is None:
+        return MonitoringResponse(ongoing=[], requested=[], completed=[])
+    # Historical access follows immutable agency ownership. A selected current
+    # vessel additionally requires its explicit active call, without guessing.
     call_clause = "TRUE"
     call_params: dict = {}
     if call is not None:
-        unattributed = ["cb.vessel_call_id IS NULL"]
-        started = call.started_at or call.created_at
-        if started is not None:
-            unattributed.append("cb.created_at >= :call_started")
-            call_params["call_started"] = started
-        if call.ended_at is not None:
-            unattributed.append("cb.created_at <= :call_ended")
-            call_params["call_ended"] = call.ended_at
-        call_clause = (
-            f"(cb.vessel_call_id = {int(call.id)} OR ({' AND '.join(unattributed)}))"
-        )
+        call_clause = "cb.vessel_call_id = :selected_call"
+        call_params["selected_call"] = call.id
 
-    rows = db.execute(text(f"""
+    from app.services.collection_pages import options, note
+
+    page_offset, page_limit = options("trip_monitoring")
+    call_params.update(
+        agency_scope_id=agency_profile_id,
+        page_offset=page_offset,
+        page_limit=page_limit + 1,
+    )
+    rows = db.execute(
+        text(
+            f"""
         SELECT cb.id, cb.booking_id, cb.pickup_address, cb.drop_address,
                cb.pickup_lat, cb.pickup_lng, cb.drop_lat, cb.drop_lng,
                cb.vehicle_name, cb.estimated_price, cb.driver_name,
@@ -186,19 +153,18 @@ def get_trip_monitoring(
         FROM cab_bookings cb
         LEFT JOIN crew_profiles cp ON cb.crew_id = cp.id
         LEFT JOIN crew_assignments ca ON cb.crew_assignment_id = ca.id
-        WHERE (
-            ({strong_clause})
-            OR (
-                cb.agency_id IS NULL
-                AND (
-                    cb.vessel_id IN ({vessel_placeholders})
-                    OR (cb.vessel_id IS NULL AND {legacy_crew_clause})
-                )
-            )
-        )
+        WHERE cb.agency_id = :agency_scope_id
+        AND (cb.vessel_call_id IS NULL OR EXISTS (SELECT 1 FROM vessel_calls vc WHERE vc.id = cb.vessel_call_id
+            AND vc.vessel_id = cb.vessel_id AND vc.agency_id = cb.agency_id))
+        AND COALESCE(upper(trim(cb.context_resolution)), '') NOT IN ('UNRESOLVED','CONFLICTED')
         AND {call_clause}
         ORDER BY cb.created_at DESC, cb.id DESC
-    """), call_params).all()
+        LIMIT :page_limit OFFSET :page_offset
+    """
+        ),
+        call_params,
+    ).all()
+    rows = note("trip_monitoring", rows, page_offset, page_limit, label="Trips")
 
     ongoing = []
     requested = []

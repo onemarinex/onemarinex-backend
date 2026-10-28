@@ -27,6 +27,7 @@ from app.db.models.user import User
 from app.db.models.vessel import Vessel
 from app.db.models.vessel_crew import VesselCrew
 from app.db.session import engine
+from tests.context_fixtures import immutable_call
 
 
 def _uniq(prefix):
@@ -86,6 +87,10 @@ class AgentDashboardScopingTests(unittest.TestCase):
                 CabBooking(
                     booking_id=_uniq("CAB"),
                     crew_id=crew.id,
+                    vessel_id=vessel.id,
+                    agency_id=agent_profile.id,
+                    vessel_call_id=immutable_call(self.db, vessel, agent_profile.id).id,
+                    context_resolution="CONFIRMED_AGENCY",
                     pickup_address="Gate",
                     pickup_lat=0,
                     pickup_lng=0,

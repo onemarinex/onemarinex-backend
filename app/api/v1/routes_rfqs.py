@@ -1,3 +1,5 @@
+from app.services.collection_pages import page_all
+
 # app/api/routes/routesrfqs.py
 from datetime import datetime
 from typing import List, Optional, Literal
@@ -145,22 +147,20 @@ def list_rfqs(
     - agent/others: return empty for now
     """
     if me.role == "shipping_company":
-        return (
-            db.query(RFQ)
-            .filter(RFQ.user_id == me.id)
-            .order_by(RFQ.id.desc())
-            .all()
+        return page_all(
+            db.query(RFQ).filter(RFQ.user_id == me.id).order_by(RFQ.id.desc()),
+            collection="routes_rfqs.list_rfqs.0",
+            label="Rfqs",
         )
 
     if me.role == "vendor":
         ports = _get_vendor_ports(db, me.id)
         if not ports:
             return []
-        return (
-            db.query(RFQ)
-            .filter(RFQ.port.in_(ports))
-            .order_by(RFQ.id.desc())
-            .all()
+        return page_all(
+            db.query(RFQ).filter(RFQ.port.in_(ports)).order_by(RFQ.id.desc()),
+            collection="routes_rfqs.list_rfqs.1",
+            label="Rfqs",
         )
 
     # Agents (and any other roles) – no RFQs yet
@@ -208,11 +208,12 @@ def vendor_market(
     if not profile or not profile.ports_served:
         return []
 
-    return (
+    return page_all(
         db.query(RFQ)
         .filter(RFQ.port.in_(profile.ports_served))
-        .order_by(RFQ.id.desc())
-        .all()
+        .order_by(RFQ.id.desc()),
+        collection="routes_rfqs.vendor_market.0",
+        label="Vendor market",
     )
 
 

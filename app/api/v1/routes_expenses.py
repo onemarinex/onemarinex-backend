@@ -5,6 +5,8 @@ instances), else local disk in dev — see app.services.storage. `receipt_url`
 stores the raw storage reference; responses resolve it to a fetchable URL
 (direct/CDN for public, a presigned URL for private).
 """
+
+from app.services.collection_pages import page_all
 import io
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -329,15 +331,16 @@ def linkable_trips(
     active: List[LinkableTripOut] = []
     recent: List[LinkableTripOut] = []
 
-    passes = (
+    passes = page_all(
         db.query(ShorePass)
         .filter(
             ShorePass.crew_profile_id == profile.id,
             ShorePass.status == "approved",
             ShorePass.is_verified.is_(True),
         )
-        .order_by(ShorePass.id.desc())
-        .all()
+        .order_by(ShorePass.id.desc()),
+        collection="routes_expenses.linkable_trips.0",
+        label="Linkable trips",
     )
     for sp in passes:
         is_linkable, ended = _shore_pass_link_state(sp)
@@ -348,14 +351,15 @@ def linkable_trips(
         target = active if ended is None else recent
         target.append(LinkableTripOut(kind="shore_pass", id=sp.id, label=label, ended_at=ended))
 
-    bookings = (
+    bookings = page_all(
         db.query(CabBooking)
         .filter(
             CabBooking.crew_id == profile.id,
             CabBooking.status.in_(_CAB_ACTIVE_STATUSES | {BookingStatus.COMPLETED}),
         )
-        .order_by(CabBooking.id.desc())
-        .all()
+        .order_by(CabBooking.id.desc()),
+        collection="routes_expenses.linkable_trips.1",
+        label="Linkable trips",
     )
     for cb in bookings:
         is_linkable, ended = _cab_link_state(cb)

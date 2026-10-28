@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -182,7 +183,11 @@ manager = ConnectionManager()
 @router.get("/channels")
 def get_channels(db: Session = Depends(get_db)):
     """Fetch active ports as chat channels."""
-    ports = db.query(Port).filter(Port.is_active == True).all()  # noqa: E712
+    ports = page_all(
+        db.query(Port).filter(Port.is_active == True),
+        collection="routes_chat.get_channels.0",
+        label="Channels",
+    )  # noqa: E712
     return [
         {
             "id": port.id,

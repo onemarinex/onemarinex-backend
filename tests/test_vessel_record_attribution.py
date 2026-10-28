@@ -27,6 +27,7 @@ from app.db.models.user import User
 from app.db.models.vessel import Vessel
 from app.db.models.vessel_crew import VesselCrew
 from app.db.session import engine
+from tests.context_fixtures import immutable_call
 
 
 def _uniq(prefix):
@@ -98,11 +99,19 @@ class VesselAttributionTests(unittest.TestCase):
 
     def _sos(self, vessel):
         sos = CrewSos(
-            user_id=self.crew.user_id, crew_profile_id=self.crew.id,
-            crew_email="crew@example.com", sos_email="ship@example.com",
-            port_name="port_test", vessel=vessel.name if vessel else None,
+            user_id=self.crew.user_id,
+            crew_profile_id=self.crew.id,
+            crew_email="crew@example.com",
+            sos_email="ship@example.com",
+            port_name="port_test",
+            vessel=vessel.name if vessel else None,
             vessel_id=vessel.id if vessel else None,
             agency_id=self.agent_profile.id if vessel else None,
+            vessel_call_id=(
+                immutable_call(self.db, vessel, self.agent_profile.id).id
+                if vessel
+                else None
+            ),
             context_resolution="vessel_id" if vessel else "unresolved",
             status="ACTIVE",
         )

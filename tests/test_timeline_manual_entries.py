@@ -35,6 +35,7 @@ from app.db.models.incident import (
 from app.db.models.user import User
 from app.db.models.vessel import Vessel
 from app.db.session import engine
+from tests.context_fixtures import immutable_call
 
 
 def _uniq(prefix):
@@ -77,10 +78,15 @@ class ManualTimelineEntryTests(unittest.TestCase):
         self.db.add(vessel)
         self.db.flush()
         incident = Incident(
-            incident_id=_uniq("INC"), type=IncidentType.CREW,
-            title="Abuse reported", description="Crew reported misbehaviour.",
-            status=IncidentStatus.ACTIVE, vessel_id=vessel.id,
-            agency_id=agent_profile.id, context_resolution="vessel_id",
+            incident_id=_uniq("INC"),
+            type=IncidentType.CREW,
+            title="Abuse reported",
+            description="Crew reported misbehaviour.",
+            status=IncidentStatus.ACTIVE,
+            vessel_id=vessel.id,
+            agency_id=agent_profile.id,
+            vessel_call_id=immutable_call(self.db, vessel, agent_profile.id).id,
+            context_resolution="CONFIRMED_AGENCY",
         )
         self.db.add(incident)
         self.db.flush()

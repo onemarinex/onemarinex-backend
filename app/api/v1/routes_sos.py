@@ -1,3 +1,4 @@
+from app.services.collection_pages import page_all
 from datetime import datetime, timezone
 from typing import Optional, List
 
@@ -74,14 +75,19 @@ def list_sos_requests(
         ).scalar()
         if agent_profile_id is None:
             return []
-        sos_list = (
+        sos_list = page_all(
             db.query(CrewSos)
             .filter(CrewSos.agency_id == agent_profile_id)
-            .order_by(CrewSos.created_at.desc())
-            .all()
+            .order_by(CrewSos.created_at.desc()),
+            collection="routes_sos.list_sos_requests.0",
+            label="Sos requests",
         )
     else:
-        sos_list = db.query(CrewSos).order_by(CrewSos.created_at.desc()).all()
+        sos_list = page_all(
+            db.query(CrewSos).order_by(CrewSos.created_at.desc()),
+            collection="routes_sos.list_sos_requests.1",
+            label="Sos requests",
+        )
 
     return [
         {
@@ -222,11 +228,12 @@ def get_sos_timeline(
         if sos.crew_assignment_id else None
     )
 
-    persisted_timeline = (
+    persisted_timeline = page_all(
         db.query(CrewSosTimelineEvent)
         .filter(CrewSosTimelineEvent.sos_id == sos.id)
-        .order_by(CrewSosTimelineEvent.event_time.asc(), CrewSosTimelineEvent.id.asc())
-        .all()
+        .order_by(CrewSosTimelineEvent.event_time.asc(), CrewSosTimelineEvent.id.asc()),
+        collection="routes_sos.get_sos_timeline.0",
+        label="Sos timeline",
     )
     timeline = [
         {
@@ -258,11 +265,12 @@ def get_sos_timeline(
             }
             for item in events if item.time is not None
         ]
-    notes = (
+    notes = page_all(
         db.query(CrewSosNote)
         .filter(CrewSosNote.sos_id == sos.id)
-        .order_by(CrewSosNote.created_at.asc(), CrewSosNote.id.asc())
-        .all()
+        .order_by(CrewSosNote.created_at.asc(), CrewSosNote.id.asc()),
+        collection="routes_sos.get_sos_timeline.1",
+        label="Sos timeline",
     )
 
     return SosTimelineOut(

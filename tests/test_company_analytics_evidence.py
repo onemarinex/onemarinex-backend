@@ -30,10 +30,8 @@ BACKEND = pathlib.Path(__file__).resolve().parent.parent
 # Reading any of these in a company aggregate would reintroduce R05: they are
 # seat counts and cab-trip inferences, not verified per-person evidence.
 FORBIDDEN_SOURCES = (
-    "num_passengers",
     "crew_ashore",
     "AshoreBreakdown",
-    "unknown_seats",
 )
 
 COMPANY_MODULES = (
@@ -44,7 +42,7 @@ COMPANY_MODULES = (
 
 
 class CompanyAnalyticsEvidenceTests(unittest.TestCase):
-    def test_no_company_surface_reads_an_anonymous_seat_count(self):
+    def test_operational_seat_totals_do_not_reuse_agent_ashore_estimates(self):
         for relative in COMPANY_MODULES:
             source = (BACKEND / relative).read_text()
             for name in FORBIDDEN_SOURCES:
@@ -102,7 +100,7 @@ class CompanyAnalyticsEvidenceTests(unittest.TestCase):
         from app.services import company_aggregates, company_metrics
 
         unavailable = company_metrics.unavailable_metrics()
-        self.assertIn("sign_on_off", unavailable)
+        self.assertNotIn("sign_on_off", unavailable)
         self.assertIn("welfare_engagement", unavailable)
         for key in unavailable:
             with self.subTest(metric=key):

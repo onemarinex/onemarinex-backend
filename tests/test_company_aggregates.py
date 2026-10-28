@@ -19,6 +19,7 @@ from sqlalchemy import text
 
 from app.db.models.cab_booking import CabBooking
 from app.db.models.shipping_company import ShippingCompany, VesselRoleClaim
+from app.db.models.vessel_call import VesselCall
 from app.db.models.vessel import Vessel
 from app.db.session import SessionLocal
 from app.services import company_aggregates as agg
@@ -66,14 +67,26 @@ class HandoverTests(unittest.TestCase):
     def tearDown(self):
         self.db.rollback()
         for stmt, params in (
-            ("DELETE FROM cab_bookings WHERE vessel_id = ANY(:v)",
-             {"v": [self.vessel.id, self.other_vessel.id]}),
-            ("DELETE FROM vessel_role_claims WHERE vessel_id = ANY(:v)",
-             {"v": [self.vessel.id, self.other_vessel.id]}),
-            ("DELETE FROM shipping_companies WHERE id = ANY(:v)",
-             {"v": [self.outgoing.id, self.incoming.id]}),
-            ("DELETE FROM vessels WHERE id = ANY(:v)",
-             {"v": [self.vessel.id, self.other_vessel.id]}),
+            (
+                "DELETE FROM cab_bookings WHERE vessel_id = ANY(:v)",
+                {"v": [self.vessel.id, self.other_vessel.id]},
+            ),
+            (
+                "DELETE FROM vessel_role_claims WHERE vessel_id = ANY(:v)",
+                {"v": [self.vessel.id, self.other_vessel.id]},
+            ),
+            (
+                "DELETE FROM shipping_companies WHERE id = ANY(:v)",
+                {"v": [self.outgoing.id, self.incoming.id]},
+            ),
+            (
+                "DELETE FROM vessel_calls WHERE vessel_id = ANY(:v)",
+                {"v": [self.vessel.id, self.other_vessel.id]},
+            ),
+            (
+                "DELETE FROM vessels WHERE id = ANY(:v)",
+                {"v": [self.vessel.id, self.other_vessel.id]},
+            ),
         ):
             self.db.execute(text(stmt), params)
         self.db.commit()
@@ -88,14 +101,37 @@ class HandoverTests(unittest.TestCase):
         return claim
 
     def _booking(self, moment, vessel=None):
+        vessel = vessel or self.vessel
+        call = self.db.query(VesselCall).filter_by(vessel_id=vessel.id).first()
+        if call is None:
+            call = VesselCall(
+                vessel_id=vessel.id,
+                vessel_name=vessel.name,
+                agency_name="Other",
+                started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            self.db.add(call)
+            self.db.flush()
         row = CabBooking(
-            booking_id=_uniq("CAB"), vessel_id=(vessel or self.vessel).id,
-            pickup_address="Gate", pickup_lat=0, pickup_lng=0,
-            drop_address="City", drop_lat=0, drop_lng=0,
-            vehicle_type="ac", vehicle_name="Sedan", estimated_price=100,
-            distance_km=5, status="completed", created_at=moment,
+            vessel_call_id=call.id,
+            context_resolution="CONFIRMED_UNMANAGED",
+            booking_id=_uniq("CAB"),
+            vessel_id=(vessel or self.vessel).id,
+            pickup_address="Gate",
+            pickup_lat=0,
+            pickup_lng=0,
+            drop_address="City",
+            drop_lat=0,
+            drop_lng=0,
+            vehicle_type="ac",
+            vehicle_name="Sedan",
+            estimated_price=100,
+            distance_km=5,
+            status="completed",
+            created_at=moment,
             trip_started_at=moment + timedelta(minutes=20),
-            trip_completed_at=moment + timedelta(hours=1))
+            trip_completed_at=moment + timedelta(hours=1),
+        )
         self.db.add(row)
         self.db.flush()
         return row
@@ -160,9 +196,12 @@ class HandoverTests(unittest.TestCase):
 
     # --- suppression, TEN-19 -------------------------------------------------
 
-    def test_a_cohort_below_the_threshold_is_withheld_not_shown(self):
-        tiny = ShippingCompany(legal_name=_uniq("Tiny"),
-                               normalized_name=_uniq("TINY").upper(), status="VERIFIED")
+    def test_small_operational_booking_total_is_not_a_sensitive_person_cohort(self):
+        tiny = ShippingCompany(
+            legal_name=_uniq("Tiny"),
+            normalized_name=_uniq("TINY").upper(),
+            status="VERIFIED",
+        )
         self.db.add(tiny)
         self.db.flush()
         self._claim(tiny, SEPT, None, vessel=self.other_vessel)
@@ -170,12 +209,14 @@ class HandoverTests(unittest.TestCase):
         self.db.commit()
         try:
             figure = agg.booking_activity(self.db, company_id=tiny.id)
-            self.assertTrue(figure.suppressed)
-            self.assertIsNone(figure.value)
-            self.assertEqual(figure.display, "Withheld")
+            self.assertFalse(figure.suppressed)
+            self.assertEqual(figure.value, 1)
+            self.assertEqual(figure.display, "1")
         finally:
-            self.db.execute(text("DELETE FROM vessel_role_claims WHERE company_id = :c"),
-                            {"c": tiny.id})
+            self.db.execute(
+                text("DELETE FROM vessel_role_claims WHERE company_id = :c"),
+                {"c": tiny.id},
+            )
             self.db.execute(text("DELETE FROM shipping_companies WHERE id = :c"),
                             {"c": tiny.id})
             self.db.commit()

@@ -109,7 +109,7 @@ class FleetItem(BaseModel):
     type: str
     count: int
     cost_per_km: float
-    
+
 class AggregatorUpdate(BaseModel):
     email: Optional[EmailStr] = None
     mobile_number: Optional[str] = None
@@ -245,7 +245,7 @@ def register_crew(body: CrewRegistrationIn, db: Session = Depends(get_db)):
         db, passport, nationality, "port_general",
         unique_fallback=user.id, exclude_profile_id=crew_profile.id,
     )
-    
+
     try:
         db.commit()
     except Exception as e:
@@ -271,7 +271,9 @@ def register_crew(body: CrewRegistrationIn, db: Session = Depends(get_db)):
         # that are unambiguously theirs.
         from app.services.historical_linkage import link_historical_assignments
 
-        link_historical_assignments(db, crew_profile)
+        # Historical registration is a proposal for evidence-backed review.
+        # Active-call matching already happened above; never auto-attach history.
+        link_historical_assignments(db, crew_profile, require_review=True)
         db.commit()
     except Exception as e:
         db.rollback()
@@ -288,7 +290,7 @@ def register_crew(body: CrewRegistrationIn, db: Session = Depends(get_db)):
         subject=user.email,
         expires_delta=timedelta(minutes=settings.REFRESH_TOKEN_EXPIRE_MINUTES),
     )
-    
+
     return AuthOut(access_token=token, refresh_token=refresh_token, role=user.role)
 
 @router.post("/agent", response_model=AuthOut, status_code=status.HTTP_201_CREATED)

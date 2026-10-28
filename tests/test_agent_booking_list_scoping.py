@@ -37,6 +37,7 @@ from app.db.models.user import User
 from app.db.models.vessel import Vessel
 from app.db.models.vessel_crew import VesselCrew
 from app.db.session import engine
+from tests.context_fixtures import immutable_call
 
 
 def _uniq(prefix):
@@ -84,13 +85,29 @@ class AgentBookingListScopingTests(unittest.TestCase):
                                id=user.id, role="agent")
 
     def booking(self, *, agency_id=None, vessel_id=None):
+        call_id = None
+        if agency_id is not None:
+            owner = self.agent if agency_id == self.agent.profile.id else self.rival
+            vessel_id = vessel_id or owner.vessel.id
+            call_id = immutable_call(self.db, owner.vessel, agency_id).id
         row = CabBooking(
-            booking_id=_uniq("CAB"), crew_id=self.crew.id,
-            agency_id=agency_id, vessel_id=vessel_id,
-            pickup_address="Gate", pickup_lat=0, pickup_lng=0,
-            drop_address="City", drop_lat=0, drop_lng=0,
-            vehicle_type=VehicleType.AC, vehicle_name="Sedan", estimated_price=100,
-            distance_km=5, status=BookingStatus.COMPLETED, otp="4821",
+            vessel_call_id=call_id,
+            booking_id=_uniq("CAB"),
+            crew_id=self.crew.id,
+            agency_id=agency_id,
+            vessel_id=vessel_id,
+            pickup_address="Gate",
+            pickup_lat=0,
+            pickup_lng=0,
+            drop_address="City",
+            drop_lat=0,
+            drop_lng=0,
+            vehicle_type=VehicleType.AC,
+            vehicle_name="Sedan",
+            estimated_price=100,
+            distance_km=5,
+            status=BookingStatus.COMPLETED,
+            otp="4821",
         )
         self.db.add(row)
         self.db.flush()
@@ -122,18 +139,18 @@ class AgentBookingListScopingTests(unittest.TestCase):
 
     # --- what must keep working ---
 
-    def test_a_legacy_booking_on_my_own_vessel_is_still_listed(self):
+    def test_current_vessel_ownership_does_not_grant_unresolved_history(self):
         mine = self.booking(vessel_id=self.agent.vessel.id)
 
-        self.assertIn(mine.booking_id, self.listed(self.agent))
-        self.assertTrue(_agent_may_view_booking(self.db, self.agent.id, mine))
+        self.assertNotIn(mine.booking_id, self.listed(self.agent))
+        self.assertFalse(_agent_may_view_booking(self.db, self.agent.id, mine))
 
-    def test_a_legacy_booking_with_no_vessel_still_reaches_the_crew_s_agency(self):
+    def test_current_crew_membership_does_not_grant_unresolved_history(self):
         """The case the fallback exists for, which is not removed here."""
         orphan = self.booking(vessel_id=None)
 
-        self.assertIn(orphan.booking_id, self.listed(self.agent))
-        self.assertTrue(_agent_may_view_booking(self.db, self.agent.id, orphan))
+        self.assertNotIn(orphan.booking_id, self.listed(self.agent))
+        self.assertFalse(_agent_may_view_booking(self.db, self.agent.id, orphan))
 
     def test_a_booking_with_an_agency_is_scoped_by_it(self):
         mine = self.booking(agency_id=self.agent.profile.id)

@@ -1,7 +1,11 @@
+from app.db.models.agent_profile import AgentProfile
+from app.db.models.crew_sos import CrewSos
+from app.services.collection_pages import page_all
 from fastapi import Response
 from app.services.result_limits import capped_response
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 import uuid
@@ -9,7 +13,7 @@ from app.db.session import get_db
 from app.db.models.incident import Incident, IncidentNote, IncidentStatus, IncidentType
 from app.db.models.crew_assignment import CrewAssignment
 from app.api.v1.routes_auth import get_current_user
-from app.services.vessel_lifecycle import belongs_to_call, current_call_for
+from app.services.vessel_lifecycle import current_call_for
 from pydantic import BaseModel, Field, field_validator
 
 router = APIRouter()
@@ -110,7 +114,9 @@ def _agent_incident_filter(db: Session, agent_user_id: int):
     ).scalar()
     # No current-profile fallback: rows without an immutable agency remain
     # superadmin-only until they are manually reconciled.
-    return Incident.agency_id == agency_id if agency_id is not None else None
+    from app.services.event_origin import agency_scope
+
+    return agency_scope(Incident, agency_id) if agency_id is not None else None
 
 
 def _record_timeline(db: Session, incident: Incident, event_type: str, label: str,
@@ -677,33 +683,87 @@ def agent_incident_list(
         # for all time. Without this a returning vessel showed the previous
         # calls' incidents appended to its new one.
         call = current_call_for(db, vessel_id)
-        query = query.filter(belongs_to_call(
-            Incident.vessel_call_id, Incident.vessel_id, Incident.created_at,
-            vessel_id=vessel_id, call=call,
-        ))
+        query = query.filter(
+            _explicit_call(
+                Incident.vessel_call_id,
+                Incident.vessel_id,
+                Incident.created_at,
+                vessel_id=vessel_id,
+                call=call,
+            )
+        )
     if status_filter:
         try:
             query = query.filter(Incident.status == IncidentStatus(status_filter.upper()))
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Unknown status: {status_filter}")
 
-    # Deliberately not given a result ceiling, though both streams grow with
-    # time. This response merges two of them and sorts the union in Python, so
-    # a ceiling would need a policy the ceiling cannot express: capping each
-    # stream separately yields up to twice the limit and a header that cannot
-    # say what was cut from which, and capping after the merge means the
-    # database has already been asked for everything. It needs pagination over
-    # the merged feed, which is a response-shape decision rather than a safety
-    # limit. See app/services/result_limits for the same problem in a nested
-    # list.
-    rows = query.order_by(Incident.created_at.desc()).all()
+    selected = None
+    if include_sos:
+        from app.services.event_origin import agency_scope
+
+        agency_id = (
+            db.query(AgentProfile.id)
+            .filter(AgentProfile.user_id == current_user.id)
+            .scalar()
+        )
+        sos_query = db.query(CrewSos).filter(agency_scope(CrewSos, agency_id))
+        if vessel_id is not None:
+            sos_query = sos_query.filter(
+                _explicit_call(
+                    CrewSos.vessel_call_id,
+                    CrewSos.vessel_id,
+                    CrewSos.created_at,
+                    vessel_id=vessel_id,
+                    call=call,
+                )
+            )
+        if status_filter:
+            sos_query = sos_query.filter(
+                func.upper(CrewSos.status) == status_filter.upper()
+            )
+        selected = _safety_page_keys(db, query, sos_query, "safety_feed")
+        rows = query.filter(
+            Incident.id.in_([k["id"] for k in selected if k["kind"] == "incident"])
+        ).all()
+    else:
+        rows = page_all(
+            query.order_by(Incident.created_at.desc()),
+            collection="incident_feed",
+            label="Incidents",
+        )
     records = [dict(_serialize_incident(db, i), kind="incident") for i in rows]
     if include_sos:
-        records.extend(_agent_sos_records(db, current_user.id, vessel_id, status_filter, call))
-    # created_at mixes naive legacy Incident values with timezone-aware SOS
-    # ones; comparing those directly raises TypeError.
-    records.sort(key=lambda item: _sort_instant(item.get("created_at")), reverse=True)
+        records.extend(
+            _agent_sos_records(
+                db,
+                current_user.id,
+                vessel_id,
+                status_filter,
+                call,
+                only_ids=[k["id"] for k in selected if k["kind"] == "sos"],
+            )
+        )
+        by_key = {(item["kind"], item["id"]): item for item in records}
+        records = [
+            by_key[(k["kind"], k["id"])]
+            for k in selected
+            if (k["kind"], k["id"]) in by_key
+        ]
     return {"incidents": records}
+
+
+def _explicit_call(
+    call_id_column, vessel_id_column, created_at_column, *, vessel_id, call
+):
+    # A time window is insufficient evidence to assign old records to a call.
+    from sqlalchemy import false, and_
+
+    return (
+        and_(call_id_column == call.id, vessel_id_column == vessel_id)
+        if call
+        else false()
+    )
 
 
 def _sort_instant(value) -> float:
@@ -714,24 +774,77 @@ def _sort_instant(value) -> float:
     return value.timestamp()
 
 
-def _agent_sos_records(db: Session, agent_user_id: int, vessel_id: Optional[int],
-                       status_filter: Optional[str], call=None) -> List[dict]:
+def _safety_page_keys(db, incidents, sos_rows, collection):
+    from sqlalchemy import select, literal, union_all, cast, DateTime
+    from app.services.collection_pages import options, note
+
+    keys = union_all(
+        incidents.order_by(None)
+        .with_entities(
+            literal("incident").label("kind"),
+            Incident.id.label("id"),
+            cast(Incident.created_at, DateTime(timezone=True)).label("at"),
+        )
+        .statement,
+        sos_rows.order_by(None)
+        .with_entities(
+            literal("sos").label("kind"),
+            CrewSos.id.label("id"),
+            cast(CrewSos.created_at, DateTime(timezone=True)).label("at"),
+        )
+        .statement,
+    ).subquery()
+    offset, limit = options(collection)
+    rows = (
+        db.execute(
+            select(keys)
+            .order_by(keys.c.at.desc().nullslast(), keys.c.id.desc(), keys.c.kind)
+            .offset(offset)
+            .limit(limit + 1)
+        )
+        .mappings()
+        .all()
+    )
+    return note(collection, rows, offset, limit, label="Safety records")
+
+
+def _agent_sos_records(
+    db: Session,
+    agent_user_id: int,
+    vessel_id: Optional[int],
+    status_filter: Optional[str],
+    call=None,
+    only_ids=None,
+) -> List[dict]:
     """This agent's SOS alerts, shaped like the incident rows beside them."""
     from app.db.models.agent_profile import AgentProfile
     from app.db.models.crew_profile import CrewProfile
     from app.db.models.crew_sos import CrewSos
     from app.db.models.vessel import Vessel
 
-    agency_id = db.query(AgentProfile.id).filter(
-        AgentProfile.user_id == agent_user_id
-    ).scalar()
-    strong_query = db.query(CrewSos).filter(CrewSos.agency_id == agency_id)
+    agency_id = (
+        db.query(AgentProfile.id).filter(AgentProfile.user_id == agent_user_id).scalar()
+    )
+    from app.services.event_origin import agency_scope
+
+    strong_query = db.query(CrewSos).filter(agency_scope(CrewSos, agency_id))
     if vessel_id is not None:
-        strong_query = strong_query.filter(belongs_to_call(
-            CrewSos.vessel_call_id, CrewSos.vessel_id, CrewSos.created_at,
-            vessel_id=vessel_id, call=call,
-        ))
-    strong_rows = strong_query.all() if agency_id is not None else []
+        strong_query = strong_query.filter(
+            _explicit_call(
+                CrewSos.vessel_call_id,
+                CrewSos.vessel_id,
+                CrewSos.created_at,
+                vessel_id=vessel_id,
+                call=call,
+            )
+        )
+    if only_ids is not None:
+        strong_query = strong_query.filter(CrewSos.id.in_(only_ids))
+        strong_rows = strong_query.all()
+    else:
+        strong_rows = page_all(
+            strong_query, collection="sos_records", label="SOS records"
+        )
 
     records: List[dict] = []
     seen = set()
@@ -821,11 +934,11 @@ def agent_safety_report_records(
         incidents = db.query(Incident).filter(
             Incident.vessel_call_id == call.id,
             Incident.agency_id == agency_id,
-        ).all()
+        )
         sos_rows = db.query(CrewSos).filter(
             CrewSos.vessel_call_id == call.id,
             CrewSos.agency_id == agency_id,
-        ).all()
+        )
         vessel_payload = {
             "id": call.vessel_id,
             "vessel_call_id": call.id,
@@ -842,11 +955,11 @@ def agent_safety_report_records(
         incidents = db.query(Incident).filter(
             Incident.vessel_id == vessel.id,
             Incident.agency_id == agency_id,
-        ).all()
+        )
         sos_rows = db.query(CrewSos).filter(
             CrewSos.vessel_id == vessel.id,
             CrewSos.agency_id == agency_id,
-        ).all()
+        )
         vessel_payload = {
             "id": vessel.id,
             "name": vessel.name,
@@ -857,18 +970,69 @@ def agent_safety_report_records(
             "berth": vessel.berth_assignment,
         }
 
-    records = [{
-        "kind": "incident", "id": item.id, "reference": item.incident_id,
-        "title": item.title, "status": item.status.value,
-        "severity": item.severity, "created_at": item.created_at,
-        "resolved_at": item.resolved_at or item.cancelled_at,
-    } for item in incidents]
-    records.extend({
-        "kind": "sos", "id": item.id, "reference": f"SOS-{item.id}",
-        "title": "SOS Alert", "status": item.status,
-        "severity": "high", "created_at": item.created_at,
-        "resolved_at": item.closed_at or item.cancelled_at,
-    } for item in sos_rows)
+    from sqlalchemy import select, literal, union_all, cast, DateTime
+    from app.services.collection_pages import options, note
+    from app.services.event_origin import resolved_origin
+
+    incidents = incidents.filter(resolved_origin(Incident))
+    sos_rows = sos_rows.filter(resolved_origin(CrewSos))
+    keys = union_all(
+        incidents.with_entities(
+            literal("incident").label("kind"),
+            Incident.id.label("id"),
+            cast(Incident.created_at, DateTime(timezone=True)).label("at"),
+        ).statement,
+        sos_rows.with_entities(
+            literal("sos").label("kind"),
+            CrewSos.id.label("id"),
+            cast(CrewSos.created_at, DateTime(timezone=True)).label("at"),
+        ).statement,
+    ).subquery()
+    offset, limit = options("safety_report")
+    selected = (
+        db.execute(
+            select(keys)
+            .order_by(keys.c.at.desc().nullslast(), keys.c.id.desc(), keys.c.kind)
+            .offset(offset)
+            .limit(limit + 1)
+        )
+        .mappings()
+        .all()
+    )
+    selected = note("safety_report", selected, offset, limit, label="Safety records")
+    incidents = incidents.filter(
+        Incident.id.in_([k["id"] for k in selected if k["kind"] == "incident"])
+    ).all()
+    sos_rows = sos_rows.filter(
+        CrewSos.id.in_([k["id"] for k in selected if k["kind"] == "sos"])
+    ).all()
+
+    records = [
+        {
+            "kind": "incident",
+            "id": item.id,
+            "reference": item.incident_id,
+            "title": item.title,
+            "status": item.status.value,
+            "severity": item.severity,
+            "created_at": item.created_at,
+            "resolved_at": item.resolved_at or item.cancelled_at,
+        }
+        for item in incidents
+    ]
+    records.extend(
+        {
+            "kind": "sos",
+            "id": item.id,
+            "reference": f"SOS-{item.id}",
+            "title": "SOS Alert",
+            "status": item.status,
+            "severity": "high",
+            "created_at": item.created_at,
+            "resolved_at": item.closed_at or item.cancelled_at,
+        }
+        for item in sos_rows
+    )
     def report_sort_key(item):
         created = item.get("created_at")
         if created is None:
@@ -944,17 +1108,21 @@ def agent_incident_detail(
     if incident is None:
         raise HTTPException(status_code=404, detail="Incident not found")
 
-    events = (
+    events = page_all(
         db.query(IncidentTimelineEvent)
         .filter(IncidentTimelineEvent.incident_id == incident.id)
-        .order_by(IncidentTimelineEvent.event_time.asc(), IncidentTimelineEvent.id.asc())
-        .all()
+        .order_by(
+            IncidentTimelineEvent.event_time.asc(), IncidentTimelineEvent.id.asc()
+        ),
+        collection="routes_incidents.agent_incident_detail.0",
+        label="Agent incident detail",
     )
-    notes = (
+    notes = page_all(
         db.query(IncidentNote)
         .filter(IncidentNote.incident_id == incident.id)
-        .order_by(IncidentNote.created_at.asc())
-        .all()
+        .order_by(IncidentNote.created_at.asc()),
+        collection="routes_incidents.agent_incident_detail.1",
+        label="Agent incident detail",
     )
 
     reporter = None

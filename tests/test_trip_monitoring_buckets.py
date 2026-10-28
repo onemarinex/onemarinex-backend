@@ -34,6 +34,8 @@ from app.db.models.vessel import Vessel
 from app.db.models.vessel_call import VesselCall
 from app.db.models.vessel_crew import VesselCrew
 from app.db.session import engine
+from app.db.models.agent_profile import AgentProfile
+from tests.context_fixtures import immutable_call
 from app.services.assignment_ref import issue_assignment_ref
 from app.services.booking_service import list_bookings_for_user
 
@@ -66,6 +68,12 @@ class TripMonitoringBucketTests(unittest.TestCase):
         self.db.add(VesselCrew(vessel_id=vessel.id, name="Test Crew", rank="AB", hp_id=hpid))
         self.db.flush()
 
+        profile = AgentProfile(
+            user_id=agent.id, agency_name=_uniq("Agency"), location="Fixture"
+        )
+        self.db.add(profile)
+        self.db.flush()
+        self.fixture_call = immutable_call(self.db, vessel, profile.id)
         self.agent_user = SimpleNamespace(id=agent.id, role="agent", agent_profile=None)
 
     def tearDown(self):
@@ -75,11 +83,24 @@ class TripMonitoringBucketTests(unittest.TestCase):
 
     def add_trip(self, status, created_at=None):
         trip = CabBooking(
-            booking_id=_uniq("CAB"), crew_id=self.crew.id,
-            pickup_address="Gate", pickup_lat=0, pickup_lng=0,
-            drop_address="City", drop_lat=0, drop_lng=0,
-            vehicle_type="ac", vehicle_name="Sedan", estimated_price=100,
-            distance_km=5, status=status, created_at=created_at or datetime.utcnow(),
+            vessel_id=self.fixture_call.vessel_id,
+            agency_id=self.fixture_call.agency_id,
+            vessel_call_id=self.fixture_call.id,
+            context_resolution="CONFIRMED_AGENCY",
+            booking_id=_uniq("CAB"),
+            crew_id=self.crew.id,
+            pickup_address="Gate",
+            pickup_lat=0,
+            pickup_lng=0,
+            drop_address="City",
+            drop_lat=0,
+            drop_lng=0,
+            vehicle_type="ac",
+            vehicle_name="Sedan",
+            estimated_price=100,
+            distance_km=5,
+            status=status,
+            created_at=created_at or datetime.utcnow(),
         )
         self.db.add(trip)
         self.db.flush()
@@ -206,7 +227,14 @@ class TripMonitoringIdentifierTests(unittest.TestCase):
             vessel_id=vessel.id, name="Test Crew", rank="AB", hp_id=self.legacy_hpid,
         ))
 
-        call = VesselCall(vessel_id=vessel.id, vessel_name=vessel.name)
+        profile = AgentProfile(
+            user_id=agent.id, agency_name=_uniq("Agency"), location="Fixture"
+        )
+        self.db.add(profile)
+        self.db.flush()
+        call = VesselCall(
+            vessel_id=vessel.id, vessel_name=vessel.name, agency_id=profile.id
+        )
         self.db.add(call)
         self.db.flush()
         self.reference = issue_assignment_ref(self.db)
@@ -217,14 +245,29 @@ class TripMonitoringIdentifierTests(unittest.TestCase):
         self.db.add(assignment)
         self.db.flush()
 
-        self.db.add(CabBooking(
-            booking_id=_uniq("CAB"), crew_id=crew.id, vessel_id=vessel.id,
-            crew_assignment_id=assignment.id,
-            pickup_address="Gate", pickup_lat=0, pickup_lng=0,
-            drop_address="City", drop_lat=0, drop_lng=0,
-            vehicle_type="ac", vehicle_name="Sedan", estimated_price=100,
-            distance_km=5, status=BookingStatus.ON_TRIP, created_at=datetime.utcnow(),
-        ))
+        self.db.add(
+            CabBooking(
+                booking_id=_uniq("CAB"),
+                crew_id=crew.id,
+                vessel_id=vessel.id,
+                crew_assignment_id=assignment.id,
+                vessel_call_id=call.id,
+                agency_id=profile.id,
+                context_resolution="CONFIRMED_AGENCY",
+                pickup_address="Gate",
+                pickup_lat=0,
+                pickup_lng=0,
+                drop_address="City",
+                drop_lat=0,
+                drop_lng=0,
+                vehicle_type="ac",
+                vehicle_name="Sedan",
+                estimated_price=100,
+                distance_km=5,
+                status=BookingStatus.ON_TRIP,
+                created_at=datetime.utcnow(),
+            )
+        )
         self.db.flush()
 
         self.agent_user = SimpleNamespace(id=agent.id, role="agent", agent_profile=None)

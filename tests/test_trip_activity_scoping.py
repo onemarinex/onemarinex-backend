@@ -27,6 +27,8 @@ from app.db.models.user import User
 from app.db.models.vessel import Vessel
 from app.db.models.vessel_crew import VesselCrew
 from app.db.session import engine
+from app.db.models.agent_profile import AgentProfile
+from tests.context_fixtures import immutable_call
 from app.services.magic_link_service import mark_stop_reached
 from app.services.booking_service import serialize_booking
 from app.services.timeline_service import get_booking_timeline
@@ -64,13 +66,32 @@ class TripActivityScopingTests(unittest.TestCase):
         self.db.flush()
         self.db.add(VesselCrew(vessel_id=vessel.id, name="Crew", rank="able_seaman", hp_id=hpid))
 
+        profile = AgentProfile(
+            user_id=agent.id, agency_name=_uniq("Agency"), location="Fixture"
+        )
+        self.db.add(profile)
+        self.db.flush()
         booking = CabBooking(
-            booking_id=_uniq("CAB"), crew_id=crew.id,
-            pickup_address="Gate", pickup_lat=0, pickup_lng=0,
-            drop_address="City", drop_lat=0, drop_lng=0,
-            vehicle_type=VehicleType.AC, vehicle_name="Sedan", estimated_price=100,
-            distance_km=5, status=BookingStatus.ON_TRIP,
-            driver_name="Ramesh", driver_phone="+910000000000", driver_plate="AP39 AB 1234",
+            vessel_id=vessel.id,
+            agency_id=profile.id,
+            vessel_call_id=immutable_call(self.db, vessel, profile.id).id,
+            context_resolution="CONFIRMED_AGENCY",
+            booking_id=_uniq("CAB"),
+            crew_id=crew.id,
+            pickup_address="Gate",
+            pickup_lat=0,
+            pickup_lng=0,
+            drop_address="City",
+            drop_lat=0,
+            drop_lng=0,
+            vehicle_type=VehicleType.AC,
+            vehicle_name="Sedan",
+            estimated_price=100,
+            distance_km=5,
+            status=BookingStatus.ON_TRIP,
+            driver_name="Ramesh",
+            driver_phone="+910000000000",
+            driver_plate="AP39 AB 1234",
         )
         self.db.add(booking)
         self.db.flush()

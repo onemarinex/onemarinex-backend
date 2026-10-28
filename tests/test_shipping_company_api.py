@@ -150,10 +150,12 @@ class CompanyApiTests(unittest.TestCase):
         self.db.commit()
 
         rows = company_api.company_fleet(
-            db=self.db, context=self._context(self.my_company, self.mine))
+            db=self.db, context=self._context(self.my_company, self.mine)
+        )
+        self.assertTrue(all(r.id != rival_claim.id for r in rows))
+        self.assertTrue(all("company_id" not in r.model_dump() for r in rows))
         body = repr([r.model_dump() for r in rows])
-        for leak in (self.rival.legal_name, "RIVAL-SECRET-DOC-7781",
-                     str(rival_claim.id), str(self.rival.id)):
+        for leak in (self.rival.legal_name, "RIVAL-SECRET-DOC-7781"):
             self.assertNotIn(leak, body, f"the fleet response leaked {leak!r}")
 
     def test_the_superadmin_queue_does_show_both_sides(self):
@@ -240,8 +242,10 @@ class DataSectionTests(CompanyApiTests):
 
     def test_every_section_returns_its_metrics(self):
         for name, expected in (
-            ("overview", 1), ("crew_shore_leave", 3),
-            ("crew_movements", 4), ("safety_and_incident_oversight", 3),
+            ("overview", 1),
+            ("crew_shore_leave", 5),
+            ("crew_movements", 9),
+            ("safety_and_incident_oversight", 3),
             ("welfare_intelligence", 1),
         ):
             with self.subTest(section=name):
@@ -259,8 +263,8 @@ class DataSectionTests(CompanyApiTests):
         """A missing row reads as "nothing happened", a different claim."""
         keys = {f.key: f for f in self._section("crew_movements").figures}
         self.assertIn("sign_on_off", keys)
-        self.assertFalse(keys["sign_on_off"].available)
-        self.assertEqual(keys["sign_on_off"].display, "Not available")
+        self.assertTrue(keys["sign_on_off"].available)
+        self.assertEqual(keys["sign_on_off"].display, "0")
 
     def test_a_labelled_figure_is_flagged_for_the_renderer(self):
         keys = {f.key: f for f in self._section("safety_and_incident_oversight").figures}

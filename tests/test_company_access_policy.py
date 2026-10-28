@@ -403,7 +403,7 @@ class EventFamilyTests(PolicyTests):
     not left to each caller to remember."""
 
     def test_a_family_with_no_usable_time_is_refused(self):
-        for family in ("shore_pass_approved", "crew_sign_on_off"):
+        for family in ("shore_pass_approved",):
             with self.subTest(family=family):
                 result = self._allow(event_family=family)
                 self.assertFalse(result)
