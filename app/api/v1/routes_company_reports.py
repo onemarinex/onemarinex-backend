@@ -112,7 +112,7 @@ def prepare(db, company, body):
                 else None
             ),
         },
-        "methodology": "Approved vessel-role periods and exact call records. Passenger-seat activity is not a distinct-person count. Missing sources are unavailable. No un-escalated safety records are included.",
+        "methodology": "Accepted company role periods and exact call records. Passenger-seat activity is not a distinct-person count. Missing sources are unavailable. No un-escalated safety records are included.",
         "coverage": {"recorded_calls": len(calls), "global_coverage_claim": False},
         "calls": [],
         "source_authorization": [],
