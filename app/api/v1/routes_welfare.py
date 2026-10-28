@@ -503,6 +503,8 @@ def company_operations(
     country_code: Optional[str] = None,
     review_type: Optional[Literal["driver", "facility_stop"]] = None,
     provider_id: Optional[int] = Query(None, ge=1),
+    call_offset: int = Query(0, ge=0),
+    call_limit: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db),
     context=Depends(current_company_member),
 ):
@@ -513,7 +515,15 @@ def company_operations(
     )  # Validate the shared period.
     return {
         "operations": operational(
-            db, start, end, context[0].id, port_id, vessel_id, country_code
+            db,
+            start,
+            end,
+            context[0].id,
+            port_id,
+            vessel_id,
+            country_code,
+            call_offset,
+            call_limit,
         ),
         "reviews": review_summary(
             db,
@@ -538,6 +548,8 @@ def admin_operations(
     country_code: Optional[str] = None,
     review_type: Optional[Literal["driver", "facility_stop"]] = None,
     provider_id: Optional[int] = Query(None, ge=1),
+    call_offset: int = Query(0, ge=0),
+    call_limit: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db),
     actor=Depends(get_current_user),
 ):
@@ -547,7 +559,15 @@ def admin_operations(
     selected_rows(db, start, end, None, port_id, vessel_id, country_code)
     return {
         "operations": operational(
-            db, start, end, None, port_id, vessel_id, country_code
+            db,
+            start,
+            end,
+            None,
+            port_id,
+            vessel_id,
+            country_code,
+            call_offset,
+            call_limit,
         ),
         "reviews": review_summary(
             db,
