@@ -1478,7 +1478,11 @@ def submit_feedback(
 ):
     """Retain the general feedback API without creating a safety incident."""
     from app.api.v1.routes_welfare import SurveyIn, submit
-    return submit(SurveyIn(message=body.message), db=db, actor=current_user)
+    message = body.message.strip()
+    if not message or len(message) > 5000:
+        raise HTTPException(status_code=422, detail="Enter a feedback message of 1 to 5,000 characters.")
+    submit(SurveyIn(message=message), db=db, actor=current_user)
+    return {"status": "success", "message": "Feedback received"}
 
 class GenerateShorePassIn(BaseModel):
     crew_assignment_id: Optional[int] = Field(default=None, gt=0)
