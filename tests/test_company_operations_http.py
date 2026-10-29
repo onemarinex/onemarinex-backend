@@ -476,6 +476,16 @@ class OperationsHTTP(unittest.TestCase):
         self.request("GET", "/api/v1/shipping-company/me", crew)
         self.request("POST", "/api/v1/shipping-company/invitations/accept", crew, {}, 410)
 
+    def test_signout_clears_only_the_pending_invitation_cookie(self):
+        _, token = self.invite()
+        self.request("POST", "/api/v1/shipping-company/invitations/session", body={"token": token})
+        self.assertTrue(self.client.cookies.get("company_invitation_context"))
+        self.request("DELETE", "/api/v1/shipping-company/invitations/session", status=204)
+        self.assertIsNone(self.client.cookies.get("company_invitation_context"))
+        self.request("GET", "/api/v1/shipping-company/invitations/session", status=410)
+        # Signing out is not invitation revocation. Its email link still works.
+        self.request("POST", "/api/v1/shipping-company/invitations/session", body={"token": token})
+
     def test_invitation_context_expires_and_cannot_be_reused_as_authentication(self):
         from jose import jwt
         from app.core.config import settings
