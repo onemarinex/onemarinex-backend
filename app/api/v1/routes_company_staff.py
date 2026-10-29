@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import secrets
 from urllib.parse import quote
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -26,7 +26,8 @@ from app.api.v1.routes_shipping_company import (
 )
 from app.services.auth import get_password_hash
 from app.services import email as mail
-from app.core.config import settings
+from app.core.config import settings, database_is_local
+from jose import jwt, JWTError
 
 router = APIRouter()
 ROLES = ("ADMIN", "ANALYST", "VIEWER")
@@ -248,8 +249,79 @@ def revoke(
     db.commit()
 
 
-class AcceptIn(BaseModel):
+INVITATION_COOKIE = "company_invitation_context"
+INVITATION_PATH = "/api/v1/shipping-company/invitations"
+CONTEXT_MINUTES = 15
+
+
+def available_invitation(db, row):
+    if row is None:
+        raise HTTPException(404, "Invitation unavailable. Ask your company administrator for a new invitation.")
+    company = db.get(ShippingCompany, row.company_id)
+    if (row.accepted_at or row.revoked_at or aware(row.expires_at) <= now()
+            or company is None or company.status != "VERIFIED"):
+        raise HTTPException(410, "Invitation expired, revoked or already accepted. Ask your company administrator for a new invitation.")
+    return company
+
+
+def invitation_from_context(db, request):
+    try:
+        payload = jwt.decode(request.cookies.get(INVITATION_COOKIE, ""), settings.SECRET_KEY,
+                             algorithms=[settings.ALGORITHM])
+        if payload.get("type") != "company_invitation_context":
+            raise ValueError()
+        row = db.get(CompanyInvitation, int(payload["invitation_id"]))
+        if row is None or not secrets.compare_digest(row.token_hash, payload.get("invitation_digest", "")):
+            raise ValueError()
+    except (JWTError, ValueError, KeyError, TypeError):
+        raise HTTPException(410, "Invitation session ended. Open the invitation email again or ask your company administrator for a new invitation.") from None
+    available_invitation(db, row)
+    return row
+
+
+def invitation_summary(db, row, actor):
+    company = available_invitation(db, row)
+    user = db.query(User).filter(func.lower(User.email) == row.email).first()
+    return {"company_name": company.legal_name, "email": row.email, "role": row.role,
+            "expires_at": row.expires_at, "account_exists": user is not None,
+            "signed_in": actor is not None,
+            "identity_matches": bool(user and actor and actor.id == user.id)}
+
+
+class ContextIn(BaseModel):
     token: str = Field(min_length=32, max_length=200)
+
+
+@router.post("/invitations/session")
+def start_invitation_session(body: ContextIn, request: Request, response: Response,
+                             db: Session = Depends(get_db), actor: Optional[User] = Depends(get_current_user_optional)):
+    row = db.query(CompanyInvitation).filter_by(token_hash=digest(body.token)).first()
+    summary = invitation_summary(db, row, actor)
+    expires = min(aware(row.expires_at), now() + timedelta(minutes=CONTEXT_MINUTES))
+    context = jwt.encode({"type": "company_invitation_context", "invitation_id": row.id,
+                          "invitation_digest": row.token_hash, "exp": expires},
+                         settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    response.set_cookie(INVITATION_COOKIE, context, httponly=True,
+                        secure=request.url.scheme == "https" or not database_is_local(settings.DATABASE_URL),
+                        samesite="lax", max_age=max(1, int((expires-now()).total_seconds())), path=INVITATION_PATH)
+    response.headers["Cache-Control"] = "no-store"
+    return summary
+
+
+@router.get("/invitations/session")
+def resume_invitation_session(request: Request, response: Response, db: Session = Depends(get_db),
+                              actor: Optional[User] = Depends(get_current_user_optional)):
+    response.headers["Cache-Control"] = "no-store"
+    return invitation_summary(db, invitation_from_context(db, request), actor)
+
+
+@router.delete("/invitations/session", status_code=204)
+def clear_invitation_session(response: Response):
+    response.delete_cookie(INVITATION_COOKIE, path=INVITATION_PATH)
+
+
+class AcceptIn(BaseModel):
+    token: Optional[str] = Field(default=None, min_length=32, max_length=200)
     name: Optional[str] = Field(default=None, max_length=120)
     password: Optional[str] = Field(default=None, min_length=6, max_length=72)
 
@@ -257,12 +329,14 @@ class AcceptIn(BaseModel):
 @router.post("/invitations/accept")
 def accept(
     body: AcceptIn,
+    request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     actor: Optional[User] = Depends(get_current_user_optional),
 ):
-    row = db.query(CompanyInvitation).filter_by(token_hash=digest(body.token)).first()
-    if row is None:
-        raise HTTPException(404, "Invitation unavailable")
+    row = (db.query(CompanyInvitation).filter_by(token_hash=digest(body.token)).first()
+           if body.token else invitation_from_context(db, request))
+    available_invitation(db, row)
     company = (
         db.query(ShippingCompany).filter_by(id=row.company_id).with_for_update().one()
     )
@@ -343,6 +417,8 @@ def accept(
         {"role": member.role},
     )
     db.commit()
+    response.delete_cookie(INVITATION_COOKIE, path=INVITATION_PATH)
+    response.headers["Cache-Control"] = "no-store"
     return {
         "accepted": True,
         "email": row.email,

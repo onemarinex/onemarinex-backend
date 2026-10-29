@@ -441,6 +441,69 @@ class OperationsHTTP(unittest.TestCase):
             token = sent.call_args.args[2].split("#")[1].split(" ")[0]
         return row, token
 
+    def test_invitation_context_survives_refresh_without_exposing_bearer(self):
+        row, token = self.invite()
+        opened = self.request("POST", "/api/v1/shipping-company/invitations/session", body={"token": token})
+        self.assertFalse(opened.json()["account_exists"])
+        self.assertNotIn(token, opened.text)
+        cookie = opened.headers["set-cookie"]
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("SameSite=lax", cookie)
+        self.assertNotIn(token, cookie)
+        resumed = self.request("GET", "/api/v1/shipping-company/invitations/session")
+        self.assertEqual(resumed.json()["email"], "newstaff@example.com")
+        self.request("POST", "/api/v1/shipping-company/invitations/accept",
+                     body={"name": "New staff", "password": "fixture-only-secret"})
+        self.request("GET", "/api/v1/shipping-company/invitations/session", status=410)
+        self.db.expire_all()
+        self.assertIsNotNone(self.db.get(CompanyInvitation, row["id"]).accepted_at)
+
+    def test_context_retains_existing_identity_checks_and_membership_discovery(self):
+        crew = User(email="dual@example.com", name="Crew company member", role="crew", hashed_password=FIXTURE_PASSWORD_HASH)
+        self.db.add(crew); self.db.commit()
+        initial = self.request("GET", "/api/v1/auth/workspaces", crew).json()
+        self.assertEqual([w["id"] for w in initial["workspaces"]], ["crew"])
+        _, token = self.invite(crew.email)
+        self.request("POST", "/api/v1/shipping-company/invitations/session", body={"token": token})
+        self.request("POST", "/api/v1/shipping-company/invitations/accept", body={}, status=403)
+        self.request("POST", "/api/v1/shipping-company/invitations/accept", self.admin, {}, 403)
+        self.request("POST", "/api/v1/shipping-company/invitations/accept", crew, {})
+        self.db.refresh(crew)
+        self.assertEqual(crew.role, "crew")
+        self.assertEqual(crew.hashed_password, FIXTURE_PASSWORD_HASH)
+        result = self.request("GET", "/api/v1/auth/workspaces", crew).json()
+        self.assertEqual([w["id"] for w in result["workspaces"]], ["crew", "company"])
+        self.request("GET", "/api/v1/shipping-company/me", crew)
+        self.request("POST", "/api/v1/shipping-company/invitations/accept", crew, {}, 410)
+
+    def test_invitation_context_expires_and_cannot_be_reused_as_authentication(self):
+        from jose import jwt
+        from app.core.config import settings
+        _, token = self.invite()
+        opened = self.request("POST", "/api/v1/shipping-company/invitations/session", body={"token": token})
+        self.assertIn("Max-Age=", opened.headers["set-cookie"])
+        value = self.client.cookies.get("company_invitation_context")
+        payload = jwt.decode(value, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        self.assertLessEqual(payload["exp"] - datetime.now(UTC).timestamp(), 900)
+        denied = self.client.get("/api/v1/auth/workspaces", headers={"Authorization": "Bearer " + value})
+        self.assertEqual(denied.status_code, 401)
+        payload["exp"] = int(datetime.now(UTC).timestamp()) - 1
+        self.client.cookies.clear()
+        self.client.cookies.set("company_invitation_context", jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM),
+                                path="/api/v1/shipping-company/invitations")
+        self.request("GET", "/api/v1/shipping-company/invitations/session", status=410)
+
+    def test_invitation_context_revalidates_revocation_and_ignores_access_tokens(self):
+        row, token = self.invite()
+        self.request("POST", "/api/v1/shipping-company/invitations/session", body={"token": token})
+        self.request("DELETE", f"/api/v1/shipping-company/invitations/{row['id']}", self.admin, status=204)
+        self.request("GET", "/api/v1/shipping-company/invitations/session", status=410)
+        self.request("POST", "/api/v1/shipping-company/invitations/accept", body={}, status=410)
+        self.client.cookies.set("company_invitation_context", create_access_token(self.admin.email),
+                                path="/api/v1/shipping-company/invitations")
+        self.request("GET", "/api/v1/shipping-company/invitations/session", status=410)
+        self.request("GET", "/api/v1/auth/workspaces", status=401)
+
     def test_invitation_creates_verified_email_account_once(self):
         row, token = self.invite()
         self.assertNotIn(token, str(row))
