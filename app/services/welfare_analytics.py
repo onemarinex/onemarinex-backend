@@ -33,17 +33,7 @@ def merged_minutes(intervals):
     return total / 60
 
 
-def operational(
-    db,
-    start,
-    end,
-    company_id=None,
-    port_id=None,
-    vessel_id=None,
-    country_code=None,
-    call_offset=0,
-    call_limit=25,
-):
+def operational_query(db,start,end,company_id=None,port_id=None,vessel_id=None,country_code=None,call_id=None):
     query = (
         db.query(CabBooking)
         .join(VesselCall, VesselCall.id == CabBooking.vessel_call_id)
@@ -58,6 +48,8 @@ def operational(
         query = query.filter(VesselCall.port_id == port_id)
     if vessel_id:
         query = query.filter(CabBooking.vessel_id == vessel_id)
+    if call_id is not None:
+        query = query.filter(CabBooking.vessel_call_id == call_id)
     if company_id:
         query = tenure_scoped(
             db,
@@ -68,6 +60,22 @@ def operational(
             include_declared=True,
         )
     query = filter_country(query, VesselCall.port_id, country_code)
+    return query
+
+
+def operational(
+    db,
+    start,
+    end,
+    company_id=None,
+    port_id=None,
+    vessel_id=None,
+    country_code=None,
+    call_offset=0,
+    call_limit=25,
+    call_id=None,
+):
+    query = operational_query(db,start,end,company_id,port_id,vessel_id,country_code,call_id)
     call_groups = query.with_entities(
         VesselCall.id.label("call_id"),
         VesselCall.vessel_id,
@@ -97,13 +105,24 @@ def operational(
         selectinload(CabBooking.magic_link).selectinload(DriverMagicLink.reach_events)
     )
     seats = 0
+    people = set()
+    complete_people = True
+    completed_journeys = 0
     call_ids = set()
     spans = {}
+    journey_intervals = []
+    duration_people = set()
     unfinished = set()
     facilities = 0
     for b in query.yield_per(500):
         call = db.get(VesselCall, b.vessel_call_id)
         volume = max(0, b.num_passengers or 0)
+        if volume != 1 or not b.crew_id:
+            complete_people = False
+        else:
+            people.add(b.crew_id)
+        if b.trip_completed_at and start <= aware(b.trip_completed_at) < end:
+            completed_journeys += 1
         seats += volume
         call_ids.add(call.id)
         link = b.magic_link
@@ -147,6 +166,8 @@ def operational(
             finish = next((t for t in returns if t >= pickups[0]), None)
             if finish:
                 spans.setdefault(person, []).append((pickups[0], finish))
+                journey_intervals.append((finish-pickups[0]).total_seconds()/60)
+                duration_people.add(person)
             else:
                 unfinished.add(person)
     minutes = [
@@ -166,6 +187,8 @@ def operational(
         call_query = call_query.filter(VesselCall.port_id == port_id)
     if vessel_id:
         call_query = call_query.filter(VesselCall.vessel_id == vessel_id)
+    if call_id is not None:
+        call_query = call_query.filter(VesselCall.id == call_id)
     call_query = filter_country(call_query, VesselCall.port_id, country_code)
     recorded = call_query.count()
     private_duration = bool(company_id and len(minutes) < 5)
@@ -175,8 +198,14 @@ def operational(
             len(call_ids) * 100 / recorded if recorded else None
         ),
         "crew_participation": seats,
+        "distinct_crew": len(people) if complete_people else None,
+        "completed_journeys": completed_journeys,
         "participation_unit": "Passenger seats on commenced rides. Repeat passengers can count again.",
         "calls_with_shore_leave": len(call_ids),
+        "average_journey_time_ashore_minutes": (sum(journey_intervals)/len(journey_intervals) if journey_intervals and (not company_id or len(duration_people)>=5) else None),
+        "journey_duration_sample_people": len(duration_people) if not company_id or len(duration_people)>=5 else None,
+        "completed_ashore_journeys": len(journey_intervals),
+        "journey_duration_coverage": "Mean per completed recorded pickup-to-port journey. Requires five distinct linked people for company statistics. Taxi completion does not prove vessel boarding.",
         "average_time_ashore_minutes": (
             sum(minutes) / len(minutes) if minutes and not private_duration else None
         ),
@@ -202,6 +231,7 @@ def reviews_query(
     country_code=None,
     review_type=None,
     provider_id=None,
+    call_id=None,
 ):
     query = (
         db.query(BookingReview)
@@ -217,6 +247,8 @@ def reviews_query(
         query = query.filter(VesselCall.port_id == port_id)
     if vessel_id:
         query = query.filter(CabBooking.vessel_id == vessel_id)
+    if call_id is not None:
+        query = query.filter(CabBooking.vessel_call_id == call_id)
     if company_id:
         query = tenure_scoped(
             db,
@@ -249,6 +281,7 @@ def review_summary(
     country_code=None,
     review_type=None,
     provider_id=None,
+    call_id=None,
 ):
     query = reviews_query(
         db,
@@ -260,40 +293,8 @@ def review_summary(
         country_code,
         review_type,
         provider_id,
+        call_id,
     )
-    groups = {}
-    for r in query.yield_per(500):
-        groups.setdefault(r.review_type, []).append(r)
-    result = []
-    for kind, rows in sorted(groups.items()):
-        people = {r.crew_id for r in rows}
-        suppressed = bool(company_id and len(people) < 5)
-        distribution = []
-        for rating in range(1, 6):
-            matches = [r for r in rows if round(r.rating) == rating]
-            hidden = bool(company_id and len({r.crew_id for r in matches}) < 5)
-            distribution.append(
-                {
-                    "rating": rating,
-                    "count": None if suppressed or hidden else len(matches),
-                }
-            )
-        # Do not reveal a small cell by subtracting the other stars from the total.
-        if company_id and any(d["count"] is None for d in distribution):
-            distribution = [{"rating": rating, "count": None} for rating in range(1, 6)]
-        result.append(
-            {
-                "type": kind,
-                "suppressed": suppressed,
-                "reviews": None if suppressed else len(rows),
-                "respondents": None if suppressed else len(people),
-                "average_rating": (
-                    None if suppressed else sum(r.rating for r in rows) / len(rows)
-                ),
-                "distribution": distribution,
-            }
-        )
-    return {
-        "groups": result,
-        "coverage": "Driver and facility star ratings. These are not overall shore-leave satisfaction scores. Company detail requires a separate approved disclosure.",
-    }
+    from app.services.company_review_statistics import summarize_review_rows
+
+    return summarize_review_rows(query.yield_per(500), suppress=bool(company_id))

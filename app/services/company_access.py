@@ -52,6 +52,7 @@ from typing import Optional
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
+from app.services.company_fleet_identity import claim_matches_vessel
 
 from app.services.company_event_dictionary import (
     UnknownEventFamily,
@@ -124,13 +125,13 @@ def covering_claim(
     decided here -- this answers only whether the instant is inside tenure.
     """
     moment = _aware(occurred_at)
-    if moment is None:
+    if moment is None or vessel_id is None:
         return None
     query = (
         db.query(VesselRoleClaim)
         .filter(
             VesselRoleClaim.company_id == company_id,
-            VesselRoleClaim.vessel_id == vessel_id,
+            claim_matches_vessel(vessel_id),
             VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED") if include_declared else ("APPROVED",)),
             VesselRoleClaim.revoked_at.is_(None),
             VesselRoleClaim.effective_start <= moment,
@@ -274,10 +275,13 @@ def visible_vessel_ids(
     moment = _aware(occurred_at)
     if moment is None:
         return []
-    rows = (
-        db.query(VesselRoleClaim.vessel_id)
+    from app.db.models.vessel import Vessel
+
+    covering = (
+        db.query(VesselRoleClaim.id)
         .filter(
             VesselRoleClaim.company_id == company_id,
+            claim_matches_vessel(Vessel.id),
             VesselRoleClaim.status == "APPROVED",
             VesselRoleClaim.revoked_at.is_(None),
             VesselRoleClaim.effective_start <= moment,
@@ -286,7 +290,6 @@ def visible_vessel_ids(
                 VesselRoleClaim.effective_end > moment,
             ),
         )
-        .distinct()
-        .all()
+        .exists()
     )
-    return [row[0] for row in rows]
+    return [row[0] for row in db.query(Vessel.id).filter(covering).all()]

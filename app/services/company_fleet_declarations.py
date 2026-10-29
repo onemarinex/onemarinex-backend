@@ -13,6 +13,7 @@ from app.db.models.vessel import Vessel
 from app.db.models.shipping_company import VesselRoleClaim, CompanyAuditEvent
 from app.db.fleet_schema import require_fleet_constraint
 from app.services.company_claims import _interval
+from app.services.company_fleet_identity import canonical_imo, identity_key, lock_identity
 
 ACCEPTED = ("APPROVED", "AUTO_ACCEPTED")
 OPEN = ACCEPTED + ("SUBMITTED", "UNDER_REVIEW", "MORE_EVIDENCE")
@@ -22,6 +23,8 @@ ROLE_FIELDS = {
     "ism_manager": "ISM_MANAGER",
 }
 FIELDS = ("imo_number", "vessel_name", *ROLE_FIELDS, "start_date", "end_date")
+ROLE_DATE_FIELDS = tuple(f"{field}_{edge}_date" for field in ROLE_FIELDS for edge in ("start", "end"))
+ALL_FIELDS = (*FIELDS, *ROLE_DATE_FIELDS)
 
 
 def imo(value):
@@ -60,41 +63,57 @@ class DeclarationIn(BaseModel):
     owner: bool
     commercial_manager: bool
     ism_manager: bool
-    start_date: str = Field(max_length=40)
+    start_date: Optional[str] = Field(default=None, max_length=40)
     end_date: Optional[str] = Field(default=None, max_length=40)
+    owner_start_date: Optional[str] = Field(default=None, max_length=40)
+    owner_end_date: Optional[str] = Field(default=None, max_length=40)
+    commercial_manager_start_date: Optional[str] = Field(default=None, max_length=40)
+    commercial_manager_end_date: Optional[str] = Field(default=None, max_length=40)
+    ism_manager_start_date: Optional[str] = Field(default=None, max_length=40)
+    ism_manager_end_date: Optional[str] = Field(default=None, max_length=40)
 
     @model_validator(mode="after")
     def validate_declaration(self):
         self.imo_number = imo(self.imo_number)
-        start, end = boundary(self.start_date), boundary(self.end_date)
-        if start is None or (end is not None and end <= start):
-            raise ValueError("The end must be after the start.")
         if not any(getattr(self, field) for field in ROLE_FIELDS):
             raise ValueError("Select at least one company role.")
+        for field in ROLE_FIELDS:
+            if not getattr(self, field):
+                continue
+            start, end = self.period(field)
+            if start is None:
+                raise ValueError(f"Enter the {field.replace('_', ' ')} start date.")
+            if end is not None and end <= start:
+                raise ValueError(f"The {field.replace('_', ' ')} end must be after its start.")
         return self
 
     def roles(self):
         return [code for field, code in ROLE_FIELDS.items() if getattr(self, field)]
 
+    def period(self, field):
+        start = getattr(self, field + "_start_date")
+        # An explicit role start chooses the independent period, including its
+        # blank ongoing end. Old seven-column clients retain common dates.
+        end = getattr(self, field + "_end_date") if start else self.end_date
+        return boundary(start or self.start_date), boundary(end)
+
 
 def resolve(db, number, lock=False):
     # Ambiguous legacy identities must be reviewed; never pick an arbitrary row.
     q = db.query(Vessel).filter(
-        func.upper(func.trim(Vessel.imo_number)).in_([number, "IMO " + number])
+        canonical_imo(Vessel.imo_number) == number
     )
     if lock:
         q = q.order_by(Vessel.id).with_for_update()
     rows = q.limit(2).all()
-    if len(rows) != 1:
-        raise ValueError(
-            "Unknown or ambiguous IMO. Ask Super Admin to check the vessel master."
-        )
-    return rows[0]
+    if len(rows) > 1:
+        raise ValueError("This IMO has ambiguous operational identities. An identity review is required.")
+    return rows[0] if rows else None
 
 
-def overlapping(db, vessel_id, roles, start, end):
+def overlapping(db, number, roles, start, end):
     q = db.query(VesselRoleClaim).filter(
-        VesselRoleClaim.vessel_id == vessel_id,
+        identity_key() == number,
         VesselRoleClaim.role.in_(roles),
         VesselRoleClaim.status.in_(OPEN),
         VesselRoleClaim.revoked_at.is_(None),
@@ -107,19 +126,28 @@ def overlapping(db, vessel_id, roles, start, end):
 
 
 def inspect_row(db, company_id, row):
-    vessel = resolve(db, row.imo_number)
+    identity_review = False
+    try:
+        vessel = resolve(db, row.imo_number)
+    except ValueError:
+        vessel = None
+        identity_review = True
     if (
+        vessel is not None
+        and
         " ".join(vessel.name.split()).casefold()
         != " ".join(row.vessel_name.split()).casefold()
     ):
-        raise ValueError(
-            "The name does not match the vessel master. Use the master name or request a name correction."
-        )
-    overlaps = overlapping(
-        db, vessel.id, row.roles(), boundary(row.start_date), boundary(row.end_date)
-    ).all()
+        identity_review = True
+    overlaps = []
+    for field, role in ROLE_FIELDS.items():
+        if getattr(row, field):
+            start, end = row.period(field)
+            overlaps.extend(overlapping(db, row.imo_number, [role], start, end).all())
     if any(c.company_id == company_id for c in overlaps):
         return vessel, "DUPLICATE", set()
+    if identity_review:
+        return vessel, "IDENTITY_REVIEW", set(row.roles())
     conflicts = {c.role for c in overlaps}
     return vessel, "CONFLICT" if conflicts else "ACCEPTED", conflicts
 
@@ -153,23 +181,27 @@ def declare(db, company, actor, row, *, import_id=None):
     require_fleet_constraint(db)
     if company.status != "VERIFIED":
         raise HTTPException(403, "Only a verified company can declare a fleet.")
-    resolve(db, row.imo_number, lock=True)
+    lock_identity(db, row.imo_number)
     vessel, state, conflicts = inspect_row(db, company.id, row)
     if state == "DUPLICATE":
         raise ValueError("Your fleet already has this role in an overlapping period.")
     group = str(uuid4())
     result = []
-    for role in row.roles():
+    for field, role in ROLE_FIELDS.items():
+        if not getattr(row, field):
+            continue
+        start, end = row.period(field)
         claim = VesselRoleClaim(
             company_id=company.id,
-            vessel_id=vessel.id,
+            vessel_id=vessel.id if vessel else None,
             imo_number=row.imo_number,
             role=role,
-            effective_start=boundary(row.start_date),
-            effective_end=boundary(row.end_date),
+            effective_start=start,
+            effective_end=end,
             status="SUBMITTED" if role in conflicts else "AUTO_ACCEPTED",
+            review_reason="Vessel identity needs independent review." if state == "IDENTITY_REVIEW" else "Overlapping company role periods." if role in conflicts else None,
             fleet_group=group,
-            declared_vessel_name=vessel.name,
+            declared_vessel_name=row.vessel_name,
             fleet_import_id=import_id,
             evidence_type="company_declaration",
             evidence_reference=f"Fleet declaration by member {actor.id}",
@@ -179,17 +211,19 @@ def declare(db, company, actor, row, *, import_id=None):
             with db.begin_nested():
                 db.add(claim)
                 db.flush()
-        except IntegrityError:
+        except IntegrityError as exc:
+            if getattr(exc.orig, "pgcode", None) != "23P01":
+                raise
             claim = VesselRoleClaim(
                 company_id=company.id,
-                vessel_id=vessel.id,
+                vessel_id=vessel.id if vessel else None,
                 imo_number=row.imo_number,
                 role=role,
-                effective_start=boundary(row.start_date),
-                effective_end=boundary(row.end_date),
+                effective_start=start,
+                effective_end=end,
                 status="SUBMITTED",
                 fleet_group=group,
-                declared_vessel_name=vessel.name,
+                declared_vessel_name=row.vessel_name,
                 fleet_import_id=import_id,
                 evidence_type="company_declaration",
                 evidence_reference=f"Fleet declaration by member {actor.id}",
@@ -206,7 +240,7 @@ def declare(db, company, actor, row, *, import_id=None):
                 if claim.status == "AUTO_ACCEPTED"
                 else "declaration_pending_review"
             ),
-            after=_interval(claim),
+            after=dict(_interval(claim), imo_number=row.imo_number, vessel_name=row.vessel_name),
             reason="Company declaration. No independent verification or restricted access is granted.",
         )
         result.append(claim)
@@ -217,7 +251,7 @@ def group_query(db, company_id):
     from sqlalchemy import String, cast
 
     group = func.concat(
-        VesselRoleClaim.vessel_id,
+        identity_key(),
         "/",
         cast(VesselRoleClaim.effective_start, String),
         "/",
@@ -257,7 +291,7 @@ def revision(rows):
 
 def entry_out(db, rows):
     c = rows[0]
-    vessel = db.get(Vessel, c.vessel_id)
+    vessel = db.get(Vessel, c.vessel_id) if c.vessel_id else None
     now = datetime.now(timezone.utc)
     current = any(
         r.status in ACCEPTED
@@ -269,9 +303,10 @@ def entry_out(db, rows):
     return dict(
         id=c.id,
         vessel_id=c.vessel_id,
-        imo_number=c.imo_number or vessel.imo_number,
-        vessel_name=vessel.name if current else c.declared_vessel_name or vessel.name,
-        master_name=vessel.name,
+        imo_number=c.imo_number or (vessel.imo_number if vessel else None),
+        vessel_name=vessel.name if current and vessel else c.declared_vessel_name or (vessel.name if vessel else "Name not recorded"),
+        master_name=vessel.name if vessel else None,
+        operational_linked=vessel is not None,
         effective_start=c.effective_start,
         effective_end=c.effective_end,
         **{
@@ -298,4 +333,5 @@ def entry_out(db, rows):
         ),
         revision=revision(rows),
         import_id=c.fleet_import_id,
+        role_periods=[dict(id=r.id, **_interval(r)) for r in rows],
     )

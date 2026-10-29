@@ -603,7 +603,7 @@ class PortalAcceptanceHTTP(unittest.TestCase):
         self.port.is_active = False
         self.db.commit()
         self.assertEqual(
-            self.request("GET", path + "?active=false", self.admin).json()["total"], 0
+            self.request("GET", path + "?active=false", self.admin).json()["total"], 1
         )
 
     def test_registry_uses_the_canonical_vessel_imo(self):

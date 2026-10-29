@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy import or_, and_, literal, func
+from sqlalchemy import or_, and_, literal, func, cast, String
 from app.db.session import get_db
 from app.api.v1.routes_auth import get_current_user
 from app.api.v1.routes_company_onboarding import admin
@@ -232,64 +232,63 @@ def revoke_escalation(
 
 @company_router.get("/safety-escalations")
 def escalations(
-    offset: int = Query(0, ge=0),
-    limit: int = Query(25, ge=1, le=100),
-    db: Session = Depends(get_db),
-    context=Depends(current_company_member),
+    search: str = Query("", max_length=120), port_name: str = Query("", max_length=120), status: Optional[str] = Query(None, max_length=32),
+    severity: Optional[str] = Query(None, max_length=32), vessel_id: Optional[int] = Query(None, gt=0),
+    port_id: Optional[int] = Query(None, gt=0), start: Optional[datetime] = None, end: Optional[datetime] = None,
+    offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100),
+    db: Session = Depends(get_db), context=Depends(current_company_member),
 ):
+    from app.services.company_safety_oversight import progress
+    if (start and start.tzinfo is None) or (end and end.tzinfo is None) or (start and end and end <= start):
+        raise HTTPException(422, "Use a valid reporting period with time zones.")
     company, _ = context
     query = db.query(Escalation).filter_by(company_id=company.id, revoked_at=None)
-    # Authorization can change after escalation. Filter before page assembly.
     items = []
-    for row in query.order_by(
-        Escalation.created_at.desc(), Escalation.id.desc()
-    ).yield_per(100):
+    for row in query.order_by(Escalation.created_at.desc(), Escalation.id.desc()).yield_per(100):
         try:
-            e, s, c = escalation_for(db, company.id, row.id)
+            e, source, call = escalation_for(db, company.id, row.id)
         except HTTPException:
             continue
-        items.append(
-            {
-                "id": e.id,
-                "source_kind": e.source_kind,
-                "reference": getattr(s, "incident_id", None) or f"SOS-{s.id}",
-                "vessel_name": c.vessel_name,
-                "port_name": c.port_name,
-                "created_at": e.created_at,
-                "urgency": e.urgency,
-            }
-        )
-    return {
-        "items": items[offset : offset + limit],
-        "total": len(items),
-        "offset": offset,
-        "limit": limit,
-    }
+        if vessel_id and call.vessel_id != vessel_id or port_id and call.port_id != port_id:
+            continue
+        if port_name and port_name.casefold() not in (call.port_name or "").casefold():
+            continue
+        at = case_time(source)
+        if start and at < start or end and at >= end:
+            continue
+        item = progress(db, e, source, call)
+        if status and item["status"] != status.upper() or severity and (item["severity"] or "").lower() != severity.lower():
+            continue
+        if search and search.casefold() not in " ".join(str(item.get(k) or "") for k in ("reference", "vessel_name", "imo_number", "port_name", "category")).casefold():
+            continue
+        items.append(item)
+    return {"items": items[offset:offset+limit], "total":len(items), "offset":offset, "limit":limit,
+        "summary": {"open":sum(r["status"]=="OPEN" for r in items), "critical":sum((r["severity"] or "").lower()=="critical" for r in items), "investigating":sum(r["status"]=="INVESTIGATING" for r in items), "resolved":sum(r["status"] in ("RESOLVED","CLOSED") for r in items), "unavailable":sum(r["status"] is None for r in items)}}
 
 
 @company_router.get("/safety-escalations/{escalation_id}")
-def summary(
-    escalation_id: int,
-    db: Session = Depends(get_db),
-    context=Depends(current_company_member),
-):
+def summary(escalation_id: int, db: Session = Depends(get_db), context=Depends(current_company_member)):
+    from app.services.company_safety_oversight import progress
     company, _ = context
-    e, s, c = escalation_for(db, company.id, escalation_id)
-    return {
-        "id": e.id,
-        "source_kind": e.source_kind,
-        "summary": e.summary,
-        "urgency": e.urgency,
-        "vessel_name": c.vessel_name,
-        "port_name": c.port_name,
-        "call_id": c.id,
-        "reported_at": s.created_at,
-        "occurred_at": case_time(s),
-        "started_at": c.started_at,
-        "ended_at": c.ended_at,
-        "request_end": c.ended_at or now() + timedelta(days=6),
-        "available_fields": sorted(CASE_FIELDS),
-    }
+    e, source, call = escalation_for(db, company.id, escalation_id)
+    return dict(progress(db, e, source, call, detail=True), request_end=call.ended_at or now()+timedelta(days=6), available_fields=sorted(CASE_FIELDS))
+
+
+class OversightIn(BaseModel):
+    model_config = {"str_strip_whitespace": True, "extra": "forbid"}
+    action: Literal["ACKNOWLEDGE", "COMMENT", "CLARIFY", "FLAG"]
+    message: str = Field(min_length=3, max_length=2000)
+
+
+@company_router.post("/safety-escalations/{escalation_id}/oversight", status_code=201)
+def company_oversight(escalation_id: int, body: OversightIn, db: Session = Depends(get_db), context=Depends(current_company_member), actor=Depends(get_current_user)):
+    company, _ = context
+    escalation_for(db, company.id, escalation_id)
+    event = CompanyAuditEvent(company_id=company.id, actor_user_id=actor.id,
+        target_type="company_safety_oversight", target_id=escalation_id, action=body.action,
+        after_state={"message":body.message})
+    db.add(event); db.commit()
+    return {"id":event.id,"action":body.action,"created_at":event.created_at}
 
 
 class AskIn(BaseModel):
@@ -367,6 +366,9 @@ def request_out(row, db=None):
     call = db.get(VesselCall, row.vessel_call_id) if db else None
     return {
         "vessel_name": call.vessel_name if call else None,
+        "imo_number": call.imo_number if call else None,
+        "call_started_at": call.started_at if call else None,
+        "call_ended_at": call.ended_at if call else None,
         "port_name": call.port_name if call else None,
         "id": row.id,
         "company_id": row.company_id,
@@ -402,11 +404,19 @@ def requests(
     ] = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(25, ge=1, le=100),
+    search: str = Query("", max_length=120), source_kind: Optional[Literal["CALL", "CASE"]] = None,
     db: Session = Depends(get_db),
     context=Depends(current_company_member),
 ):
     company, _ = context
     q = db.query(Request).filter_by(company_id=company.id)
+    if source_kind:
+        q = q.filter(Request.source_kind == source_kind)
+    if search.strip():
+        term = "%" + search.strip().replace("%", "\\%").replace("_", "\\_") + "%"
+        q = q.join(VesselCall, VesselCall.id == Request.vessel_call_id).filter(or_(
+            VesselCall.vessel_name.ilike(term, escape="\\"), VesselCall.imo_number.ilike(term, escape="\\"),
+            VesselCall.port_name.ilike(term, escape="\\"), cast(Request.id, String).ilike(term, escape="\\")))
     if status == "EXPIRED":
         q = q.filter(
             Request.status.in_(["APPROVED", "PARTIALLY_APPROVED"]),
@@ -432,6 +442,14 @@ def requests(
         "offset": offset,
         "limit": limit,
     }
+
+
+@company_router.get("/disclosure-requests/{request_id}")
+def request_metadata(request_id: int, db: Session = Depends(get_db), context=Depends(current_company_member)):
+    row = db.query(Request).filter_by(id=request_id, company_id=context[0].id).first()
+    if row is None:
+        raise HTTPException(404, "Request not found.")
+    return request_out(row, db)
 
 
 @admin_router.get("/disclosure-requests")
@@ -480,6 +498,7 @@ def digest(text):
 
 
 def scope_for(db, row, body):
+    from app.services.company_fleet_identity import claim_matches_vessel
     if not set(body.fields) <= set(row.fields):
         raise HTTPException(422, "Approval cannot add fields that were not requested.")
     start = body.event_start or row.event_start
@@ -499,7 +518,7 @@ def scope_for(db, row, body):
             db.query(VesselRoleClaim.id)
             .filter(
                 VesselRoleClaim.company_id == row.company_id,
-                VesselRoleClaim.vessel_id == call.vessel_id,
+                claim_matches_vessel(call.vessel_id),
                 VesselRoleClaim.status == "APPROVED",
                 VesselRoleClaim.revoked_at.is_(None),
                 VesselRoleClaim.effective_start < end,
@@ -943,6 +962,7 @@ def read(
         jsonable_encoder(
             {
                 "request_id": row.id,
+                "request": request_out(row, db),
                 "generated_at": generated,
                 "expires_at": row.access_expires_at,
                 "fields": row.approved_scope["fields"],

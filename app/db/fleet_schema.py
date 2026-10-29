@@ -11,6 +11,10 @@ def ensure_fleet_schema(connection):
             "ALTER TABLE vessel_role_claims ADD COLUMN IF NOT EXISTS fleet_group VARCHAR(36)"
         )
     )
+
+    from app.db.fleet_registry_schema import ensure_fleet_registry_schema
+
+    ensure_fleet_registry_schema(connection)
     connection.execute(
         text(
             "ALTER TABLE vessel_role_claims ADD COLUMN IF NOT EXISTS declared_vessel_name VARCHAR(255)"
@@ -44,7 +48,11 @@ def ensure_fleet_schema(connection):
 def require_fleet_constraint(db):
     if not db.execute(
         text(
-            "SELECT 1 FROM pg_constraint WHERE conname=:name AND conrelid='vessel_role_claims'::regclass"
+            """SELECT 1 FROM pg_constraint WHERE conname=:name AND conrelid='vessel_role_claims'::regclass
+            AND EXISTS (SELECT 1 FROM pg_constraint WHERE conname='uq_fleet_identity_role_period'
+                AND conrelid='vessel_role_claims'::regclass)
+            AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='company_fleet_identity_guard'
+                AND tgrelid='vessel_role_claims'::regclass AND tgenabled='O')"""
         ),
         {"name": CONSTRAINT},
     ).first():

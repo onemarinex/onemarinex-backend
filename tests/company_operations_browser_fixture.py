@@ -34,6 +34,7 @@ from app.api.v1 import (
     routes_company_reports,
     routes_company_fleet,
     routes_welfare,
+    routes_crew,
 )
 from app.services import email
 
@@ -46,6 +47,7 @@ for router, prefix in [
     (routes_drivers.router, "/api/v1/drivers"),
     (routes_vessels.router, "/api/v1/vessels"),
     (routes_users.router, "/api/v1/users"),
+    (routes_crew.router, "/api/v1/crew"),
     (routes_incidents.router, "/api/v1/incidents"),
     (routes_company_administration.router, "/api/v1/shipping-company/administration"),
     (routes_company_onboarding.router, "/api/v1/superadmin/company-onboarding"),
