@@ -31,6 +31,10 @@ from jose import jwt, JWTError
 
 router = APIRouter()
 ROLES = ("ADMIN", "ANALYST", "VIEWER")
+INVITATION_COOKIE = "company_invitation_context"
+INVITATION_PATH = "/api/v1/shipping-company/invitations"
+CONTEXT_MINUTES = 15
+
 
 
 def now():
@@ -226,6 +230,11 @@ def invite(
     return output(row)
 
 
+@router.delete("/invitations/session", status_code=204)
+def clear_invitation_session(response: Response):
+    response.delete_cookie(INVITATION_COOKIE, path=INVITATION_PATH)
+
+
 @router.delete("/invitations/{invitation_id}", status_code=204)
 def revoke(
     invitation_id: int,
@@ -247,11 +256,6 @@ def revoke(
     row.revoked_at = now()
     audit(db, actor, company.id, row.id, "invitation_revoked", None, None)
     db.commit()
-
-
-INVITATION_COOKIE = "company_invitation_context"
-INVITATION_PATH = "/api/v1/shipping-company/invitations"
-CONTEXT_MINUTES = 15
 
 
 def available_invitation(db, row):
@@ -313,11 +317,6 @@ def resume_invitation_session(request: Request, response: Response, db: Session 
                               actor: Optional[User] = Depends(get_current_user_optional)):
     response.headers["Cache-Control"] = "no-store"
     return invitation_summary(db, invitation_from_context(db, request), actor)
-
-
-@router.delete("/invitations/session", status_code=204)
-def clear_invitation_session(response: Response):
-    response.delete_cookie(INVITATION_COOKIE, path=INVITATION_PATH)
 
 
 class AcceptIn(BaseModel):
