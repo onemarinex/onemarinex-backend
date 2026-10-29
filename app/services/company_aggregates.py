@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models.cab_booking import CabBooking
 from app.db.models.shipping_company import VesselRoleClaim
+from app.services.company_fleet_identity import claim_matches_vessel, identity_key, operational_ids
 from app.services.company_metrics import Availability, Metric, metric
 
 
@@ -103,7 +104,7 @@ def tenure_scoped(
             VesselRoleClaim.company_id == company_id,
             VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED") if include_declared else ("APPROVED",)),
             VesselRoleClaim.revoked_at.is_(None),
-            VesselRoleClaim.vessel_id == vessel_column,
+            claim_matches_vessel(vessel_column),
             VesselRoleClaim.effective_start <= occurred_column,
             or_(
                 VesselRoleClaim.effective_end.is_(None),
@@ -186,7 +187,7 @@ def verified_vessels(db: Session, *, company_id: int, at: datetime) -> Figure:
     definition = metric("verified_vessels")
     moment = _aware(at)
     value = (
-        db.query(func.count(func.distinct(VesselRoleClaim.vessel_id)))
+        db.query(func.count(func.distinct(identity_key())))
         .filter(
             VesselRoleClaim.company_id == company_id,
             VesselRoleClaim.status == "APPROVED",
@@ -256,7 +257,7 @@ def qualifying_calls(db: Session, *, company_id: int, period: Optional['Period']
         VesselRoleClaim.company_id == company_id,
         VesselRoleClaim.status == "APPROVED",
         VesselRoleClaim.revoked_at.is_(None),
-        VesselRoleClaim.vessel_id == VesselCall.vessel_id,
+        claim_matches_vessel(VesselCall.vessel_id),
         VesselRoleClaim.effective_start
         < func.coalesce(VesselCall.ended_at, func.now()),
         or_(
@@ -518,7 +519,7 @@ def _ashore_snapshot(db, company_id, period=None, *, vessel_call_id=None, includ
         if period
         else datetime.now(timezone.utc)
     )
-    claims = (
+    claim_query = (
         db.query(VesselRoleClaim)
         .filter(
             VesselRoleClaim.company_id == company_id,
@@ -526,21 +527,29 @@ def _ashore_snapshot(db, company_id, period=None, *, vessel_call_id=None, includ
             VesselRoleClaim.revoked_at.is_(None),
             VesselRoleClaim.effective_start <= at,
         )
-        .order_by(VesselRoleClaim.vessel_id, VesselRoleClaim.effective_start)
-        .all()
     )
+    if vessel_call_id is not None:
+        from app.db.models.vessel_call import VesselCall
+        call = db.get(VesselCall, vessel_call_id)
+        if call is None:
+            return 0, 0
+        claim_query = claim_query.filter(claim_matches_vessel(call.vessel_id))
+    claims = claim_query.order_by(VesselRoleClaim.vessel_id, VesselRoleClaim.effective_start).all()
     merged = {}
     for c in claims:
-        rows = merged.setdefault(c.vessel_id, [])
-        start, end = _aware(c.effective_start), _aware(c.effective_end)
-        if rows and (rows[-1][1] is None or rows[-1][1] >= start):
-            previous = rows[-1]
-            rows[-1] = (
-                previous[0],
-                None if previous[1] is None or end is None else max(previous[1], end),
-            )
-        else:
-            rows.append((start, end))
+        for vessel_id in operational_ids(db, c):
+            merged.setdefault(vessel_id, []).append((_aware(c.effective_start), _aware(c.effective_end)))
+    # Claims with and without an operational link may now cover the same
+    # vessel. Merge after identity resolution, in chronological order.
+    for vessel_id, intervals in list(merged.items()):
+        rows = []
+        for start, end in sorted(intervals, key=lambda interval: interval[0]):
+            if rows and (rows[-1][1] is None or rows[-1][1] >= start):
+                previous = rows[-1]
+                rows[-1] = (previous[0], None if previous[1] is None or end is None else max(previous[1], end))
+            else:
+                rows.append((start, end))
+        merged[vessel_id] = rows
     windows = {
         v: (start, end)
         for v, intervals in merged.items()

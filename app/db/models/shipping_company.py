@@ -133,8 +133,11 @@ class VesselRoleClaim(Base):
     )
     vessel_id = Column(
         Integer, ForeignKey("vessels.id", ondelete="CASCADE"),
-        nullable=False, index=True,
+        nullable=True, index=True,
     )
+    # Optional operational link. An independent registry entry needs no port
+    # visit. Filled by a database trigger only on new writes; no legacy backfill.
+    fleet_identity_key = Column(String(120), nullable=True)
     # Kept beside vessel_id because a claim is submitted against an IMO and the
     # canonical vessel is resolved afterwards; the document requires the
     # submitted identity to survive that resolution.

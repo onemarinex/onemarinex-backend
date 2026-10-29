@@ -26,6 +26,7 @@ from app.api.v1.routes_shipping_company import (
 )
 from app.services import company_fleet_declarations as fleet
 from app.services.company_claims import _interval
+from app.services.company_fleet_identity import identity_key, lock_identity
 
 router = APIRouter()
 LABELS = [
@@ -37,6 +38,35 @@ LABELS = [
     "Start Date",
     "End Date",
 ]
+FIELD_LABELS = dict(zip(fleet.FIELDS, LABELS)) | {
+    f"{field}_{edge}_date": f"{label} {edge.title()} Date"
+    for field, label in (("owner", "Owner"), ("commercial_manager", "Commercial Manager"), ("ism_manager", "ISM Manager"))
+    for edge in ("start", "end")
+}
+TEMPLATE_FIELDS = (*fleet.FIELDS[:5], *fleet.ROLE_DATE_FIELDS)
+TEMPLATE_LABELS = [FIELD_LABELS[field] for field in TEMPLATE_FIELDS]
+
+
+def mapping_ready(mapping):
+    required = set(fleet.FIELDS[:5])
+    return required <= set(mapping) and (
+        "start_date" in mapping or any(f"{field}_start_date" in mapping for field in fleet.ROLE_FIELDS)
+    )
+
+
+def recognized_mapping(columns):
+    def normalized(value):
+        return " ".join(str(value).replace("_", " ").replace("-", " ").casefold().split())
+
+    aliases = {normalized(label): field for field, label in FIELD_LABELS.items()}
+    aliases.update({normalized(field): field for field in fleet.ALL_FIELDS})
+    aliases.update({"imo number": "imo_number", "registered owner": "owner", "registered owner start date": "owner_start_date", "registered owner end date": "owner_end_date"})
+    matches = {}
+    for index, heading in enumerate(columns):
+        field = aliases.get(normalized(heading))
+        if field:
+            matches.setdefault(field, []).append(index)
+    return {field: indexes[0] for field, indexes in matches.items() if len(indexes) == 1}
 
 
 def write_context(context):
@@ -55,7 +85,8 @@ def resolve(
         vessel = fleet.resolve(db, number)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
-    return {"imo_number": number, "vessel_name": vessel.name}
+    return {"imo_number": number, "vessel_name": vessel.name if vessel else None,
+            "operational_linked": vessel is not None}
 
 
 @router.get("/entries")
@@ -84,10 +115,10 @@ def entries(
     )
     current_count = (
         q.filter(live)
-        .with_entities(func.count(func.distinct(VesselRoleClaim.vessel_id)))
+        .with_entities(func.count(func.distinct(identity_key())))
         .scalar()
     )
-    q = q.join(Vessel, Vessel.id == VesselRoleClaim.vessel_id)
+    q = q.outerjoin(Vessel, Vessel.id == VesselRoleClaim.vessel_id)
     if search.strip():
         term = "%" + search.strip().replace("%", "\\%").replace("_", "\\_") + "%"
         q = q.filter(
@@ -95,6 +126,7 @@ def entries(
                 Vessel.name.ilike(term, escape="\\"),
                 Vessel.imo_number.ilike(term, escape="\\"),
                 VesselRoleClaim.declared_vessel_name.ilike(term, escape="\\"),
+                VesselRoleClaim.imo_number.ilike(term, escape="\\"),
             )
         )
     groups = q.with_entities(
@@ -110,7 +142,7 @@ def entries(
         "name": func.min(
             func.coalesce(VesselRoleClaim.declared_vessel_name, Vessel.name)
         ),
-        "imo": func.min(Vessel.imo_number),
+        "imo": func.min(func.coalesce(VesselRoleClaim.imo_number, Vessel.imo_number)),
         "start": func.min(VesselRoleClaim.effective_start),
         "end": func.max(VesselRoleClaim.effective_end),
     }[sort]
@@ -169,6 +201,8 @@ def apply_change(db, company, actor, rows, body):
     if any(c.status not in fleet.OPEN or c.revoked_at for c in rows):
         raise HTTPException(409, "This entry is closed. Add a new period if needed.")
     first = rows[0]
+    if first.vessel_id is None and body.action in ("TYPO", "RENAME", "IMO"):
+        raise HTTPException(422, "Use Correct Vessel Details in the fleet registry for this independent declaration.")
     try:
         point = fleet.boundary(body.effective_date)
         end = fleet.boundary(body.end_date)
@@ -195,6 +229,8 @@ def apply_change(db, company, actor, rows, body):
             target = fleet.resolve(db, fleet.imo(body.corrected_imo))
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+        if target is None:
+            raise HTTPException(422, "Use Correct Vessel Details for an independent fleet identity.")
         if target.id == first.vessel_id:
             raise HTTPException(422, "Select a different canonical IMO.")
     # Verified periods, identity corrections and administrative typos need independent review.
@@ -256,7 +292,7 @@ def apply_direct(db, company, actor, rows, body):
     if body.action == "ROLES":
         row = fleet.DeclarationIn(
             imo_number=first.imo_number,
-            vessel_name=db.get(Vessel, first.vessel_id).name,
+            vessel_name=first.declared_vessel_name or db.get(Vessel, first.vessel_id).name,
             **{f: getattr(body, f) for f in fleet.ROLE_FIELDS},
             start_date=point.isoformat(),
             end_date=old_end.isoformat() if old_end else None,
@@ -290,6 +326,9 @@ def apply_reviewed_change(db, change, actor, decision):
             target = fleet.resolve(db, fleet.imo(body.corrected_imo))
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
+    key = db.query(identity_key()).filter(VesselRoleClaim.id == first.id).scalar()
+    for value in sorted({key, fleet.imo(body.corrected_imo) if target else key}):
+        lock_identity(db, value)
     ids = [first.vessel_id] + ([target.id] if target else [])
     db.query(Vessel).filter(Vessel.id.in_(ids)).order_by(
         Vessel.id
@@ -396,7 +435,8 @@ def change_entry(
     )
     if first is None:
         raise HTTPException(404, "Fleet entry not found.")
-    db.query(Vessel).filter_by(id=first.vessel_id).with_for_update().one()
+    key = db.query(identity_key()).filter(VesselRoleClaim.id == first.id).scalar()
+    lock_identity(db, key)
     rows = fleet.load_group(db, company.id, entry_id, lock=True)
     if fleet.revision(rows) != body.revision:
         raise HTTPException(409, "The fleet entry changed. Refresh and try again.")
@@ -421,7 +461,7 @@ def safe_csv(values):
 @router.get("/template.csv")
 def template(context=Depends(current_company_member)):
     return Response(
-        safe_csv([LABELS]),
+        safe_csv([TEMPLATE_LABELS]),
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="fleet-template.csv"'},
     )
@@ -435,6 +475,7 @@ def draft_out(draft):
         columns=draft.columns,
         rows=draft.rows,
         mapping=draft.mapping,
+        mapping_ready=mapping_ready(draft.mapping or {}),
         status=draft.status,
         result=draft.result,
         imported_at=draft.imported_at,
@@ -517,11 +558,7 @@ def upload(
     except Exception:
         raise HTTPException(422, "The file could not be read.") from None
     columns = [str(v).strip() or f"Column {i+1}" for i, v in enumerate(data[0])]
-    mapping = {
-        field: columns.index(label)
-        for field, label in zip(fleet.FIELDS, LABELS)
-        if label in columns
-    }
+    mapping = recognized_mapping(columns)
     draft = CompanyFleetImport(
         company_id=company.id,
         created_by_user_id=actor.id,
@@ -566,12 +603,13 @@ class MappingIn(BaseModel):
 
 def parse_rows(db, company_id, draft, mapping):
     if (
-        set(mapping) != set(fleet.FIELDS)
-        or len(set(mapping.values())) != 7
+        not mapping_ready(mapping)
+        or not set(mapping) <= set(fleet.ALL_FIELDS)
+        or len(set(mapping.values())) != len(mapping)
         or any(i < 0 or i >= len(draft.columns) for i in mapping.values())
     ):
         raise HTTPException(
-            422, "Map each of the seven fields to a different source column."
+            422, "Map IMO, vessel name, the three roles and common or role start dates to different source columns."
         )
     findings = []
     parsed = []
@@ -593,34 +631,36 @@ def parse_rows(db, company_id, draft, mapping):
                     raise ValueError("Role fields must contain Yes or No.")
                 values[field] = val in ("yes", "true", "1")
             # Excel dates have no zone: interpret calendar midnight as the agreed company boundary.
-            for field in ("start_date", "end_date"):
-                val = values[field]
+            for field in ("start_date", "end_date", *fleet.ROLE_DATE_FIELDS):
+                val = values.get(field)
                 if isinstance(val, str) and val.endswith("T00:00:00"):
                     values[field] = val[:10]
             row = fleet.DeclarationIn(**values)
             vessel, state, _ = fleet.inspect_row(db, company_id, row)
-            start, end = fleet.boundary(row.start_date), fleet.boundary(row.end_date)
+            periods = [(code, *row.period(field)) for field, code in fleet.ROLE_FIELDS.items() if getattr(row, field)]
             if any(
-                number == row.imo_number
-                and set(roles) & set(row.roles())
+                number == row.imo_number and role == other_role
                 and (other_end is None or start < other_end)
                 and (end is None or other_start < end)
-                for number, roles, other_start, other_end in seen
+                for role, start, end in periods
+                for number, other_role, other_start, other_end in seen
             ):
                 state = "DUPLICATE"
-            seen.append((row.imo_number, row.roles(), start, end))
+            if state in ("ACCEPTED", "CONFLICT", "IDENTITY_REVIEW"):
+                seen.extend((row.imo_number, *period) for period in periods)
             message = {
                 "ACCEPTED": "Ready for aggregate acceptance.",
                 "CONFLICT": "Pending Super Admin review. Other valid rows can proceed.",
+                "IDENTITY_REVIEW": "Vessel identity needs review. Other valid rows can proceed.",
                 "DUPLICATE": "An overlapping role already exists in your fleet or this file.",
             }[state]
         except (ValueError, ValidationError) as exc:
             text = str(exc)
-            state = "UNKNOWN" if "Unknown or ambiguous IMO" in text else "INVALID"
+            state = "INVALID"
             message = (
                 text.split("\n")[0]
                 if not isinstance(exc, ValidationError)
-                else "Check IMO, roles, vessel name and effective dates."
+                else "; ".join(str(error["msg"]).removeprefix("Value error, ") for error in exc.errors(include_url=False))
             )
         findings.append(
             dict(
@@ -630,7 +670,7 @@ def parse_rows(db, company_id, draft, mapping):
                 message=message,
             )
         )
-        parsed.append(row if state in ("ACCEPTED", "CONFLICT") else None)
+        parsed.append(row if state in ("ACCEPTED", "CONFLICT", "IDENTITY_REVIEW") else None)
     return findings, parsed
 
 
@@ -640,7 +680,7 @@ def preview_result(draft, findings):
         total=len(findings),
         counts={
             state.lower(): sum(f["status"] == state for f in findings)
-            for state in ("ACCEPTED", "INVALID", "DUPLICATE", "UNKNOWN", "CONFLICT")
+            for state in ("ACCEPTED", "INVALID", "DUPLICATE", "UNKNOWN", "CONFLICT", "IDENTITY_REVIEW")
         },
         findings=findings,
     )
@@ -685,22 +725,21 @@ def confirm(
             numbers.append(fleet.imo(cells[draft.mapping["imo_number"]]))
         except (ValueError, IndexError):
             pass
-    db.query(Vessel).filter(
-        func.upper(func.trim(Vessel.imo_number)).in_(
-            numbers + ["IMO " + n for n in numbers]
-        )
-    ).order_by(Vessel.id).with_for_update().all()
+    for number in sorted(set(numbers)):
+        lock_identity(db, number)
     findings, parsed = parse_rows(db, company.id, draft, draft.mapping)
     for finding, row in zip(findings, parsed):
         if row is not None:
             claims = fleet.declare(db, company, actor, row, import_id=draft.id)
-            finding["status"] = (
+            finding["status"] = "IDENTITY_REVIEW" if finding["status"] == "IDENTITY_REVIEW" else (
                 "CONFLICT"
                 if any(c.status == "SUBMITTED" for c in claims)
                 else "ACCEPTED"
             )
             finding["message"] = (
-                "Accepted for aggregate data."
+                "Vessel identity is pending review."
+                if finding["status"] == "IDENTITY_REVIEW"
+                else "Accepted for aggregate data."
                 if finding["status"] == "ACCEPTED"
                 else "Conflicting roles are pending Super Admin review."
             )
@@ -738,15 +777,16 @@ def errors(
         if draft.result
         else parse_rows(db, company.id, draft, draft.mapping)[0]
     )
-    rows = [LABELS + ["Source Row", "Status", "Error"]]
+    fields = [field for field in fleet.ALL_FIELDS if field in draft.mapping]
+    rows = [[FIELD_LABELS[field] for field in fields] + ["Source Row", "Status", "Error"]]
     for finding in findings:
-        if finding["status"] in ("ACCEPTED", "CONFLICT"):
+        if finding["status"] in ("ACCEPTED", "CONFLICT", "IDENTITY_REVIEW"):
             continue
         cells = draft.rows[finding["row"] - 2]
         rows.append(
             [
                 cells[draft.mapping[f]] if draft.mapping[f] < len(cells) else ""
-                for f in fleet.FIELDS
+                for f in fields
             ]
             + [finding["row"], finding["status"], finding["message"]]
         )

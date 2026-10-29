@@ -4,6 +4,7 @@ import base64
 import binascii
 import io
 import warnings
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from PIL import Image, UnidentifiedImageError
@@ -147,11 +148,14 @@ def remove_logo(
 def activity(
     offset: int = Query(0, ge=0),
     limit: int = Query(25, ge=1, le=100),
+    action: str = Query("", max_length=80), start: datetime = None, end: datetime = None,
     db: Session = Depends(get_db),
     context=Depends(current_company_member),
 ):
     company, member = context
     _require_company_admin(member)
+    if (start and start.tzinfo is None) or (end and end.tzinfo is None) or (start and end and end <= start):
+        raise HTTPException(422, "Use a valid activity period with time zones.")
     query = (
         db.query(CompanyAuditEvent, User.name)
         .outerjoin(User, User.id == CompanyAuditEvent.actor_user_id)
@@ -162,6 +166,12 @@ def activity(
             ),
         )
     )
+    if action:
+        query = query.filter(CompanyAuditEvent.action == action)
+    if start:
+        query = query.filter(CompanyAuditEvent.created_at >= start)
+    if end:
+        query = query.filter(CompanyAuditEvent.created_at < end)
     total = query.count()
     rows = (
         query.order_by(CompanyAuditEvent.created_at.desc(), CompanyAuditEvent.id.desc())
@@ -214,3 +224,37 @@ def resend(
     return invite(
         InviteIn(email=row.email, role=row.role), db=db, context=context, actor=actor
     )
+
+
+@router.get("/members/page")
+def member_page(search: str = Query("", max_length=120), offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100), db: Session = Depends(get_db), context=Depends(current_company_member)):
+    from app.db.models.shipping_company import CompanyUserMembership
+    from sqlalchemy import or_
+    company, member = context
+    _require_company_admin(member)
+    query = db.query(CompanyUserMembership, User).join(User, User.id == CompanyUserMembership.user_id).filter(CompanyUserMembership.company_id == company.id)
+    if search.strip():
+        term = "%" + search.strip().replace("%", "\\%").replace("_", "\\_") + "%"
+        query = query.filter(or_(User.name.ilike(term, escape="\\"), User.email.ilike(term, escape="\\")))
+    return {"items":[{"user_id":m.user_id,"name":u.name,"email":u.email,"role":m.role,"enabled":m.enabled,"last_active":None} for m,u in query.order_by(User.name,User.id).offset(offset).limit(limit)],"total":query.count(),"offset":offset,"limit":limit}
+
+
+@router.get("/invitations/page")
+def invitation_page(offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100), db: Session = Depends(get_db), context=Depends(current_company_member)):
+    from app.api.v1.routes_company_staff import now
+    company, member = context
+    _require_company_admin(member)
+    query = db.query(CompanyInvitation).filter_by(company_id=company.id)
+    return {"items":[{"id":r.id,"email":r.email,"role":r.role,"created_at":r.created_at,"expires_at":r.expires_at,"accepted_at":r.accepted_at,"revoked_at":r.revoked_at} for r in query.order_by(CompanyInvitation.id.desc()).offset(offset).limit(limit)],"total":query.count(),"offset":offset,"limit":limit}
+
+
+@router.get("/profile/header-preview.pdf")
+def header_preview(db: Session = Depends(get_db), context=Depends(current_company_member)):
+    from datetime import datetime, timezone
+    from fastapi import Response
+    from app.api.v1.routes_company_reports import ReportIn, prepare
+    from app.services.company_pdf import render_report
+    end = datetime.now(timezone.utc)
+    start = datetime(end.year,end.month,1,tzinfo=timezone.utc)
+    report = prepare(db, context[0], ReportIn(report_type="EXECUTIVE",start=start,end=end,configuration={"sections":["executive_summary"],"detail":"summary","charts":False,"tables":False}))
+    return Response(render_report(report),media_type="application/pdf",headers={"Cache-Control":"private, no-store","Content-Disposition":"inline; filename=company-header-preview.pdf"})

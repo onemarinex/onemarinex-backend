@@ -14,6 +14,7 @@ from app.db.models.cab_booking import CabBooking, BookingStatus
 from app.db.models.agency_transfer import AgencyTransfer
 from app.db.models.crew_assignment import CrewAssignment
 from app.services.company_access import covering_claim
+from app.services.company_fleet_identity import claim_matches_vessel, identity_key
 from app.api.v1.routes_shipping_company import current_company_member
 from app.services.company_aggregates import tenure_scoped, _ashore_snapshot, Period
 from app.services.event_origin import resolved_origin
@@ -31,7 +32,7 @@ def calls_query(db, company_id, active=False):
     now = datetime.now(UTC)
     claims = db.query(VesselRoleClaim.id).filter(
         VesselRoleClaim.company_id == company_id,
-        VesselRoleClaim.vessel_id == VesselCall.vessel_id,
+        claim_matches_vessel(VesselCall.vessel_id),
         VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED")),
         VesselRoleClaim.revoked_at.is_(None),
         VesselRoleClaim.effective_start < func.coalesce(VesselCall.ended_at, now),
@@ -171,12 +172,38 @@ def call_out(db, company_id, call, metrics=True):
     return out
 
 
+def call_metrics_many(db, company_id, calls, reporting_period=None):
+    """Skip per-call reducers only where there are no source booking rows.
+
+    The existence read cannot release data: it only chooses whether to run the
+    normal tenure-scoped reducers. Calls with any booking retain those checks.
+    """
+    calls = list(calls)
+    with_bookings = {row[0] for row in db.query(CabBooking.vessel_call_id).filter(
+        CabBooking.vessel_call_id.in_([c.id for c in calls])).distinct()}
+    result = {}
+    now = datetime.now(UTC)
+    for call in calls:
+        if call.id in with_bookings:
+            result[call.id] = call_metrics(db, company_id, call, reporting_period)
+            continue
+        end = min(aware(call.ended_at), now) if call.ended_at else now
+        if reporting_period:
+            end = min(end, aware(reporting_period.end) - timedelta(microseconds=1))
+        result[call.id] = {"crew_ashore": 0, "ashore_recorded_seats": 0,
+            "ashore_uncertain_seats": 0, "active_rides": 0, "crew_participation": 0,
+            "total_booked_rides": 0, "as_of": end,
+            "participation_unit": "Passenger seats on started rides. Repeat trips count again.",
+            "ashore_unit": "Tracked passenger seats. This is not a verified headcount."}
+    return result
+
+
 @router.get("/overview")
 def overview(db: Session = Depends(get_db), context=Depends(current_company_member)):
     company, _ = context
     now = datetime.now(UTC)
     onboarded = (
-        db.query(func.count(func.distinct(VesselRoleClaim.vessel_id)))
+        db.query(func.count(func.distinct(identity_key())))
         .filter(
             VesselRoleClaim.company_id == company.id,
             VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED")),
@@ -217,6 +244,7 @@ def calls(
     active: bool = True,
     search: str = Query("", max_length=120),
     view: str = Query("active", pattern="^(active|ashore|rides)$"),
+    historical_only: bool = False,
     offset: int = Query(0, ge=0),
     limit: int = Query(25, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -224,6 +252,8 @@ def calls(
 ):
     company, _ = context
     query = calls_query(db, company.id, active)
+    if historical_only:
+        query = query.filter(VesselCall.ended_at.isnot(None))
     if port_id is not None:
         query = query.filter(VesselCall.port_id == port_id)
     if vessel_id is not None:
@@ -272,8 +302,9 @@ def port_rows(db, company_id, active=True, search="", offset=None, limit=None):
     query = (
         calls_query(db, company_id, active)
         .join(Port, Port.id == VesselCall.port_id)
-        .filter(Port.is_active.is_(True))
     )
+    if active:
+        query = query.filter(Port.is_active.is_(True))
     if search.strip():
         term = "%" + search.strip().replace("%", "\\%").replace("_", "\\_") + "%"
         query = query.filter(Port.name.ilike(term, escape="\\"))
@@ -294,8 +325,9 @@ def port_rows(db, company_id, active=True, search="", offset=None, limit=None):
         calls_query(db, company_id, True).filter(VesselCall.port_id.in_(ids)).all()
     )
     by_port = {pid: [] for pid in ids}
+    metrics_by_call = call_metrics_many(db, company_id, current_calls)
     for call in current_calls:
-        by_port[call.port_id].append((call, call_metrics(db, company_id, call)))
+        by_port[call.port_id].append((call, metrics_by_call[call.id]))
     result = []
     for pid, name, recorded_vessels in rows:
         stats = by_port[pid]
@@ -344,6 +376,26 @@ def ports_page(
     context=Depends(current_company_member),
 ):
     return port_rows(db, context[0].id, active, search, offset, limit)
+
+
+@router.get("/ports/{port_id}/overview")
+def selected_port(port_id: int, historical: bool = False, db: Session = Depends(get_db), context=Depends(current_company_member)):
+    company, _ = context
+    query = calls_query(db, company.id, not historical).filter(VesselCall.port_id == port_id)
+    if historical:
+        query = query.filter(VesselCall.ended_at.isnot(None))
+    rows = query.all()
+    if not rows:
+        # An eligible port can have no calls in the chosen current/history view.
+        if not calls_query(db, company.id).filter(VesselCall.port_id == port_id).first():
+            raise HTTPException(404, "Port not found.")
+    port = db.get(Port, port_id)
+    geography = db.get(PortGeography, port_id)
+    values = list(call_metrics_many(db, company.id, rows).values())
+    return {"id":port_id,"name":port.name if port else "Port not recorded","country_code":geography.country_code if geography else None,
+        "generated_at":datetime.now(UTC),"metrics":{"vessels":len({call.vessel_id for call in rows}),"calls":len(rows),
+            "crew_ashore":None if any(m["crew_ashore"] is None for m in values) else sum(m["crew_ashore"] for m in values),
+            "active_rides":sum(m["active_rides"] for m in values),"total_booked_rides":sum(m["total_booked_rides"] for m in values)}}
 
 
 @router.get("/calls/{call_id}")

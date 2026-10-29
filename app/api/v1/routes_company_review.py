@@ -50,7 +50,7 @@ class ReviewClaimOut(BaseModel):
     id: int
     company_id: int
     company_name: str
-    vessel_id: int
+    vessel_id: Optional[int] = None
     imo_number: Optional[str] = None
     role: str
     effective_start: datetime
@@ -106,13 +106,14 @@ def _overlap_query(db: Session, claim: VesselRoleClaim):
     them the competitor the constraint deliberately hides.
     """
     from sqlalchemy import and_, or_
+    from app.services.company_fleet_identity import identity_key
 
     end = claim.effective_end
     others = (
         db.query(VesselRoleClaim)
         .filter(
             VesselRoleClaim.id != claim.id,
-            VesselRoleClaim.vessel_id == claim.vessel_id,
+            identity_key() == db.query(identity_key()).filter(VesselRoleClaim.id == claim.id).scalar(),
             VesselRoleClaim.role == claim.role,
             VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED")),
             VesselRoleClaim.revoked_at.is_(None),
@@ -192,6 +193,8 @@ def review_queue(
 def _decide(db, claim_id, current_user, action, **kwargs):
     _require_superadmin(current_user)
     claim, company_name = _load(db, claim_id)
+    from app.services.company_fleet_identity import lock_claim_identity
+    claim = lock_claim_identity(db, claim_id)
     try:
         action(db, claim=claim, actor=current_user, **kwargs)
     except ClaimConflict as conflict:
@@ -252,6 +255,8 @@ def correct(claim_id: int, body: CorrectionIn, db: Session = Depends(get_db),
     """Replaces the claim rather than editing it, so the old interval survives."""
     _require_superadmin(current_user)
     claim, company_name = _load(db, claim_id)
+    from app.services.company_fleet_identity import lock_claim_identity
+    claim = lock_claim_identity(db, claim_id)
     try:
         replacement = claims.correct_claim(
             db, claim=claim, actor=current_user, reason=body.reason,
@@ -284,7 +289,9 @@ def amend(
 
     _require_superadmin(current_user)
     source, company_name = _load(db, claim_id)
-    db.query(Vessel).filter_by(id=source.vessel_id).with_for_update().one()
+    from app.services.company_fleet_identity import identity_key
+
+    fleet.lock_identity(db, db.query(identity_key()).filter(VesselRoleClaim.id == source.id).scalar())
     claim = (
         db.query(VesselRoleClaim)
         .filter_by(id=claim_id)
@@ -306,15 +313,15 @@ def amend(
     claim.status = "CORRECTED"
     claim.revoked_at = datetime.now(timezone.utc)
     db.flush()
-    vessel = db.get(Vessel, claim.vessel_id)
+    vessel = db.get(Vessel, claim.vessel_id) if claim.vessel_id else None
     try:
         replacements = fleet.declare(
             db,
             db.get(ShippingCompany, claim.company_id),
             current_user,
             fleet.DeclarationIn(
-                imo_number=vessel.imo_number,
-                vessel_name=vessel.name,
+                imo_number=claim.imo_number or vessel.imo_number,
+                vessel_name=claim.declared_vessel_name or vessel.name,
                 **{
                     field: claim.role == role
                     for field, role in fleet.ROLE_FIELDS.items()

@@ -36,7 +36,7 @@ def registry(
     company, _ = context
     query = (
         db.query(VesselRoleClaim, Vessel)
-        .join(Vessel, Vessel.id == VesselRoleClaim.vessel_id)
+        .outerjoin(Vessel, Vessel.id == VesselRoleClaim.vessel_id)
         .filter(VesselRoleClaim.company_id == company.id)
     )
     if search.strip():
@@ -45,10 +45,13 @@ def registry(
             or_(
                 Vessel.name.ilike(term, escape="\\"),
                 Vessel.imo_number.ilike(term, escape="\\"),
+                VesselRoleClaim.imo_number.ilike(term, escape="\\"),
+                VesselRoleClaim.declared_vessel_name.ilike(term, escape="\\"),
             )
         )
     if status:
         if status not in {
+            "AUTO_ACCEPTED",
             "APPROVED",
             "SUBMITTED",
             "UNDER_REVIEW",
@@ -67,8 +70,8 @@ def registry(
             {
                 "id": c.id,
                 "vessel_id": c.vessel_id,
-                "vessel_name": vessel.name,
-                "imo_number": vessel.imo_number,
+                "vessel_name": c.declared_vessel_name or (vessel.name if vessel else "Name not recorded"),
+                "imo_number": c.imo_number or (vessel.imo_number if vessel else None),
                 "role": c.role,
                 "effective_start": c.effective_start,
                 "effective_end": c.effective_end,
@@ -229,12 +232,12 @@ class ChangeDecisionIn(BaseModel):
 
 def change_out(db, change):
     claim = db.get(VesselRoleClaim, change.claim_id)
-    vessel = db.get(Vessel, claim.vessel_id)
+    vessel = db.get(Vessel, claim.vessel_id) if claim.vessel_id else None
     return {
         "id": change.id,
         "company_name": db.get(ShippingCompany, change.company_id).legal_name,
         "claim_id": claim.id,
-        "vessel_name": vessel.name,
+        "vessel_name": claim.declared_vessel_name or (vessel.name if vessel else "Name not recorded"),
         "imo_number": claim.imo_number,
         "role": claim.role,
         "action": change.action,
@@ -255,12 +258,9 @@ def request_change(
     actor=Depends(get_current_user),
 ):
     _require_company_admin(context[1])
-    claim = (
-        db.query(VesselRoleClaim)
-        .filter_by(id=claim_id, company_id=context[0].id)
-        .with_for_update()
-        .first()
-    )
+    from app.services.company_fleet_identity import lock_claim_identity
+    own = db.query(VesselRoleClaim.id).filter_by(id=claim_id, company_id=context[0].id).first()
+    claim = lock_claim_identity(db, claim_id) if own else None
     if claim is None:
         raise HTTPException(404, "Fleet record not found.")
     if claim.status != "APPROVED" or claim.revoked_at:
@@ -357,14 +357,23 @@ def decide_change(
     db: Session = Depends(get_db),
     actor=Depends(admin),
 ):
-    change = (
-        db.query(CompanyFleetChange).filter_by(id=change_id).with_for_update().first()
-    )
+    from app.services.company_fleet_identity import identity_key, lock_identity
+    pending = db.get(CompanyFleetChange, change_id)
+    if pending is None:
+        raise HTTPException(404, "Change request not found.")
+    key = db.query(identity_key()).filter(VesselRoleClaim.id == pending.claim_id).scalar()
+    keys = {key}
+    if pending.action == "GROUP" and pending.payload.get("corrected_imo"):
+        from app.services.company_fleet_declarations import imo
+        keys.add(imo(pending.payload["corrected_imo"]))
+    for value in sorted(k for k in keys if k):
+        lock_identity(db, value)
+    change = db.query(CompanyFleetChange).filter_by(id=change_id).populate_existing().with_for_update().first()
     if change is None:
         raise HTTPException(404, "Change request not found.")
     if change.status != "REQUESTED":
         raise HTTPException(409, "This change was already decided.")
-    claim_query = db.query(VesselRoleClaim).filter_by(id=change.claim_id)
+    claim_query = db.query(VesselRoleClaim).filter_by(id=change.claim_id).populate_existing()
     claim = (
         claim_query if change.action == "GROUP" else claim_query.with_for_update()
     ).one()
@@ -425,3 +434,8 @@ def decide_change(
 from app.api.v1.routes_company_fleet_workspace import router as workspace_router
 
 router.include_router(workspace_router)
+
+from app.api.v1.routes_company_fleet_registry import router as registry_router, admin_router as registry_admin_router
+
+router.include_router(registry_router)
+admin_router.include_router(registry_admin_router)

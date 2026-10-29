@@ -358,13 +358,13 @@ class FleetAcceptanceHTTP(unittest.TestCase):
         result = self.preview(draft)
         self.assertEqual(
             result["counts"],
-            dict(accepted=1, duplicate=1, unknown=1, invalid=2, conflict=0),
+            dict(accepted=2, duplicate=1, unknown=0, invalid=2, conflict=0, identity_review=0),
         )
         error = self.request(
             "GET", BASE + f"/imports/{draft['id']}/errors.csv", self.admin
         )
         self.assertIn("'=EVIL()", error.text)
-        self.assertEqual(self.confirm(draft)["counts"]["accepted"], 1)
+        self.assertEqual(self.confirm(draft)["counts"]["accepted"], 2)
 
     def test_mapping_requires_seven_distinct_columns_and_confirm_requires_review(self):
         draft = self.upload(

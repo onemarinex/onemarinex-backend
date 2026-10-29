@@ -232,3 +232,44 @@ class AdministrationHTTP(unittest.TestCase):
             .filter_by(normalized_name="NEW SHIPPING COMPANY")
             .first()
         )
+
+    def test_member_search_and_invitation_pages_are_admin_only(self):
+        path = "/api/v1/shipping-company/administration"
+        members = self.request("GET", path+"/members/page?search=admin&limit=1", self.admin).json()
+        self.assertGreaterEqual(members["total"], 1)
+        self.assertEqual(len(members["items"]), 1)
+        self.assertIn("name", members["items"][0])
+        self.assertIsNone(members["items"][0]["last_active"])
+        with patch.object(mail, "is_configured", return_value=True), patch.object(mail, "send_email", return_value=True):
+            for i in range(3):
+                self.request("POST", "/api/v1/shipping-company/invitations", self.admin,
+                             {"email": f"page{i}@example.com"}, 201)
+        page = self.request("GET", path+"/invitations/page?offset=2&limit=1", self.admin).json()
+        self.assertEqual(page["total"], 3)
+        self.assertEqual(len(page["items"]), 1)
+        self.assertTrue(page["items"][0]["created_at"])
+        self.db.query(CompanyUserMembership).filter_by(user_id=self.admin.id).update({"role":"VIEWER"})
+        self.db.commit()
+        self.request("GET", path+"/members/page", self.admin, status=403)
+        self.request("GET", path+"/invitations/page", self.admin, status=403)
+
+    def test_access_activity_date_and_action_filters_are_half_open(self):
+        from datetime import timedelta
+        for n in range(3):
+            self.db.add(CompanyAuditEvent(company_id=self.company.id, actor_user_id=self.admin.id,
+                target_type="company_branding", target_id=self.company.id, action="logo_updated",
+                created_at=fixture.NOW+timedelta(days=n), after_state={"has_logo":True}))
+        self.db.commit()
+        start=fixture.NOW.isoformat().replace("+","%2B");end=(fixture.NOW+timedelta(days=1)).isoformat().replace("+","%2B")
+        path=f"/api/v1/shipping-company/administration/activity?start={start}&end={end}&action=logo_updated"
+        self.assertEqual(self.request("GET",path,self.admin).json()["total"],1)
+        self.request("GET", "/api/v1/shipping-company/administration/activity?start=2026-01-01T00:00:00",self.admin,status=422)
+
+    def test_actual_header_preview_is_private_and_uses_current_live_branding(self):
+        self.request("PUT", "/api/v1/shipping-company/administration/profile/logo",self.admin,{"content":self.logo()})
+        response=self.request("GET","/api/v1/shipping-company/administration/profile/header-preview.pdf",self.admin)
+        self.assertEqual(response.headers["content-type"],"application/pdf")
+        self.assertIn("no-store",response.headers["cache-control"])
+        self.assertTrue(response.content.startswith(b"%PDF"))
+        self.assertIn(b"/Subtype /Image",response.content)
+        self.request("GET","/api/v1/shipping-company/administration/profile/header-preview.pdf",self.agent,status=403)

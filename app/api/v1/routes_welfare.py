@@ -4,7 +4,7 @@ from typing import Optional, Literal
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.api.v1.routes_auth import get_current_user
@@ -758,7 +758,8 @@ def comparisons(
     db, start, end, company_id, port_id, vessel_id, country_code, offset, limit
 ):
     from app.api.v1.routes_company_intelligence import calls_query
-    from app.services.welfare_analytics import operational, review_summary
+    from app.services.welfare_analytics import operational, review_summary, operational_query
+    from app.db.models.cab_booking import CabBooking
     from sqlalchemy import or_
 
     selected_rows(db, start, end, company_id, port_id, vessel_id, country_code)
@@ -773,8 +774,10 @@ def comparisons(
         calls = calls.filter(VesselCall.vessel_id == vessel_id)
     calls = filter_country(calls, VesselCall.port_id, country_code)
     ports = db.query(Port).filter(Port.id.in_(calls.with_entities(VesselCall.port_id)))
+    activity = operational_query(db,start,end,company_id,port_id,vessel_id,country_code).with_entities(VesselCall.port_id.label("port_id"),func.sum(CabBooking.num_passengers).label("activity")).group_by(VesselCall.port_id).subquery()
+    ports = ports.outerjoin(activity,activity.c.port_id==Port.id)
     rows = []
-    for port in ports.order_by(Port.name, Port.id).offset(offset).limit(limit):
+    for port in ports.order_by(func.coalesce(activity.c.activity,0).desc(),Port.name, Port.id).offset(offset).limit(limit):
         rows.append(
             {
                 "port_id": port.id,
@@ -865,6 +868,8 @@ def monthly_trends(db, start, end, company_id, port_id, vessel_id, country_code)
                 "start": cursor,
                 "end": stop,
                 "participation_seats": operations["crew_participation"],
+                "distinct_crew": operations.get("distinct_crew"),
+                "completed_journeys": operations.get("completed_journeys"),
                 "average_time_ashore_minutes": operations[
                     "average_time_ashore_minutes"
                 ],
@@ -955,3 +960,23 @@ def admin_review_providers(
 ):
     require_admin(actor)
     return provider_options(db, start, end, None, port_id, vessel_id, country_code)
+
+
+@company_router.get("/vessels")
+def company_vessel_comparison(start: datetime, end: datetime, port_id: Optional[int] = None, vessel_id: Optional[int] = None, country_code: Optional[str] = None, search: str = Query("", max_length=120), offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100), db: Session = Depends(get_db), context=Depends(current_company_member)):
+    from app.api.v1.routes_company_intelligence import calls_query
+    from app.db.models.vessel import Vessel
+    from app.services.welfare_analytics import operational, operational_query
+    from app.db.models.cab_booking import CabBooking
+    selected_rows(db,start,end,context[0].id,port_id,vessel_id,country_code)
+    calls=calls_query(db,context[0].id).filter(VesselCall.started_at < end,or_(VesselCall.ended_at.is_(None),VesselCall.ended_at > start))
+    if port_id: calls=calls.filter(VesselCall.port_id==port_id)
+    if vessel_id: calls=calls.filter(VesselCall.vessel_id==vessel_id)
+    calls=filter_country(calls,VesselCall.port_id,country_code)
+    query=db.query(Vessel).filter(Vessel.id.in_(calls.with_entities(VesselCall.vessel_id)))
+    if search:
+        term="%"+search.replace("%","\\%").replace("_","\\_")+"%"
+        query=query.filter(or_(Vessel.name.ilike(term,escape="\\"),Vessel.imo_number.ilike(term,escape="\\")))
+    activity=operational_query(db,start,end,context[0].id,port_id,vessel_id,country_code).with_entities(CabBooking.vessel_id.label("vessel_id"),func.sum(CabBooking.num_passengers).label("activity")).group_by(CabBooking.vessel_id).subquery()
+    query=query.outerjoin(activity,activity.c.vessel_id==Vessel.id)
+    return {"items":[{"vessel_id":v.id,"vessel_name":v.name,"imo_number":v.imo_number,"operations":operational(db,start,end,context[0].id,port_id,v.id,country_code),"survey":statistics(list(selected_rows(db,start,end,context[0].id,port_id,v.id,country_code).yield_per(500)),True)} for v in query.order_by(func.coalesce(activity.c.activity,0).desc(),Vessel.name,Vessel.id).offset(offset).limit(limit)],"total":query.count(),"offset":offset,"limit":limit}

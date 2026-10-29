@@ -84,7 +84,7 @@ class FleetClaimOut(BaseModel):
     """
 
     id: int
-    vessel_id: int
+    vessel_id: Optional[int] = None
     imo_number: Optional[str] = None
     role: str
     effective_start: datetime
@@ -475,6 +475,7 @@ def vessel_calls(
 # --- members -----------------------------------------------------------------
 
 class MemberOut(BaseModel):
+    name: Optional[str] = None
     user_id: int
     email: str
     role: str
@@ -491,7 +492,7 @@ def list_members(db: Session = Depends(get_db), context=Depends(current_company_
     company, membership = context
     _require_company_admin(membership)
     rows = page_all(
-        db.query(CompanyUserMembership, User.email)
+        db.query(CompanyUserMembership, User.email, User.name)
         .join(User, User.id == CompanyUserMembership.user_id)
         .filter(CompanyUserMembership.company_id == company.id)
         .order_by(User.email),
@@ -499,8 +500,8 @@ def list_members(db: Session = Depends(get_db), context=Depends(current_company_
         label="Members",
     )
     return [
-        MemberOut(user_id=m.user_id, email=email, role=m.role, enabled=m.enabled)
-        for m, email in rows
+        MemberOut(user_id=m.user_id, email=email, name=name, role=m.role, enabled=m.enabled)
+        for m, email, name in rows
     ]
 
 
