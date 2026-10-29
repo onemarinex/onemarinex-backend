@@ -8,6 +8,7 @@ from fastapi import (
     HTTPException,
     status,
     Header,
+    Response,
 )
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
@@ -75,6 +76,39 @@ def get_current_user_optional(
         return get_current_user(db=db, authorization=authorization)
     except HTTPException:
         return None
+
+
+@router.get("/workspaces")
+def authorized_workspaces(response: Response, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Discover navigation from real membership; this does not grant data access."""
+    from app.db.models.shipping_company import ShippingCompany, CompanyUserMembership
+    response.headers["Cache-Control"] = "no-store"
+    destinations = {
+        "vendor": ("Services", "/select-port-vessel"),
+        "crew": ("Crew", "/select-port-vessel"),
+        "agent": ("Shipping agent", "/agent-dashboard"),
+        "aggregator": ("Cab aggregator", "/aggregator-dashboard"),
+        "superadmin": ("Super Admin", "/superadmin"),
+        "shipping_company": ("Shipping company", "/shipping-company"),
+    }
+    spaces = []
+    role = (current_user.role or "crew").lower()
+    if role in destinations and role != "shipping_company":
+        label, path = destinations[role]
+        spaces.append({"id": role, "label": label, "path": path})
+    member = (db.query(CompanyUserMembership, ShippingCompany)
+              .join(ShippingCompany, ShippingCompany.id == CompanyUserMembership.company_id)
+              .filter(CompanyUserMembership.user_id == current_user.id,
+                      CompanyUserMembership.enabled.is_(True), ShippingCompany.status == "VERIFIED")
+              .first())
+    if member:
+        membership, company = member
+        spaces.append({"id": "company", "label": company.legal_name,
+                       "path": "/shipping-company", "membership_role": membership.role})
+    elif role == "shipping_company":
+        spaces.append({"id": "company", "label": "Shipping company registration", "path": "/shipping-company"})
+    return {"identity": {"name": current_user.name, "email": current_user.email, "base_role": role},
+            "workspaces": spaces}
 
 
 # ----------------------------
