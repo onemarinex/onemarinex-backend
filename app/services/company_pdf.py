@@ -13,12 +13,24 @@ from app.services.company_report_templates import REPORT_TYPES, SECTIONS, report
 
 
 def survey_share(survey, key):
+    if survey.get("status") == "no_responses":
+        return "No responses"
     if survey.get("suppressed"):
         return "Withheld"
     item = survey.get(key)
     if not isinstance(item, dict):
         return "Unavailable"
+    if item.get("status") == "no_responses":
+        return "No responses"
     return "Withheld" if item.get("suppressed") else number(item.get("percent"), "%", 1)
+
+
+def published_value(value, status=None, unit=""):
+    if status == "no_responses":
+        return "No responses"
+    if status in ("insufficient_sample", "withheld"):
+        return "Withheld"
+    return number(value, unit)
 
 
 def executive_kpis(payload):
@@ -44,6 +56,14 @@ def section_charts(payload, section):
     charts = []
     for spec in payload.get("charts", []):
         if not isinstance(spec, dict) or spec.get("section") != section or not isinstance(spec.get("items"), list) or not spec["items"]:
+            continue
+        if spec.get("kind") == "line" and len(spec["items"]) == 1:
+            item = spec["items"][0]
+            if section == "executive_summary":
+                # The executive call KPI already contains this single-month total.
+                continue
+            value = "No responses" if item.get("status") == "no_responses" else number({"value": item.get("value"), "suppressed": item.get("suppressed", False)}, spec.get("unit", ""))
+            charts.append(p(f"{spec.get('title', 'Recorded activity')}: {value}. {item.get('label', '')}.", "small"))
             continue
         cls = LineChart if spec.get("kind") == "line" else BarChart
         charts.append(KeepTogether([cls(spec["items"], spec.get("title", "Recorded comparison"), spec.get("unit", ""), spec.get("description", "")), Spacer(1, 8)]))
@@ -74,13 +94,11 @@ def report_section(payload, section, options):
         content.append(KPIGrid(executive_kpis(payload)))
         if payload.get("findings"):
             content += [p(finding) for finding in payload["findings"][:3]]
-        elif payload.get("executive_summary"):
-            content.append(p(payload["executive_summary"]))
-        else:
-            content.append(p("Only authorized records in the selected period are included.", "small"))
         if charts:
             content += section_charts(payload, section)
-        content.append(p("Crew bookings count passenger seats on started rides. Repeat passengers can count again. Missing values are unavailable; privacy-protected values are withheld.", "small"))
+        if survey.get("period"):
+            content.append(p("Survey coverage: " + period({"period": survey["period"]}) + ". Complete UTC calendar months.", "small"))
+
     elif section == "fleet_operations":
         if charts:
             content += section_charts(payload, section)
@@ -121,27 +139,32 @@ def report_section(payload, section, options):
             ], [WIDTH * .43, WIDTH * .17, WIDTH * .2, WIDTH * .2])
         if tables and any("respondents" in row for row in rows):
             content += table(["Port", "Access", "Satisfaction", "Obstacles", "Sample"], [
-                [row.get("name"), number(row.get("access_percent"), "%"),number(row.get("satisfaction_percent"), "%"),number(row.get("obstacle_percent"), "%"),number(row.get("respondents"))]
+                [row.get("name"), published_value(row.get("access_percent"), row.get("access_status"), "%"),published_value(row.get("satisfaction_percent"), row.get("satisfaction_status"), "%"),published_value(row.get("obstacle_percent"), row.get("obstacle_status"), "%"),published_value(row.get("respondents"), row.get("respondent_status"))]
                 for row in (rows[:5] if brief else rows)
             ], [WIDTH*.32,WIDTH*.17,WIDTH*.19,WIDTH*.17,WIDTH*.15])
             content.append(p("Rates describe applicable survey respondents. Missing or privacy-protected samples do not establish poor welfare. Reported allegations are not verified misconduct.","small"))
     elif section == "crew_experience":
         if charts:
             content += section_charts(payload, section)
-        if survey.get("suppressed"):
+        if survey.get("status") == "no_responses":
+            content.append(p("No crew survey responses are recorded for this scope."))
+        elif survey.get("suppressed"):
             content.append(p("Crew survey results are withheld. Too few eligible respondents."))
         else:
             content.append(p(f"Satisfaction: {survey_share(survey, 'satisfaction')}. Ratings of 4 or 5 out of 5 among eligible survey answers."))
             item = survey.get("satisfaction") or {}
             if not item.get("suppressed"):
                 content.append(p(f"Answer sample: {number(item.get('denominator'))}; positive answers: {number(item.get('numerator'))}.", "small"))
-        content.append(p(survey.get("coverage") or "No eligible crew survey source is available.", "small"))
+        if survey.get("period"):
+            content.append(p("Survey coverage: " + period({"period": survey["period"]}) + ". Complete UTC calendar months.", "small"))
     elif section == "obstacles":
-        if survey.get("suppressed"):
+        if survey.get("status") == "no_responses":
+            content.append(p("No obstacle survey responses are recorded for this scope."))
+        elif survey.get("suppressed"):
             content.append(p("Reported obstacles are withheld. Too few eligible respondents."))
         else:
             content.append(p(f"Reported difficulty: {survey_share(survey, 'obstacles')}. Unable to go ashore: {survey_share(survey, 'unable_to_go_ashore')}."))
-            barriers = survey.get("barriers") or []
+            barriers = sorted((row for row in survey.get("barriers") or [] if isinstance(row.get("respondents"), (int, float)) and row["respondents"] > 0 and not row.get("suppressed")), key=lambda row: (-row["respondents"], row.get("code", row.get("label", ""))))
             if charts and barriers:
                 content.append(KeepTogether([BarChart(
                     [{"label": row.get("label") or row.get("code"), "value": row.get("respondents")} for row in barriers],
@@ -218,7 +241,7 @@ def report_section(payload, section, options):
             content.append(p("No written feedback is approved for this report."))
     elif section == "appendix":
         content.append(p(payload.get("methodology") or "Only authorized source records are included. Missing source data is unavailable."))
-        content.append(p("The reporting interval is half-open: its end instant is excluded. Displayed report dates use UTC. Event attribution uses the event's own timestamp and the applicable company-role interval.", "small"))
+        content.append(p("The source interval excludes its end instant. Displayed report dates are inclusive and use UTC. Event attribution uses the event's own timestamp and the applicable company-role interval.", "small"))
         content.append(p(f"Metric version: {payload.get('metric_version') or 'Not provided'}. Source dictionary: {payload.get('source_dictionary_version') or 'Not provided'}.", "small"))
     return content or [p("No authorized data is available for this section.", "small")]
 

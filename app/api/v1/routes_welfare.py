@@ -421,7 +421,7 @@ def statistics(rows, suppress=False, publication_ids=None):
         "extra_charge_requested": share("extra_charge", {"REQUESTED_NOT_PAID", "PAID"}),
         "unable_to_go_ashore": share("went_ashore", {"NO"}),
         "satisfaction": share("satisfaction", {4, 5}),
-        "barriers": barriers,
+        "barriers": sorted((row for row in barriers if row["respondents"] > 0), key=lambda row: (-row["respondents"], row["code"])),
         "coverage": "Survey respondents only. Missing answers are excluded per question. Allegations are unverified. Category selections can overlap.",
     }
 

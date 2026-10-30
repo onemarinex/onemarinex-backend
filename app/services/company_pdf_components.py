@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import io
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from html import escape
 from pathlib import Path
 import reportlab
@@ -92,7 +92,8 @@ def number(value, suffix="", digits=0):
         value = value.get("value")
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
         return "Unavailable"
-    return f"{value:,.{digits}f}{suffix}"
+    separator = " " if suffix and suffix[0].isalnum() else ""
+    return f"{value:,.{digits}f}{separator}{suffix}"
 
 
 def stamp(value, date_only=False):
@@ -109,7 +110,15 @@ def stamp(value, date_only=False):
 
 def period(payload):
     window = payload.get("period") or {}
-    return f"{stamp(window.get('start'), True)} - {stamp(window.get('end'), True)}" if window else "Period not provided"
+    if not window:
+        return "Period not provided"
+    end = window.get("end")
+    try:
+        end = end if isinstance(end, datetime) else datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+        end -= timedelta(microseconds=1)
+    except (TypeError, ValueError):
+        pass
+    return f"{stamp(window.get('start'), True)} - {stamp(end, True)}"
 
 
 def safe_logo(value):
@@ -181,7 +190,7 @@ class ReportCanvas(Canvas):
         self.line(MARGIN, 48, PAGE_W - MARGIN, 48)
         if self.report_identity.get("fictional"):
             draw_text(self, "Illustrative Demo Data - Not Actual Fleet Records", MARGIN, 55, WIDTH, size=7, bold=True, color=NAVY)
-        suffix = " (end excluded)" if self.report_identity.get("period_has_end", True) else ""
+        suffix = " (inclusive dates, UTC)" if self.report_identity.get("period_has_end", True) else ""
         draw_text(self, self.report_identity["period"] + suffix, MARGIN, 35, WIDTH * .7, size=6.2, max_lines=1)
         self.setFont(FONT, 6.6)
         self.setFillColor(MUTED)
@@ -319,11 +328,22 @@ def build(title, company, story, period_text, generated, logo=None, period_has_e
     """
     out, image = io.BytesIO(), safe_logo(logo)
     identity = {"period": period_text, "generated": generated, "period_has_end": period_has_end, "fictional": fictional}
-    first_top, later_top = 197, 92
+    later_top = 92
     half = WIDTH / 2
     brand_width = half - 38
     title_x = MARGIN + half + 21
     title_width = half - 21
+    # Paragraphs preserve the complete legal name, including unbroken words.
+    company_size = 22
+    while True:
+        company_block = Paragraph(escape(text(company)), ParagraphStyle("CoverCompany", fontName=BOLD, fontSize=company_size, leading=company_size * 1.18, textColor=NAVY, splitLongWords=True))
+        _, company_height = company_block.wrap(title_width, PAGE_H)
+        if company_height <= 156 or company_size <= 16:
+            break
+        company_size -= 1
+    title_block = Paragraph(escape(text(title)), ParagraphStyle("CoverReport", fontName=BOLD, fontSize=14, leading=18, textColor=NAVY))
+    _, title_height = title_block.wrap(title_width, PAGE_H)
+    first_top = max(197, company_height + title_height + 115)
 
     def first_header(canvas, _doc):
         canvas.saveState()
@@ -337,24 +357,19 @@ def build(title, company, story, period_text, generated, logo=None, period_has_e
             scale = min(brand_width / w, 99 / h)
             iw, ih = w * scale, h * scale
             canvas.drawImage(image, MARGIN + (half - iw) / 2 - 7,
-                             top - 105 + (99 - ih) / 2,
+                             (top + bottom + 15 - ih) / 2,
                              width=iw, height=ih, mask="auto")
-            draw_text(canvas, company, MARGIN + 8, bottom + 27,
-                      brand_width + 15, size=9, bold=True, color=NAVY, max_lines=3)
-        else:
-            draw_text(canvas, company, MARGIN + 10, top - 40,
-                      brand_width + 12, size=18, bold=True, color=NAVY, max_lines=4)
-        # Fit the known report titles without shrinking them to caption size.
-        # Exceptionally long titles wrap and ellipsize within the right panel.
-        title_size = 20 if len(text(title)) <= 52 else 17
-        draw_text(canvas, title, title_x, top - 18, title_width,
-                  size=title_size, bold=True, color=NAVY, max_lines=3)
+        y = top - 20 - company_height
+        company_block.drawOn(canvas, title_x, y)
+        y -= title_height + 9
+        title_block.drawOn(canvas, title_x, y)
+        y -= 12
         canvas.setStrokeColor(TEAL)
         canvas.setLineWidth(2.5)
-        canvas.line(title_x, bottom + 60, PAGE_W - MARGIN, bottom + 60)
-        draw_text(canvas, "COMPANY INTELLIGENCE REPORT", title_x, bottom + 44,
+        canvas.line(title_x, y, PAGE_W - MARGIN, y)
+        draw_text(canvas, "COMPANY INTELLIGENCE REPORT", title_x, y - 16,
                   title_width, size=7, color=TEAL, max_lines=1)
-        draw_text(canvas, period_text, title_x, bottom + 27,
+        draw_text(canvas, period_text, title_x, y - 33,
                   title_width, size=8, color=INK, max_lines=2)
         canvas.restoreState()
 

@@ -27,10 +27,11 @@ from app.api.v1.routes_company_intelligence import (
     PORTAL_METRIC_VERSION,
     aware,
 )
-from app.api.v1.routes_welfare import selected_rows, statistics
+from app.api.v1.routes_welfare import selected_rows, statistics, month_window
 from app.services.company_metrics import DICTIONARY_VERSION
 from app.services.company_aggregates import Period
 from app.services.company_pdf import render_report
+from app.services.company_pdf_components import period as display_period
 from app.services.company_report_templates import REPORT_TYPES, SECTIONS, report_options, report_catalogue
 from app.services.welfare_scope import filter_country
 from app.services.welfare_analytics import operational, review_summary
@@ -156,7 +157,8 @@ def prepare(db, company, body):
         payload["calls"].append(row)
     payload["summary"] = {
         "recorded_vessels": len({c.vessel_id for c in calls}),
-        "recorded_ports": len({c.port_id for c in calls if c.port_id}),
+        "recorded_ports": len({c.port_id for c in calls if c.port_id is not None}),
+        "calls_without_port": sum(c.port_id is None for c in calls),
         "recorded_calls": len(calls),
         "booked_rides": sum(
             c["metrics"]["total_booked_rides"] for c in payload["calls"]
@@ -192,6 +194,8 @@ def prepare(db, company, body):
             "rows": sorted(groups.values(), key=lambda r: r["name"] or ""),
         }
     needs_welfare = bool(set(configuration["sections"]) & {"executive_summary", "shore_leave", "crew_experience", "obstacles", "service_ratings"})
+    from app.services.company_report_data import publication_for_report
+
     if needs_welfare:
         # Reviews use their own recorded timestamp and can follow a closed call.
         # Retain the original authorized report-period scope, even when that
@@ -248,7 +252,10 @@ def prepare(db, company, body):
         )
         if body.call_id is not None:
             surveys = surveys.filter(WelfareFeedback.vessel_call_id == body.call_id)
-        payload["survey"] = statistics(list(surveys.yield_per(500)), True)
+        payload["survey"] = statistics(list(surveys.yield_per(500)), True, publication_for_report(db, company.id, body))
+        survey_start, survey_end = month_window(body.start, body.end)
+        payload["survey"]["period"] = {"start": survey_start, "end": survey_end}
+        payload["survey"]["period_note"] = "Survey figures use complete UTC calendar months that intersect the report period."
     from app.services.company_report_data import enrich
 
     enrich(db, company, body, payload, calls)
@@ -432,6 +439,7 @@ def rows_for(payload):
 
     rows = [
         ("Company", payload["company_name"]),
+        ("Reporting dates (inclusive, UTC)", display_period(payload)),
         (
             "Reporting period",
             stamp(payload["period"]["start"])
@@ -473,7 +481,11 @@ def rows_for(payload):
         )
     if "survey" in payload:
         survey = payload["survey"]
-        if survey["suppressed"]:
+        if survey.get("period"):
+            rows.append(("Survey coverage dates (UTC calendar months)", display_period({"period": survey["period"]})))
+        if survey.get("status") == "no_responses":
+            rows.append(("Crew survey", "No responses"))
+        elif survey["suppressed"]:
             rows.append(
                 ("Crew survey", "Withheld. Fewer than five eligible respondents.")
             )
@@ -485,13 +497,14 @@ def rows_for(payload):
                 "unable_to_go_ashore",
                 "satisfaction",
             ):
-                rate = survey[key]
+                rate = survey.get(key) or {}
                 value = (
+                    "No responses" if rate.get("status") == "no_responses" else
                     "Withheld. Fewer than five answers."
-                    if rate["suppressed"]
+                    if rate.get("suppressed")
                     else (
                         f"{rate['numerator']} / {rate['denominator']} ({rate['percent']}%)"
-                        if rate["percent"] is not None
+                        if rate.get("percent") is not None
                         else "Unavailable. No eligible answers."
                     )
                 )

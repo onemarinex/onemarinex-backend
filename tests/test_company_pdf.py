@@ -112,7 +112,7 @@ class CompanyPDF(unittest.TestCase):
             records = []
             page.extract_text(visitor_text=lambda value, cm, tm, font, size: records.append((value, size)))
             sizes.append(max(size for value, size in records if "Fleet" in value or "Operations" in value))
-        self.assertGreaterEqual(sizes[0], 17)
+        self.assertGreaterEqual(sizes[0], 14)
         self.assertLessEqual(sizes[1], 10)
         self.assertNotIn("COMPANY INTELLIGENCE REPORT", pages[1].extract_text())
         self.assertIn("Page 2 of", pages[1].extract_text())
@@ -158,6 +158,51 @@ class CompanyPDF(unittest.TestCase):
         values = "\n".join(p.extract_text() for p in self.pages(render_report(data)))
         self.assertIn("\n0\n", values)
         self.assertIn("Unavailable", values)
+
+    def test_round4_inclusive_end_no_response_and_single_month_summary(self):
+        from app.services.company_pdf_components import period, number
+        from app.services.company_pdf import section_charts, survey_share
+        data = payload("WELFARE")
+        data["period"]["end"] = "2026-10-31T00:00:00Z"
+        self.assertEqual(period(data), "01 Oct 2026 - 30 Oct 2026")
+        self.assertEqual(number(8, "calls"), "8 calls")
+        self.assertEqual(number(0, "%"), "0%")
+        data["survey"] = {"suppressed": True, "status": "no_responses", "respondents": 0}
+        self.assertEqual(survey_share(data["survey"], "satisfaction"), "No responses")
+        data["charts"] = [{"section": "obstacles", "kind": "line", "title": "October summary", "items": [{"label": "Oct 2026", "value": 8}], "unit": "calls"}]
+        self.assertLess(section_charts(data, "obstacles")[0].wrap(500, 500)[1], 40)
+        text = " ".join(" ".join(p.extract_text() for p in self.pages(render_report(data))).split())
+        self.assertIn("No obstacle survey responses", text)
+        self.assertIn("30 Oct 2026", text)
+        self.assertNotIn("Too few eligible respondents", text)
+        self.assertIn("inclusive dates, UTC", text)
+
+    def test_round4_full_company_name_is_primary_on_right_and_not_a_logo_caption(self):
+        data = payload()
+        name = "International Shipping Company With Complete Legal Identity Limited"
+        data["branding"]["name"] = name
+        logo = io.BytesIO()
+        Image.new("RGBA", (800, 200), (8, 127, 131, 150)).save(logo, format="PNG")
+        data["branding"]["logo"] = "data:image/png;base64," + base64.b64encode(logo.getvalue()).decode()
+        for asset in (data["branding"]["logo"], None):
+            data["branding"]["logo"] = asset
+            page = self.pages(render_report(data))[0]
+            normalized = " ".join(page.extract_text().split())
+            self.assertIn(name, normalized)
+            self.assertEqual(normalized.count(name), 1)
+            records = []
+            page.extract_text(visitor_text=lambda text, cm, tm, font, size: records.append((text, cm, tm, size)))
+            identity = [row for row in records if "International" in row[0]]
+            self.assertTrue(identity)
+            self.assertEqual(identity[0][3], 22)
+            self.assertGreater(identity[0][1][4] + identity[0][2][4], 290)
+
+    def test_round4_long_legal_name_is_preserved_without_ellipsis(self):
+        data = payload()
+        data["branding"]["name"] = "Long Legal Company Name " * 8
+        page = self.pages(render_report(data))[0]
+        normalized = " ".join(page.extract_text().split())
+        self.assertIn(data["branding"]["name"].strip(), normalized)
 
 
 if __name__ == "__main__":
