@@ -559,96 +559,136 @@ def get_dashboard_data(
         live_trips=trips_data,
     )
 
-@router.get("/shore-pass-requests", response_model=List[ShorePassOut])
-def get_shore_pass_requests(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    if current_user.role != "agent":
-        raise HTTPException(status_code=403, detail="Only agents can access shore pass requests")
-
-    # Scoped to the agent's own vessels. Filtering by port showed — and let the
-    # agent act on — shore passes belonging to every other agency berthed at
-    # the same port.
-    _, crew_profile_ids = _agent_scope(db, current_user.id)
-    if not crew_profile_ids:
-        return []
-
-    requests = page_all(
-        db.query(ShorePass)
-        .filter(ShorePass.crew_profile_id.in_(crew_profile_ids))
-        .order_by(ShorePass.created_at.desc()),
-        collection="routes_agents.get_shore_pass_requests.0",
-        label="Shore pass requests",
-    )
-
-    return requests
+def _agent_shore_pass_query(db, current_user):
+    """Authority belongs to the immutable assignment/call, never the person."""
+    return db.query(ShorePass).join(CrewAssignment, and_(
+        CrewAssignment.id == ShorePass.crew_assignment_id,
+        CrewAssignment.vessel_call_id == ShorePass.vessel_call_id,
+        CrewAssignment.crew_profile_id.is_not_distinct_from(ShorePass.crew_profile_id),
+    )).join(VesselCall, VesselCall.id == CrewAssignment.vessel_call_id).join(
+        AgentProfile, AgentProfile.id == VesselCall.agency_id
+    ).filter(AgentProfile.user_id == current_user.id)
 
 
 def _agent_shore_pass_or_404(db: Session, request_id: int, current_user: User) -> ShorePass:
-    """A shore pass belonging to this agent's crew, or a 404.
-
-    Approve and reject previously looked the pass up by id with no ownership
-    check at all, so any agent could grant or refuse shore leave for another
-    agency's crew. 404 rather than 403 so ids cannot be probed.
-    """
-    shore_pass = db.query(ShorePass).filter(ShorePass.id == request_id).first()
-    if not shore_pass:
-        raise HTTPException(status_code=404, detail="Shore pass request not found")
-
-    _, crew_profile_ids = _agent_scope(db, current_user.id)
-    if shore_pass.crew_profile_id not in crew_profile_ids:
-        raise HTTPException(status_code=404, detail="Shore pass request not found")
+    shore_pass = _agent_shore_pass_query(db, current_user).filter(
+        ShorePass.id == request_id
+    ).populate_existing().first()
+    if shore_pass is None:
+        raise HTTPException(404, "Shore pass request not found")
     return shore_pass
+
+
+def _agent_pass_action_context(db, request_id, current_user):
+    from app.services.shore_leave_eligibility import lock_shore_leave_context
+    from app.services.vessel_lifecycle import call_is_current
+    initial = _agent_shore_pass_or_404(db, request_id, current_user)
+    assignment, passes = lock_shore_leave_context(db, initial.crew_assignment_id)
+    shore_pass = _agent_shore_pass_or_404(db, request_id, current_user)
+    if not passes or passes[0].id != shore_pass.id:
+        raise HTTPException(409, "This shore pass is historical or has been superseded")
+    if assignment is None or not call_is_current(assignment.vessel_call) or assignment.ended_at is not None or assignment.signed_off_at is not None:
+        raise HTTPException(409, "This shore pass has no active vessel assignment and port call")
+    return shore_pass, assignment
+
+
+def _agent_pass_output(db, shore_pass):
+    from app.services.shore_leave_eligibility import shore_leave_decision
+    from app.services.vessel_lifecycle import _aware_utc, call_is_current
+    assignment = db.query(CrewAssignment).filter(CrewAssignment.id == shore_pass.crew_assignment_id).first()
+    latest = db.query(ShorePass.id).filter(
+        ShorePass.crew_assignment_id == shore_pass.crew_assignment_id,
+        ShorePass.vessel_call_id == shore_pass.vessel_call_id,
+    ).order_by(ShorePass.created_at.desc(), ShorePass.id.desc()).first()
+    current = assignment is not None and latest is not None and latest[0] == shore_pass.id and call_is_current(assignment.vessel_call) and assignment.ended_at is None and assignment.signed_off_at is None
+    decision = shore_leave_decision(db, assignment) if current else None
+    base = shore_leave_decision(db, assignment, include_pass=False) if current else None
+    expired = shore_pass.expires_at is not None and _aware_utc(shore_pass.expires_at) <= datetime.now(dt_timezone.utc)
+    renewable = bool(current and expired and shore_pass.status in {"approved", "expired"} and base.eligible and base.valid_until is not None and base.valid_until > _aware_utc(shore_pass.expires_at))
+    return ShorePassOut.model_validate(shore_pass).model_copy(update={
+        "can_approve": bool(current and shore_pass.status == "pending" and decision.eligible),
+        "can_reject": bool(current and shore_pass.status not in {"rejected", "revoked", "cancelled"}),
+        "can_renew": renewable,
+    })
+
+
+def _commit_shore_pass(db, shore_pass):
+    try:
+        db.commit()
+        db.refresh(shore_pass)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(500, "Unable to update shore pass") from exc
+
+
+@router.get("/shore-pass-requests", response_model=List[ShorePassOut])
+def get_shore_pass_requests(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role != "agent":
+        raise HTTPException(403, "Only agents can access shore pass requests")
+    rows = page_all(_agent_shore_pass_query(db, current_user).order_by(ShorePass.created_at.desc(), ShorePass.id.desc()),
+        collection="routes_agents.get_shore_pass_requests.0", label="Shore pass requests")
+    return [_agent_pass_output(db, row) for row in rows]
+
+
+@router.get("/shore-pass-requests/{request_id}", response_model=ShorePassOut)
+def get_shore_pass_request(request_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role != "agent":
+        raise HTTPException(403, "Only agents can access shore pass requests")
+    return _agent_pass_output(db, _agent_shore_pass_or_404(db, request_id, current_user))
+
 
 @router.post("/shore-pass-requests/{request_id}/approve", response_model=ShorePassOut)
-def approve_shore_pass(
-    request_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def approve_shore_pass(request_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if current_user.role != "agent":
-        raise HTTPException(status_code=403, detail="Only agents can approve shore passes")
-
-    shore_pass = _agent_shore_pass_or_404(db, request_id, current_user)
-    
+        raise HTTPException(403, "Only agents can approve shore passes")
+    shore_pass, assignment = _agent_pass_action_context(db, request_id, current_user)
+    from app.services.shore_leave_eligibility import shore_leave_decision
+    decision = shore_leave_decision(db, assignment, lock_pass=True)
+    if shore_pass.status != "pending" or not decision.eligible or decision.status != "ELIGIBLE":
+        raise HTTPException(409, decision.reason or "Only the latest authorized pending shore pass can be approved; use Renew for an expired pass")
     shore_pass.status = "approved"
     shore_pass.is_verified = True
+    shore_pass.expires_at = decision.valid_until
     shore_pass.approved_by_id = current_user.id
-    
-    try:
-        db.commit()
-        db.refresh(shore_pass)
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-        
-    return shore_pass
+    _commit_shore_pass(db, shore_pass)
+    return _agent_pass_output(db, shore_pass)
+
+
+@router.post("/shore-pass-requests/{request_id}/renew", response_model=ShorePassOut, status_code=201)
+def renew_shore_pass(request_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if current_user.role != "agent":
+        raise HTTPException(403, "Only agents can renew shore passes")
+    old, assignment = _agent_pass_action_context(db, request_id, current_user)
+    from app.services.shore_leave_eligibility import shore_leave_decision
+    from app.services.vessel_lifecycle import _aware_utc
+    decision = shore_leave_decision(db, assignment, include_pass=False)
+    now = datetime.now(dt_timezone.utc)
+    if old.status not in {"approved", "expired"} or old.expires_at is None or _aware_utc(old.expires_at) > now:
+        raise HTTPException(409, "Only the latest expired approved pass can be renewed")
+    if not decision.eligible or decision.status != "ELIGIBLE" or decision.valid_until is None or decision.valid_until <= _aware_utc(old.expires_at):
+        raise HTTPException(409, decision.reason or "Extend the authorized shore-pass validity before renewal")
+    # Reissue rather than rewriting the expired pass's operational history.
+    renewed = ShorePass(crew_profile_id=old.crew_profile_id, crew_assignment_id=assignment.id,
+        vessel_call_id=assignment.vessel_call_id, shore_pass_id="SP-"+uuid.uuid4().hex.upper(),
+        agent_name=old.agent_name, port_name=old.port_name, vessel_name=old.vessel_name,
+        expires_at=decision.valid_until, status="approved", is_verified=True,
+        approved_by_id=current_user.id)
+    db.add(renewed)
+    _commit_shore_pass(db, renewed)
+    return _agent_pass_output(db, renewed)
+
 
 @router.post("/shore-pass-requests/{request_id}/reject", response_model=ShorePassOut)
-def reject_shore_pass(
-    request_id: int,
-    body: ShorePassActionIn,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def reject_shore_pass(request_id: int, body: ShorePassActionIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if current_user.role != "agent":
-        raise HTTPException(status_code=403, detail="Only agents can reject shore passes")
-
-    shore_pass = _agent_shore_pass_or_404(db, request_id, current_user)
-    
+        raise HTTPException(403, "Only agents can reject shore passes")
+    shore_pass, _ = _agent_pass_action_context(db, request_id, current_user)
     shore_pass.status = "rejected"
+    shore_pass.is_verified = False
     shore_pass.rejection_reason = body.rejection_reason
     shore_pass.approved_by_id = current_user.id
-    
-    try:
-        db.commit()
-        db.refresh(shore_pass)
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-        
-    return shore_pass
+    _commit_shore_pass(db, shore_pass)
+    return _agent_pass_output(db, shore_pass)
 
 
 # --- Helper: get crew profile IDs for an agent's vessels ---

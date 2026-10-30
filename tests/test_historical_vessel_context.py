@@ -464,7 +464,7 @@ def test_reassigning_a_vessel_starts_fresh_crew_assignments(db):
     finish_vessel_call(db, vessel, status="REASSIGNED")
     vessel.agent_id = agent_b.id
     vessel.agency_name = agency_b.agency_name
-    new_call = active_vessel_call(db, vessel)
+    new_call = active_vessel_call(db, vessel, allow_new_call=True)
     db.flush()
 
     assert old_assignment.ended_at is not None

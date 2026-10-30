@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 from typing import Optional
+import re
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 from fastapi import HTTPException
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import or_, func, case
 from sqlalchemy.exc import IntegrityError
 from app.db.models.vessel import Vessel
@@ -42,15 +43,21 @@ def imo(value):
 def boundary(value):
     if value in (None, ""):
         return None
-    if isinstance(value, str) and len(value.strip()) == 10:
-        return datetime.combine(
-            date.fromisoformat(value), time(), ZoneInfo("Asia/Kolkata")
-        ).astimezone(timezone.utc)
-    moment = (
-        value
-        if isinstance(value, datetime)
-        else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    )
+    if isinstance(value, str):
+        value = value.strip()
+        if len(value) == 10:
+            if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+                raise ValueError("Use YYYY-MM-DD, for example 2026-10-01. Ambiguous day/month dates are not accepted.")
+            try:
+                return datetime.combine(date.fromisoformat(value), time(), ZoneInfo("Asia/Kolkata")).astimezone(timezone.utc)
+            except ValueError as exc:
+                raise ValueError("Enter a valid calendar date in YYYY-MM-DD format.") from exc
+        if not re.match(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ]", value):
+            raise ValueError("Use YYYY-MM-DD or an ISO date-time with a time zone.")
+    try:
+        moment = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("Use YYYY-MM-DD or a valid ISO date-time with a time zone.") from exc
     if moment.tzinfo is None:
         raise ValueError("Date-time values must include a time zone.")
     return moment.astimezone(timezone.utc)
@@ -71,6 +78,12 @@ class DeclarationIn(BaseModel):
     commercial_manager_end_date: Optional[str] = Field(default=None, max_length=40)
     ism_manager_start_date: Optional[str] = Field(default=None, max_length=40)
     ism_manager_end_date: Optional[str] = Field(default=None, max_length=40)
+
+    @field_validator("start_date", "end_date", *ROLE_DATE_FIELDS)
+    @classmethod
+    def validate_date_field(cls, value):
+        boundary(value)
+        return value
 
     @model_validator(mode="after")
     def validate_declaration(self):

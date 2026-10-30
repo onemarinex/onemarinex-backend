@@ -1,6 +1,9 @@
 """Pure review statistics shared by authorized Live queries and Demo fixtures."""
 
 
+from app.services.welfare_disclosure import threshold
+
+
 def summarize_review_rows(rows, suppress=False):
     groups = {}
     for row in rows:
@@ -8,11 +11,11 @@ def summarize_review_rows(rows, suppress=False):
     result = []
     for kind, rows in sorted(groups.items()):
         people = {r.crew_id for r in rows}
-        suppressed = bool(suppress and len(people) < 5)
+        suppressed = bool(suppress and len(people) < threshold())
         distribution = []
         for rating in range(1, 6):
             matches = [r for r in rows if round(r.rating) == rating]
-            hidden = bool(suppress and len({r.crew_id for r in matches}) < 5)
+            hidden = bool(suppress and 0 < len({r.crew_id for r in matches}) < threshold())
             distribution.append({"rating": rating, "count": None if suppressed or hidden else len(matches)})
         # Preserve the existing complementary-cell privacy rule exactly.
         if suppress and any(d["count"] is None for d in distribution):

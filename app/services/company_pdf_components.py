@@ -15,7 +15,7 @@ from reportlab.lib.utils import ImageReader, simpleSplit
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
-from reportlab.platypus import Flowable, LongTable, Paragraph, SimpleDocTemplate, TableStyle
+from reportlab.platypus import BaseDocTemplate, Flowable, Frame, LongTable, NextPageTemplate, PageTemplate, Paragraph, TableStyle
 
 NAVY, TEAL = colors.HexColor("#142D43"), colors.HexColor("#087F83")
 INK, MUTED = colors.HexColor("#223746"), colors.HexColor("#607180")
@@ -311,35 +311,79 @@ def table(headers, rows, widths=None, compact=False):
 
 
 def build(title, company, story, period_text, generated, logo=None, period_has_end=True, fictional=False):
+    """A prominent first-page identity and a compact continuation header.
+
+    Frames reserve their own header space; neither a long title nor a large
+    logo can push content into the header or footer. All images remain local,
+    validated snapshot bytes and deterministic rendering stays unchanged.
+    """
     out, image = io.BytesIO(), safe_logo(logo)
     identity = {"period": period_text, "generated": generated, "period_has_end": period_has_end, "fictional": fictional}
+    first_top, later_top = 197, 92
+    half = WIDTH / 2
+    brand_width = half - 38
+    title_x = MARGIN + half + 21
+    title_width = half - 21
 
-    def header(canvas, _doc):
+    def first_header(canvas, _doc):
         canvas.saveState()
-        x = MARGIN
+        top, bottom = PAGE_H - 34, PAGE_H - first_top + 17
+        middle = MARGIN + half
+        canvas.setStrokeColor(colors.HexColor("#AEBECC"))
+        canvas.setLineWidth(.8)
+        canvas.line(middle, bottom + 15, middle, top)
         if image:
             w, h = image.getSize()
-            scale = min(64 / w, 39 / h)
-            canvas.drawImage(image, MARGIN, PAGE_H - 72, width=w * scale, height=h * scale, mask="auto")
-            x += 75
-        draw_text(canvas, company, x, PAGE_H - 42, WIDTH * .52 - (x - MARGIN), size=11, bold=True, color=NAVY, max_lines=2)
-        draw_text(canvas, "COMPANY MANAGEMENT REPORT", x, PAGE_H - 72, WIDTH * .52 - (x - MARGIN), size=5.7, max_lines=1)
-        draw_text(canvas, title, MARGIN + WIDTH * .57, PAGE_H - 41, WIDTH * .43, size=8.6, bold=True, color=NAVY, max_lines=2)
-        draw_text(canvas, period_text, MARGIN + WIDTH * .57, PAGE_H - 69, WIDTH * .43, size=6.3, max_lines=1)
-        canvas.setStrokeColor(NAVY)
-        canvas.setLineWidth(1.2)
-        canvas.line(MARGIN, PAGE_H - 86, PAGE_W - MARGIN, PAGE_H - 86)
+            scale = min(brand_width / w, 99 / h)
+            iw, ih = w * scale, h * scale
+            canvas.drawImage(image, MARGIN + (half - iw) / 2 - 7,
+                             top - 105 + (99 - ih) / 2,
+                             width=iw, height=ih, mask="auto")
+            draw_text(canvas, company, MARGIN + 8, bottom + 27,
+                      brand_width + 15, size=9, bold=True, color=NAVY, max_lines=3)
+        else:
+            draw_text(canvas, company, MARGIN + 10, top - 40,
+                      brand_width + 12, size=18, bold=True, color=NAVY, max_lines=4)
+        # Fit the known report titles without shrinking them to caption size.
+        # Exceptionally long titles wrap and ellipsize within the right panel.
+        title_size = 20 if len(text(title)) <= 52 else 17
+        draw_text(canvas, title, title_x, top - 18, title_width,
+                  size=title_size, bold=True, color=NAVY, max_lines=3)
         canvas.setStrokeColor(TEAL)
-        canvas.setLineWidth(2)
-        canvas.line(MARGIN, PAGE_H - 89, MARGIN + 54, PAGE_H - 89)
+        canvas.setLineWidth(2.5)
+        canvas.line(title_x, bottom + 60, PAGE_W - MARGIN, bottom + 60)
+        draw_text(canvas, "COMPANY INTELLIGENCE REPORT", title_x, bottom + 44,
+                  title_width, size=7, color=TEAL, max_lines=1)
+        draw_text(canvas, period_text, title_x, bottom + 27,
+                  title_width, size=8, color=INK, max_lines=2)
+        canvas.restoreState()
+
+    def continuation_header(canvas, _doc):
+        canvas.saveState()
+        draw_text(canvas, company, MARGIN, PAGE_H - 35, WIDTH * .49,
+                  size=9.5, bold=True, color=NAVY, max_lines=2)
+        draw_text(canvas, title, MARGIN + WIDTH * .54, PAGE_H - 35,
+                  WIDTH * .46, size=8.3, bold=True, color=NAVY, max_lines=2)
+        draw_text(canvas, period_text, MARGIN, PAGE_H - 65, WIDTH,
+                  size=7, max_lines=1)
+        canvas.setStrokeColor(RULE)
+        canvas.setLineWidth(.7)
+        canvas.line(MARGIN, PAGE_H - 76, PAGE_W - MARGIN, PAGE_H - 76)
         canvas.restoreState()
 
     def canvas_factory(*args, **kwargs):
-        # Preview and download of the same immutable snapshot must produce the
-        # exact same bytes, including the PDF metadata and document ID.
         kwargs["invariant"] = 1
         return ReportCanvas(*args, report_identity=identity, **kwargs)
 
-    doc = SimpleDocTemplate(out, pagesize=A4, leftMargin=MARGIN, rightMargin=MARGIN, topMargin=103, bottomMargin=65, title=text(title), author=text(company), subject="Company-authorized management report", pageCompression=1)
-    doc.build(story, onFirstPage=header, onLaterPages=header, canvasmaker=canvas_factory)
+    doc = BaseDocTemplate(out, pagesize=A4, leftMargin=MARGIN, rightMargin=MARGIN,
+                          bottomMargin=65, title=text(title), author=text(company),
+                          subject="Company-authorized management report", pageCompression=1)
+    def frame(top, name):
+        return Frame(MARGIN, 65, WIDTH, PAGE_H - top - 65, id=name,
+                     leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+    doc.addPageTemplates([
+        PageTemplate(id="First", frames=[frame(first_top, "FirstContent")], onPage=first_header),
+        PageTemplate(id="Continuation", frames=[frame(later_top, "ContinuedContent")], onPage=continuation_header),
+    ])
+    doc.build([NextPageTemplate("Continuation"), *story], canvasmaker=canvas_factory)
     return out.getvalue()

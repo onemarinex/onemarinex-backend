@@ -1,8 +1,9 @@
 """Company operational views. Exact call context and event-time authorization."""
 
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import or_, func, literal, cast, String, DateTime
+from sqlalchemy import or_, func, literal, cast, String, DateTime, select
 from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.db.models.shipping_company import VesselRoleClaim
@@ -18,6 +19,7 @@ from app.services.company_fleet_identity import claim_matches_vessel, identity_k
 from app.api.v1.routes_shipping_company import current_company_member
 from app.services.company_aggregates import tenure_scoped, _ashore_snapshot, Period
 from app.services.event_origin import resolved_origin
+from app.services.vessel_lifecycle import current_call_predicate, call_is_current
 
 router = APIRouter()
 UTC = timezone.utc
@@ -28,6 +30,33 @@ def aware(value):
     return value.replace(tzinfo=UTC) if value and value.tzinfo is None else value
 
 
+def reporting_window(period_start=None, period_end=None):
+    if period_start is None and period_end is None:
+        return None
+    if period_start is None or period_end is None:
+        raise HTTPException(422, "Provide both period_start and period_end.")
+    if period_start.tzinfo is None or period_end.tzinfo is None or period_end <= period_start:
+        raise HTTPException(422, "Use an increasing reporting period with explicit time zones.")
+    return Period(period_start.astimezone(UTC), period_end.astimezone(UTC))
+
+
+def filter_calls(query, *, period=None, port_id=None, vessel_id=None, country=None):
+    if port_id is not None:
+        query = query.filter(VesselCall.port_id == port_id)
+    if vessel_id is not None:
+        query = query.filter(VesselCall.vessel_id == vessel_id)
+    if country and country.upper() != "ALL":
+        code = country.strip().upper()
+        if len(code) != 2 or not code.isalpha():
+            raise HTTPException(422, "Use a two-letter country code.")
+        query = query.filter(VesselCall.port_id.in_(
+            select(PortGeography.port_id).where(PortGeography.country_code == code)))
+    if period:
+        query = query.filter(VesselCall.started_at < period.end,
+            func.coalesce(VesselCall.ended_at, VesselCall.etd, datetime.now(UTC)) > period.start)
+    return query
+
+
 def calls_query(db, company_id, active=False):
     now = datetime.now(UTC)
     claims = db.query(VesselRoleClaim.id).filter(
@@ -35,7 +64,7 @@ def calls_query(db, company_id, active=False):
         claim_matches_vessel(VesselCall.vessel_id),
         VesselRoleClaim.status.in_(("APPROVED", "AUTO_ACCEPTED")),
         VesselRoleClaim.revoked_at.is_(None),
-        VesselRoleClaim.effective_start < func.coalesce(VesselCall.ended_at, now),
+        VesselRoleClaim.effective_start < func.least(func.coalesce(VesselCall.ended_at, now), func.coalesce(VesselCall.etd, now), now),
         or_(
             VesselRoleClaim.effective_end.is_(None),
             VesselRoleClaim.effective_end > VesselCall.started_at,
@@ -51,9 +80,7 @@ def calls_query(db, company_id, active=False):
         )
     query = db.query(VesselCall).filter(claims.exists(), VesselCall.started_at <= now)
     if active:
-        query = query.filter(
-            VesselCall.ended_at.is_(None), VesselCall.status.in_(["ACTIVE", "IN_PORT"])
-        )
+        query = query.filter(current_call_predicate(now))
     return query
 
 
@@ -135,7 +162,9 @@ def call_metrics(db, company_id, call, reporting_period=None):
     }
 
 
-def call_out(db, company_id, call, metrics=True):
+def call_out(db, company_id, call, metrics=True, reporting_period=None):
+    now = datetime.now(UTC)
+    known_ends = [aware(value) for value in (call.ended_at, call.etd) if value is not None and aware(value) <= now]
     port = db.get(Port, call.port_id) if call.port_id else None
     rule = (
         db.query(PortRule)
@@ -163,12 +192,14 @@ def call_out(db, company_id, call, metrics=True):
         "etd": call.etd,
         "started_at": call.started_at,
         "ended_at": call.ended_at,
-        "status": call.status,
+        "effective_ended_at": min(known_ends) if known_ends else None,
+        "status": call.status if call_is_current(call) else (str(call.status).upper() if str(call.status).upper() in {"ARCHIVED", "REASSIGNED"} else "DEPARTED"),
+        "current_port_call": call_is_current(call),
         "timezone": rule.timezone if rule and rule.timezone else "UTC",
         "timezone_recorded": bool(rule and rule.timezone),
     }
     if metrics:
-        out["metrics"] = call_metrics(db, company_id, call)
+        out["metrics"] = call_metrics(db, company_id, call, reporting_period)
     return out
 
 
@@ -199,7 +230,9 @@ def call_metrics_many(db, company_id, calls, reporting_period=None):
 
 
 @router.get("/overview")
-def overview(db: Session = Depends(get_db), context=Depends(current_company_member)):
+def overview(period_start: Optional[datetime] = None, period_end: Optional[datetime] = None,
+    port_id: Optional[int] = None, vessel_id: Optional[int] = None, country: Optional[str] = None,
+    db: Session = Depends(get_db), context=Depends(current_company_member)):
     company, _ = context
     now = datetime.now(UTC)
     onboarded = (
@@ -217,12 +250,20 @@ def overview(db: Session = Depends(get_db), context=Depends(current_company_memb
         .scalar()
     )
     # Complete totals are independent of the paginated table endpoint.
-    calls = calls_query(db, company.id, active=True).all()
+    window = reporting_window(period_start, period_end)
+    calls = filter_calls(calls_query(db, company.id, active=True), port_id=port_id, vessel_id=vessel_id, country=country).all()
+    period_calls = filter_calls(calls_query(db, company.id), period=window, port_id=port_id, vessel_id=vessel_id, country=country).all()
+    period_stats = call_metrics_many(db, company.id, period_calls, window)
     stats = [call_metrics(db, company.id, call) for call in calls]
     return {
         "generated_at": now,
         "metric_version": PORTAL_METRIC_VERSION,
         "company_name": company.legal_name,
+        "reporting_period": {"start": window.start, "end": window.end} if window else None,
+        "period_metrics": {"recorded_calls": len(period_calls),
+            "recorded_vessels": len({c.vessel_id for c in period_calls}),
+            "total_booked_rides": sum(m["total_booked_rides"] for m in period_stats.values()),
+            "recorded_shore_leave_passengers": sum(m["crew_participation"] for m in period_stats.values())},
         "metrics": {
             "onboarded_vessels": onboarded,
             "active_vessels": len({c.vessel_id for c in calls}),
@@ -241,6 +282,9 @@ def overview(db: Session = Depends(get_db), context=Depends(current_company_memb
 def calls(
     port_id: int = None,
     vessel_id: int = None,
+    country: Optional[str] = None,
+    period_start: Optional[datetime] = None,
+    period_end: Optional[datetime] = None,
     active: bool = True,
     search: str = Query("", max_length=120),
     view: str = Query("active", pattern="^(active|ashore|rides)$"),
@@ -251,9 +295,10 @@ def calls(
     context=Depends(current_company_member),
 ):
     company, _ = context
-    query = calls_query(db, company.id, active)
+    window = reporting_window(period_start, period_end)
+    query = filter_calls(calls_query(db, company.id, active and not historical_only), period=window, port_id=port_id, vessel_id=vessel_id, country=country)
     if historical_only:
-        query = query.filter(VesselCall.ended_at.isnot(None))
+        query = query.filter(~current_call_predicate())
     if port_id is not None:
         query = query.filter(VesselCall.port_id == port_id)
     if vessel_id is not None:
@@ -271,7 +316,7 @@ def calls(
         for call in query.order_by(
             VesselCall.started_at.desc(), VesselCall.id.desc()
         ).yield_per(100):
-            row = call_out(db, company.id, call)
+            row = call_out(db, company.id, call, reporting_period=window)
             if (
                 row["metrics"]["ashore_recorded_seats"]
                 if view == "ashore"
@@ -289,7 +334,7 @@ def calls(
         "offset": offset,
         "limit": limit,
         "items": [
-            call_out(db, company.id, c)
+            call_out(db, company.id, c, reporting_period=window)
             for c in query.order_by(VesselCall.started_at.desc(), VesselCall.id.desc())
             .offset(offset)
             .limit(limit)
@@ -298,9 +343,9 @@ def calls(
     }
 
 
-def port_rows(db, company_id, active=True, search="", offset=None, limit=None):
+def port_rows(db, company_id, active=True, search="", offset=None, limit=None, *, period=None, port_id=None, vessel_id=None, country=None):
     query = (
-        calls_query(db, company_id, active)
+        filter_calls(calls_query(db, company_id, active), period=period, port_id=port_id, vessel_id=vessel_id, country=country)
         .join(Port, Port.id == VesselCall.port_id)
     )
     if active:
@@ -309,7 +354,7 @@ def port_rows(db, company_id, active=True, search="", offset=None, limit=None):
         term = "%" + search.strip().replace("%", "\\%").replace("_", "\\_") + "%"
         query = query.filter(Port.name.ilike(term, escape="\\"))
     grouped = query.with_entities(
-        Port.id, Port.name, func.count(func.distinct(VesselCall.vessel_id))
+        Port.id, Port.name, func.count(func.distinct(VesselCall.vessel_id)), func.count(VesselCall.id)
     ).group_by(Port.id, Port.name)
     total = grouped.count()
     grouped = grouped.order_by(Port.name, Port.id)
@@ -322,14 +367,14 @@ def port_rows(db, company_id, active=True, search="", offset=None, limit=None):
         for p in db.query(PortGeography).filter(PortGeography.port_id.in_(ids))
     }
     current_calls = (
-        calls_query(db, company_id, True).filter(VesselCall.port_id.in_(ids)).all()
+        filter_calls(calls_query(db, company_id, True), port_id=port_id, vessel_id=vessel_id, country=country).filter(VesselCall.port_id.in_(ids)).all()
     )
     by_port = {pid: [] for pid in ids}
-    metrics_by_call = call_metrics_many(db, company_id, current_calls)
+    metrics_by_call = call_metrics_many(db, company_id, current_calls, period)
     for call in current_calls:
         by_port[call.port_id].append((call, metrics_by_call[call.id]))
     result = []
-    for pid, name, recorded_vessels in rows:
+    for pid, name, recorded_vessels, recorded_calls in rows:
         stats = by_port[pid]
         result.append(
             {
@@ -338,6 +383,8 @@ def port_rows(db, company_id, active=True, search="", offset=None, limit=None):
                 "country_code": geography.get(pid),
                 "vessels": recorded_vessels,
                 "recorded_vessels": recorded_vessels,
+                "recorded_calls": recorded_calls,
+                "current_calls": len(stats),
                 "active_vessels": len({c.vessel_id for c, _ in stats}),
                 "crew_ashore": (
                     None
@@ -368,6 +415,8 @@ def ports(
 
 @router.get("/ports/page")
 def ports_page(
+    period_start: Optional[datetime] = None, period_end: Optional[datetime] = None,
+    port_id: Optional[int] = None, vessel_id: Optional[int] = None, country: Optional[str] = None,
     active: bool = True,
     search: str = Query("", max_length=120),
     offset: int = Query(0, ge=0),
@@ -375,15 +424,18 @@ def ports_page(
     db: Session = Depends(get_db),
     context=Depends(current_company_member),
 ):
-    return port_rows(db, context[0].id, active, search, offset, limit)
+    return port_rows(db, context[0].id, active, search, offset, limit, period=reporting_window(period_start, period_end), port_id=port_id, vessel_id=vessel_id, country=country)
 
 
 @router.get("/ports/{port_id}/overview")
-def selected_port(port_id: int, historical: bool = False, db: Session = Depends(get_db), context=Depends(current_company_member)):
+def selected_port(port_id: int, historical: bool = False,
+    period_start: Optional[datetime] = None, period_end: Optional[datetime] = None,
+    vessel_id: Optional[int] = None, country: Optional[str] = None, db: Session = Depends(get_db), context=Depends(current_company_member)):
     company, _ = context
-    query = calls_query(db, company.id, not historical).filter(VesselCall.port_id == port_id)
+    window = reporting_window(period_start, period_end)
+    query = filter_calls(calls_query(db, company.id, not historical), period=window, port_id=port_id, vessel_id=vessel_id, country=country)
     if historical:
-        query = query.filter(VesselCall.ended_at.isnot(None))
+        query = query.filter(~current_call_predicate())
     rows = query.all()
     if not rows:
         # An eligible port can have no calls in the chosen current/history view.
@@ -391,7 +443,7 @@ def selected_port(port_id: int, historical: bool = False, db: Session = Depends(
             raise HTTPException(404, "Port not found.")
     port = db.get(Port, port_id)
     geography = db.get(PortGeography, port_id)
-    values = list(call_metrics_many(db, company.id, rows).values())
+    values = list(call_metrics_many(db, company.id, rows, window).values())
     return {"id":port_id,"name":port.name if port else "Port not recorded","country_code":geography.country_code if geography else None,
         "generated_at":datetime.now(UTC),"metrics":{"vessels":len({call.vessel_id for call in rows}),"calls":len(rows),
             "crew_ashore":None if any(m["crew_ashore"] is None for m in values) else sum(m["crew_ashore"] for m in values),
@@ -400,11 +452,12 @@ def selected_port(port_id: int, historical: bool = False, db: Session = Depends(
 
 @router.get("/calls/{call_id}")
 def detail(
-    call_id: int, db: Session = Depends(get_db), context=Depends(current_company_member)
+    call_id: int, period_start: Optional[datetime] = None, period_end: Optional[datetime] = None,
+    db: Session = Depends(get_db), context=Depends(current_company_member)
 ):
     company, _ = context
     call = selected_call(db, company.id, call_id)
-    result = call_out(db, company.id, call)
+    result = call_out(db, company.id, call, reporting_period=reporting_window(period_start, period_end))
     result["generated_at"] = datetime.now(UTC)
     return result
 
@@ -412,6 +465,7 @@ def detail(
 @router.get("/calls/{call_id}/activities")
 def activities(
     call_id: int,
+    period_start: Optional[datetime] = None, period_end: Optional[datetime] = None,
     kind: str = Query("ALL", pattern="^(ALL|SIGN_ON|SIGN_OFF|SHORE_LEAVE)$"),
     offset: int = Query(0, ge=0),
     limit: int = Query(25, ge=1, le=100),
@@ -420,6 +474,7 @@ def activities(
 ):
     company, _ = context
     call = selected_call(db, company.id, call_id)
+    window = reporting_window(period_start, period_end)
     empty_time = cast(literal(None), DateTime(timezone=True))
     parts = []
     if kind in ("ALL", "SIGN_ON", "SIGN_OFF"):
@@ -437,6 +492,7 @@ def activities(
             company_id=company.id,
             vessel_column=VesselCall.vessel_id,
             occurred_column=AgencyTransfer.travel_at,
+            period=window,
         )
         if kind != "ALL":
             transfers = transfers.filter(AgencyTransfer.movement_type == kind)
@@ -468,6 +524,7 @@ def activities(
                 company_id=company.id,
                 vessel_column=VesselCall.vessel_id,
                 occurred_column=timestamp,
+                period=window,
             )
             parts.append(
                 confirmed.with_entities(
@@ -481,7 +538,7 @@ def activities(
                 )
             )
     if kind in ("ALL", "SHORE_LEAVE"):
-        bookings = booking_query(db, company.id, call, CabBooking.created_at)
+        bookings = booking_query(db, company.id, call, CabBooking.created_at, window)
         parts.append(
             bookings.with_entities(
                 literal("shore_leave").label("record_type"),

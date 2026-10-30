@@ -867,6 +867,8 @@ class VesselOut(BaseModel):
     eta: Optional[datetime] = None
     etd: Optional[datetime] = None
     status: str
+    agency_mapping_context: Optional[str] = None
+    agency_mapping_call_id: Optional[int] = None
     # One expiry for the whole crew of this port call; crew may override.
     shore_pass_valid_upto: Optional[datetime] = None
 
@@ -879,6 +881,12 @@ def vessel_out(vessel: Vessel) -> VesselOut:
     from app.services.vessel_lifecycle import effective_vessel_status
 
     output = VesselOut.model_validate(vessel)
+    status = effective_vessel_status(vessel)
+    # An explicitly finished call must be discoverable in history even when
+    # the canonical row's manual status has not yet been reconciled.
+    last_call = max(vessel.calls, key=lambda call: call.id or 0, default=None)
+    if status in {"Active", "Departing"} and last_call is not None and last_call.ended_at is not None:
+        status = "Archived" if str(last_call.status).upper() == "ARCHIVED" else "Departed"
     agency_name = output.agency_name
     if not agency_name and vessel.agent and getattr(vessel.agent, "agent_profile", None):
         agency_name = vessel.agent.agent_profile.agency_name
@@ -887,7 +895,7 @@ def vessel_out(vessel: Vessel) -> VesselOut:
             "agency_name": agency_name,
             "crew_count": vessel.total_crew,
             "total_crew": vessel.total_crew,
-            "status": effective_vessel_status(vessel),
+            "status": status,
         }
     )
 
@@ -958,6 +966,9 @@ def _start_return_call(db: Session, vessel: Vessel, body, *, agent_id, agency_na
     from app.services.historical_context import active_vessel_call
     from app.services.vessel_lifecycle import synchronize_vessel_lifecycle
 
+    # Close an unsynchronized elapsed call using its original ETD before the
+    # authorized return transition changes the canonical voyage dates.
+    synchronize_vessel_lifecycle(db, [vessel])
     open_call = active_vessel_call(db, vessel, create=False)
     if open_call is not None:
         started = open_call.started_at.strftime("%d %b %Y") if open_call.started_at else "an earlier date"
@@ -1007,10 +1018,12 @@ def _start_return_call(db: Session, vessel: Vessel, body, *, agent_id, agency_na
     # Reopening is what makes a call creatable again: active_vessel_call
     # refuses to manufacture one for a departed or unassigned vessel.
     vessel.agent_id = agent_id
+    # A returning port call needs a newly authorized pass validity.
+    vessel.shore_pass_valid_upto = None
     vessel.status = "Active"
     db.flush()
 
-    active_vessel_call(db, vessel)
+    active_vessel_call(db, vessel, allow_new_call=True)
     synchronize_vessel_lifecycle(db, [vessel])
     db.commit()
     db.refresh(vessel)
@@ -1073,6 +1086,8 @@ def create_vessel(body: VesselIn, current_user: User = Depends(get_current_user)
 
 @router.patch("/{vessel_id}", response_model=VesselOut)
 def update_vessel(vessel_id: int, body: VesselIn, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.role not in {"agent", "superadmin"}:
+        raise HTTPException(status_code=403, detail="Only agents or superadmins can edit vessels")
     vessel = db.query(Vessel).filter(Vessel.id == vessel_id).first()
     if not vessel:
         raise HTTPException(status_code=404, detail="Vessel not found")

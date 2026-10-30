@@ -58,6 +58,8 @@ class Settings:
     )
     REFRESH_TOKEN_EXPIRE_MINUTES = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", "43200"))  # 30 days
     APP_NAME = "OneMarinex API"
+    # Privacy floors cannot be configured below five distinct people.
+    WELFARE_MIN_RESPONDENTS = max(5, int(os.getenv("WELFARE_MIN_RESPONDENTS", "5")))
 
     # --- WhatsApp Business Cloud API (Meta Graph API) ---
     WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")

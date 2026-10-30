@@ -141,11 +141,51 @@ class DemoReports(unittest.TestCase):
         rows = [SimpleNamespace(review_type="driver", crew_id=i, rating=4) for i in range(7)]
         query = Mock()
         query.yield_per.return_value = iter(rows)
-        with patch("app.services.welfare_analytics.reviews_query", return_value=query) as source:
+        with patch("app.services.welfare_analytics.reviews_query", return_value=query) as source, patch("app.services.welfare_analytics.company_review_publication", return_value=rows) as disclosure:
             result = review_summary(None, self.anchor - timedelta(days=1), self.anchor, company_id=7, call_id=9)
+        disclosure.assert_called_once_with(None, rows, 7)
         self.assertEqual(result, summarize_review_rows(rows, suppress=True))
         self.assertEqual(source.call_args.args[3], 7)
         self.assertEqual(source.call_args.args[-1], 9)
+
+    def test_demo_survey_adapter_keeps_exact_public_fictional_context(self):
+        from app.api.v1.routes_welfare import statistics
+        fixture = create_demo_data(self.anchor)
+        source = fixture["surveys"]
+        calls = {call["id"]: call for call in fixture["calls"]}
+        with patch("app.api.v1.routes_welfare.statistics", wraps=statistics) as reducer:
+            result = survey_statistics(source)
+        records = reducer.call_args.args[0]
+        self.assertEqual(len(records), len(source))
+        for record, row in zip(records, source):
+            self.assertEqual(record.id, row["id"])
+            self.assertEqual(record.user_id, row["person_key"])
+            self.assertEqual(record.experience_at, datetime.fromisoformat(row["experience_at"]))
+            self.assertEqual(record.vessel_id, calls[row["call_id"]]["vessel_id"])
+            self.assertEqual(record.port_id, calls[row["call_id"]]["port_id"])
+            self.assertEqual(record.vessel_call_id, row["call_id"])
+            self.assertEqual(record.message, row["comment"])
+        self.assertTrue(reducer.call_args.kwargs["suppress"])
+        self.assertEqual(reducer.call_args.kwargs["publication_ids"]["population"], {row["id"] for row in source})
+        self.assertEqual(result["respondents"], 40)
+        self.assertEqual(result["satisfaction"]["denominator"], 34)
+        self.assertEqual(result["satisfaction"]["numerator"], 28)
+        self.assertEqual(result["unable_to_go_ashore"]["numerator"], 6)
+
+    def test_public_demo_rows_keep_distinct_minima_and_complement_protection(self):
+        from copy import deepcopy
+        source = deepcopy(create_demo_data(self.anchor)["surveys"][:6])
+        # Already-public fiction does not turn a single answer into a safe rate.
+        for index, row in enumerate(source):
+            row.update(went_ashore=True, barriers=[], satisfaction=3 if index==0 else 5)
+        result = survey_statistics(source)
+        self.assertEqual(result["respondents"], 6)
+        self.assertTrue(result["satisfaction"]["suppressed"])
+        self.assertIsNone(result["satisfaction"]["numerator"])
+        self.assertEqual(result["unable_to_go_ashore"]["numerator"], 0)
+        # Repeated copies of four synthetic people still do not become five.
+        self.assertTrue(survey_statistics(source[:4]+source[:1])["suppressed"])
+        self.assertEqual(survey_statistics([])["status"], "no_responses")
 
 
 if __name__ == "__main__":

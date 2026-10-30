@@ -1,7 +1,7 @@
 """Isolated fictional report adapter. No application records or writes."""
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from app.services.company_demo_fixture import FIXTURE_VERSION, PORTS, VESSELS, create_demo_data, month_start
+from app.services.company_demo_fixture import FIXTURE_VERSION, PORTS, VESSELS, SETUP, create_demo_data, month_start
 from app.services.company_report_templates import report_catalogue, report_options, REPORT_TYPES, SECTIONS
 from app.services.company_metrics import DICTIONARY_VERSION
 from app.services.company_demo_branding import branding
@@ -152,22 +152,38 @@ def prepare(params, anchor):
     result["charts"] = [
         {"section": "executive_summary", "kind": "line", "title": "Recorded call activity", "description": "Fictional calls intersecting the selected scope, grouped by arrival month.", "items": [{"label": m, "value": sum(c["month"] == m for c in calls)} for m in months]},
         {"section": "shore_leave", "kind": "line", "title": "Crew booking trend", "description": "Fictional passenger-seat activity. Repeat passengers can count again.", "items": [{"label": m, "value": sum(t["seats"] for t in started if t["month"] == m)} for m in months]},
-        {"section": "crew_experience", "kind": "line", "title": "Satisfaction trend", "unit": "%", "description": "Latest answer per synthetic person within each month; ratings of 4 or 5 out of 5. Privacy rules match Live.", "items": [survey_trend_item(m, surveys) for m in months]},
+        {"section": "crew_experience", "kind": "line", "title": "Satisfaction trend", "unit": "%", "description": "Latest answer per synthetic person within each month; ratings of 4 or 5 out of 5. Shared minimum-respondent and complementary-cell checks apply. These public fictional records do not establish Live disclosure eligibility.", "items": [survey_trend_item(m, surveys) for m in months]},
     ]
     result["approved_feedback"] = [{"context": "Fictional review - " + r["provider"], "text": r["comment"]} for r in reviews[:20]]
     return result
 
 
 def survey_statistics(rows):
-    # Use the existing Live reducer, including per-question identity deduplication
-    # and the five-person privacy boundary. No ORM records are constructed.
+    """Adapt only the server-owned fictional survey fixture to shared statistics.
+
+    Exact fictional context is retained, including the stable source ID/person,
+    experience time and recorded vessel/port. These already-public demonstration
+    rows have no hidden private source population. Declare their publication set
+    explicitly instead of pretending they passed Live tenant/history screening.
+    The shared reducer still enforces distinct per-question minima and binary/
+    categorical complements. No Live records, SQL session or writes are used.
+    """
     from app.api.v1.routes_welfare import statistics
+    from app.services.welfare_disclosure import QUESTIONS
     codes = {"Port access restriction": "gate_restriction", "Transport unavailable": "transport_unavailable", "Agent delay": "agent_pass_delayed", "Port processing delay": "immigration_delay", "Transport cost": "transport_expensive"}
+    ports_by_vessel = {vessel["id"]: setup["port_id"] for vessel, setup in zip(VESSELS, SETUP)}
     records = [SimpleNamespace(
-        id=index, user_id=row["person_key"], updated_at=aware(row["experience_at"]),
+        id=row["id"], user_id=row["person_key"], updated_at=aware(row["experience_at"]),
+        experience_at=aware(row["experience_at"]), vessel_id=row["vessel_id"],
+        port_id=ports_by_vessel[row["vessel_id"]], vessel_call_id=row["call_id"],
+        message=row["comment"],
         answers={"went_ashore": "YES" if row["went_ashore"] else "NO", "difficulty": "PREVENTED" if not row["went_ashore"] else "DELAYED" if row["barriers"] else "NONE", "barriers": [codes[b] for b in row["barriers"]], "extra_charge": {"Paid": "PAID", "Requested, not paid": "REQUESTED_NOT_PAID", "Not requested": "NOT_REQUESTED"}[row["extra_charge"]], "satisfaction": row["satisfaction"]},
-    ) for index, row in enumerate(rows)]
-    return statistics(records, suppress=True)
+    ) for row in rows]
+    public_ids = {record.id for record in records}
+    publication = {"population": public_ids}
+    publication.update({"question:"+key: public_ids for key in QUESTIONS})
+    publication.update({"rate:"+key: public_ids for key in ("difficulty", "extra_charge", "went_ashore", "satisfaction")})
+    return statistics(records, suppress=True, publication_ids=publication)
 
 
 def survey_trend_item(month, rows):

@@ -85,6 +85,9 @@ class ShoreLeaveAverageTests(unittest.TestCase):
         )
         self.db.add(self.vessel)
         self.db.flush()
+        # A report fixture represents a known historical call even when it
+        # has no crew/activity; a GET must never manufacture a departed call.
+        immutable_call(self.db, self.vessel, self.agent_profile.id)
 
         self.agent = SimpleNamespace(
             id=self.agent_user.id, role="agent",

@@ -50,29 +50,39 @@ def port_for_reference(db: Session, reference: Optional[str]) -> Optional[Port]:
     return db.query(Port).filter(or_(Port.code == value, Port.name == value)).first()
 
 
+def raw_open_vessel_call(db: Session, vessel: Optional[Vessel]) -> Optional[VesselCall]:
+    """Maintenance lookup; an open database row is not operational authority."""
+    if vessel is None:
+        return None
+    return (db.query(VesselCall).filter(
+        VesselCall.vessel_id == vessel.id, VesselCall.ended_at.is_(None)
+    ).order_by(VesselCall.id.desc()).first())
+
+
 def active_vessel_call(
     db: Session,
     vessel: Optional[Vessel],
     *,
     create: bool = True,
+    allow_new_call: bool = False,
 ) -> Optional[VesselCall]:
     if vessel is None:
         return None
-    call = (
-        db.query(VesselCall)
-        .filter(VesselCall.vessel_id == vessel.id, VesselCall.ended_at.is_(None))
-        .order_by(VesselCall.id.desc())
-        .first()
-    )
-    if call is not None or not create:
-        return call
+    from app.services.vessel_lifecycle import call_is_current, effective_vessel_status
+    call = raw_open_vessel_call(db, vessel)
+    if call is not None:
+        return call if call_is_current(call) else None
+    if not create:
+        return None
+    if not allow_new_call and db.query(VesselCall.id).filter(VesselCall.vessel_id == vessel.id).first():
+        # Read paths and manifest edits cannot reopen a finished voyage.
+        return None
 
     # A vessel call is an operational boundary, not a convenience row. Never
     # manufacture a new one while a vessel is outside current operations. The
     # lifecycle transition which reassigns/reopens a vessel must first make it
     # active and assign an agent explicitly.
-    stored_status = str(vessel.status or "").strip().lower()
-    if vessel.agent_id is None or stored_status in {"archived", "departed"}:
+    if vessel.agent_id is None or effective_vessel_status(vessel) not in {"Active", "Departing"}:
         return None
 
     agent = agent_profile_for_vessel(db, vessel)
@@ -109,7 +119,7 @@ def active_vessel_call(
         )
         if existing is None:
             raise
-        return existing
+        return existing if call_is_current(existing) else None
     # Reassigning an existing vessel starts a new call while keeping the
     # manifest rows. Materialise fresh call-specific assignments so subsequent
     # events do not fall back to person identity alone.
@@ -130,7 +140,7 @@ def active_vessel_call(
                 assignment_for_manifest(db, vessel, manifest)
         except IntegrityError:
             continue
-    return call
+    return call if call_is_current(call) else None
 
 
 def finish_vessel_call(
@@ -140,7 +150,7 @@ def finish_vessel_call(
     status: str = "ARCHIVED",
     ended_at: Optional[datetime] = None,
 ) -> None:
-    call = active_vessel_call(db, vessel, create=False)
+    call = raw_open_vessel_call(db, vessel)
     if call is None:
         return
     ended_at = ended_at or _utcnow()
@@ -156,7 +166,7 @@ def refresh_active_vessel_call(db: Session, vessel: Vessel) -> Optional[VesselCa
     """Refresh mutable voyage details while a call is still operational."""
     # Editing voyage metadata must never create a fresh call. Call creation is
     # reserved for vessel onboarding and an explicit reassignment transition.
-    call = active_vessel_call(db, vessel, create=False)
+    call = raw_open_vessel_call(db, vessel)
     if call is None:
         return None
     agent = agent_profile_for_vessel(db, vessel)
@@ -445,6 +455,7 @@ def eligible_assignments_for_profile(
     """All exact assignments this crew member can use for a new operation."""
     if profile is None:
         return []
+    from app.services.vessel_lifecycle import current_call_predicate
     return (
         db.query(CrewAssignment)
         .join(VesselCall, VesselCall.id == CrewAssignment.vessel_call_id)
@@ -452,9 +463,9 @@ def eligible_assignments_for_profile(
         .filter(
             CrewAssignment.crew_profile_id == profile.id,
             CrewAssignment.ended_at.is_(None),
-            VesselCall.ended_at.is_(None),
+            CrewAssignment.signed_off_at.is_(None),
+            current_call_predicate(),
             Vessel.agent_id.isnot(None),
-            func.lower(func.coalesce(Vessel.status, "")).notin_(["archived", "departed"]),
         )
         .order_by(CrewAssignment.started_at.desc(), CrewAssignment.id.desc())
         .all()

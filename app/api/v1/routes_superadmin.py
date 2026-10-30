@@ -1982,11 +1982,34 @@ def list_agent_vessels_superadmin(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent user not found")
         
-    vessels = db.query(Vessel).filter(Vessel.agent_id == agent.id).all()
-    for v in vessels:
-        if not v.agency_name and agent.agent_profile:
-            v.agency_name = agent.agent_profile.agency_name
-    return vessels
+    from app.db.models.vessel_call import VesselCall
+    # Retain previous handling relationships after a ship changes agency.
+    historical_ids = db.query(VesselCall.vessel_id).filter(
+        VesselCall.agency_id == agent.agent_profile.id
+    ) if agent.agent_profile else db.query(Vessel.id).filter(False)
+    vessels = db.query(Vessel).filter(or_(
+        Vessel.agent_id == agent.id, Vessel.id.in_(historical_ids)
+    )).all()
+    from app.services.vessel_lifecycle import current_call_predicate
+    current_ids = set(row[0] for row in db.query(VesselCall.vessel_id).filter(
+        VesselCall.agency_id == agent.agent_profile.id,
+        current_call_predicate(),
+    )) if agent.agent_profile else set()
+    output = []
+    for vessel in vessels:
+        mapped_call = db.query(VesselCall).filter(
+            VesselCall.vessel_id == vessel.id,
+            VesselCall.agency_id == agent.agent_profile.id,
+        ).order_by(VesselCall.id.desc()).first() if agent.agent_profile else None
+        current = vessel.id in current_ids
+        updates = {"agency_mapping_context": "current" if current else "historical",
+            "agency_mapping_call_id": mapped_call.id if mapped_call else None}
+        if mapped_call is not None:
+            updates.update(eta=mapped_call.eta, etd=mapped_call.etd, agency_name=mapped_call.agency_name)
+            if not current:
+                updates["status"] = "Archived" if str(mapped_call.status).upper() == "ARCHIVED" else "Departed"
+        output.append(vessel_out(vessel).model_copy(update=updates))
+    return output
 
 
 @router.get("/reviews")

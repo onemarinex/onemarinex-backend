@@ -85,6 +85,7 @@ class ShoreLeaveStatusTests(unittest.TestCase):
             agent_id=self.agent_user.id, name=_uniq("MV"),
             imo_number=_uniq("IMO"), vessel_type="Bulk Carrier",
             status="Active", agency_name=agency_name,
+            shore_pass_valid_upto=NOW + timedelta(days=2),
             eta=NOW - timedelta(days=1), etd=NOW + timedelta(days=3),
         )
         self.db.add(v)
@@ -92,7 +93,7 @@ class ShoreLeaveStatusTests(unittest.TestCase):
         return v
 
     def assign(self, vessel, *, eligible):
-        call = VesselCall(
+        call = self.db.query(VesselCall).filter_by(vessel_id=vessel.id).first() or VesselCall(
             vessel_id=vessel.id, agency_id=self.agency.id,
             vessel_name=vessel.name, imo_number=vessel.imo_number,
             port_name="port_test", status="ACTIVE",
@@ -113,6 +114,12 @@ class ShoreLeaveStatusTests(unittest.TestCase):
         return get_crew_profile(db=self.db, current_user=self.crew)
 
     def select(self, vessel):
+        existing = self.db.query(VesselCall).filter_by(vessel_id=vessel.id).first()
+        if existing is None:
+            self.db.add(VesselCall(vessel_id=vessel.id, vessel_name=vessel.name,
+                agency_name=vessel.agency_name, status="ACTIVE", started_at=NOW,
+                eta=vessel.eta, etd=vessel.etd))
+            self.db.flush()
         self.profile.selected_vessel_id = vessel.id
         self.profile.vessel = vessel.name
         self.db.flush()
@@ -166,7 +173,7 @@ class ShoreLeaveStatusTests(unittest.TestCase):
         result = self.card()
 
         self.assertIsNone(result.shore_leave_status)
-        self.assertFalse(result.cab_booking_locked)
+        self.assertTrue(result.cab_booking_locked)
 
     def test_pending_becomes_approved_once_the_agent_adds_them(self):
         """The transition the refresh action exists for."""

@@ -49,6 +49,7 @@ from app.services.booking_service import (
 )
 from app.services.port_time import (
     as_port_local,
+    utc_now,
     minutes_from_hhmm as _minutes_from_hhmm,
     port_clock_snapshot,
     port_closing_buffer_reason,
@@ -152,38 +153,6 @@ def _extract_package_duration_label(vehicle_name: str) -> str:
     column on CabBooking today. Best-effort extraction for WhatsApp copy."""
     match = re.search(r"(\d+)\s*h\s*Package", vehicle_name or "")
     return f"{match.group(1)} hours" if match else "N/A"
-
-
-def _compute_shore_pass_expiry(db: Session, port_name: Optional[str], out_time: datetime) -> datetime:
-    """Resolve a shore pass's real expiry from the port's configured
-    closing_time, anchored to out_time's date, rolling to the next day if
-    that closing time already passed today (same midnight-crossing heuristic
-    as heyports-frontend's isShoreLeaveValid() in CoordinatedTransfer.tsx).
-    Falls back to the prior +2 day placeholder if no PortRule/closing_time
-    is configured for this port."""
-    fallback = out_time + timedelta(days=2)
-    if not port_name:
-        return fallback
-
-    port = (
-        db.query(Port)
-        .filter((Port.code == port_name) | (Port.name == port_name))
-        .first()
-    )
-    candidates = [c for c in ([port.code, port.name, port_name] if port else [port_name]) if c]
-    rule = db.query(PortRule).filter(PortRule.port_name.in_(candidates)).first()
-    if not rule or not rule.closing_time:
-        return fallback
-
-    try:
-        hour, minute = (int(x) for x in rule.closing_time.split(":")[:2])
-    except (ValueError, AttributeError):
-        return fallback
-
-    expiry = out_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if expiry < out_time and hour < 12 and out_time.hour >= 12:
-        expiry = expiry + timedelta(days=1)
-    return expiry
 
 
 def is_partnered_agency(agency_name: Optional[str]) -> bool:
@@ -388,6 +357,10 @@ class CrewProfileOut(BaseModel):
     # Cab booking needs an agency to arrange it, so it is locked in exactly the
     # two states that have one but no permission yet.
     cab_booking_locked: bool = False
+    current_port_call: bool = False
+    vessel_context: str = "selected"
+    eligibility_reason: Optional[str] = None
+    shore_pass_valid_until: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -408,6 +381,9 @@ class ShorePassOut(BaseModel):
     approved_by_name: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    can_approve: bool = False
+    can_reject: bool = False
+    can_renew: bool = False
 
     class Config:
         from_attributes = True
@@ -959,9 +935,28 @@ def get_crew_profile(
             db, profile, crew_assignment_id
         )
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        # A saved selection may now be historical. Preserve its label without
+        # turning it back into an operational assignment.
+        from app.db.models.crew_assignment import CrewAssignment
+        assignment = db.query(CrewAssignment).filter(
+            CrewAssignment.id == crew_assignment_id,
+            CrewAssignment.crew_profile_id == profile.id,
+        ).first() if crew_assignment_id is not None else None
+        if assignment is None:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     output = CrewProfileOut.model_validate(profile)
+    from app.services.shore_leave_eligibility import shore_leave_decision
+    from app.services.vessel_lifecycle import call_is_current, effective_vessel_status
+    if assignment is None:
+        from app.db.models.crew_assignment import CrewAssignment
+        from app.db.models.vessel_call import VesselCall
+        previous = db.query(CrewAssignment).join(VesselCall).filter(
+            CrewAssignment.crew_profile_id == profile.id,
+        )
+        if profile.selected_vessel_id:
+            previous = previous.filter(VesselCall.vessel_id == profile.selected_vessel_id)
+        assignment = previous.order_by(CrewAssignment.started_at.desc(), CrewAssignment.id.desc()).first()
     if assignment is None:
         # No assignment, so the card turns on the vessel they chose. An agency
         # runs it and has not added them yet — PENDING, and waiting on someone
@@ -984,21 +979,32 @@ def get_crew_profile(
             ):
                 selected_agency = selected.agent.agent_profile.agency_name
         agency_managed = is_partnered_agency(selected_agency)
+        from app.services.historical_context import active_vessel_call
+        selected_call = active_vessel_call(db, selected, create=False)
+        current = selected_call is not None
         return output.model_copy(update={
             "mapping_status": "Unmapped",
             "shore_pass_eligible": False,
             "agency_name": selected_agency or "Other",
             "has_partnered_agency": agency_managed,
             "vessel_exists": selected is not None,
-            "shore_leave_status": "PENDING" if agency_managed else None,
+            "shore_leave_status": ("PENDING" if agency_managed else None) if current else ("NO_ACTIVE_CALL" if selected else None),
             # Waiting on an agent is still not permission to book a cab.
-            "cab_booking_locked": agency_managed,
+            "cab_booking_locked": agency_managed or not current,
+            "current_port_call": current,
+            "vessel_context": "selected" if current else "last_assigned",
+            "eligibility_reason": None if current and not agency_managed else ("Your agent has not added you to this port call's crew list." if current else "No active port call is available. Select your current vessel or contact your agent."),
+            "vessel_status": effective_vessel_status(selected) if selected else None,
         })
 
-    call = _assignment_call_or_conflict(assignment)
+    call = assignment.vessel_call
+    if call is None:
+        raise HTTPException(status_code=409, detail="The vessel assignment has no port-call context")
     vessel = call.vessel
     manifest = assignment.vessel_crew
     agency_name = call.agency_name or "Other"
+    decision = shore_leave_decision(db, assignment)
+    current = call_is_current(call) and assignment.ended_at is None and assignment.signed_off_at is None
     return output.model_copy(update={
         "sos_email": assignment.emergency_email,
         "current_port": call.port_name,
@@ -1008,18 +1014,20 @@ def get_crew_profile(
         "berth_assignment": vessel.berth_assignment if vessel else None,
         "eta": call.eta,
         "etd": call.etd,
-        "vessel_status": vessel.status if vessel else call.status,
+        "vessel_status": effective_vessel_status(vessel) if vessel else call.status,
         "expiry_date": manifest.expiry_date if manifest else None,
         "mapping_status": manifest.status if manifest else "Mapped",
-        "shore_pass_eligible": assignment.shore_pass_eligible,
+        "shore_pass_eligible": decision.eligible and decision.status == "ELIGIBLE",
         "agency_name": agency_name,
         "has_partnered_agency": is_partnered_agency(agency_name),
         "vessel_exists": vessel is not None,
         # An assignment exists, so the agent has decided one way or the other.
-        "shore_leave_status": (
-            "ELIGIBLE" if assignment.shore_pass_eligible else "NOT_ELIGIBLE"
-        ),
-        "cab_booking_locked": not assignment.shore_pass_eligible,
+        "shore_leave_status": decision.status,
+        "cab_booking_locked": not decision.eligible,
+        "current_port_call": current,
+        "vessel_context": "current" if current else "last_assigned",
+        "eligibility_reason": decision.reason,
+        "shore_pass_valid_until": decision.valid_until,
     })
 
 class SOSConfigIn(BaseModel):
@@ -1645,10 +1653,16 @@ def check_shorepass_eligibility(
     if not is_partnered_agency(agency_name):
         return {"under_agent": False, "agent_name": None}
 
+    from app.services.shore_leave_eligibility import shore_leave_decision
+    decision = shore_leave_decision(db, assignment)
     return {
         "under_agent": True,
         "agent_name": agency_name,
         "crew_assignment_id": assignment.id,
+        "eligible": decision.eligible,
+        "shore_leave_status": decision.status,
+        "reason": decision.reason,
+        "valid_until": decision.valid_until,
     }
 
 @router.post("/shorepass/{pass_id}/verify", response_model=ShorePassOut)
@@ -1664,25 +1678,36 @@ def verify_shorepass(
     shore_pass = db.query(ShorePass).filter(
         ShorePass.id == pass_id,
         ShorePass.crew_profile_id == profile.id
-    ).first()
-    
+    ).populate_existing().first()
+
     if not shore_pass:
         raise HTTPException(status_code=404, detail="Shore pass not found")
+
+    from app.db.models.crew_assignment import CrewAssignment
+    from app.services.shore_leave_eligibility import shore_leave_decision, lock_shore_leave_context
+    assignment_id = db.query(CrewAssignment.id).filter(
+        CrewAssignment.id == shore_pass.crew_assignment_id,
+        CrewAssignment.crew_profile_id == profile.id,
+        CrewAssignment.vessel_call_id == shore_pass.vessel_call_id,
+    ).scalar()
+    assignment, passes = lock_shore_leave_context(db, assignment_id)
+    if not passes or passes[0].id != shore_pass.id:
+        raise HTTPException(409, "This shore pass is historical or has been superseded")
+    shore_pass = passes[0]
+    if shore_pass.crew_profile_id != profile.id:
+        raise HTTPException(404, "Shore pass not found")
+    decision = shore_leave_decision(db, assignment, lock_pass=True)
+    if not decision.eligible or decision.status != "ELIGIBLE":
+        raise HTTPException(409, decision.reason or "Shore leave is not currently authorized")
     
     # Auto-match / Verify logic
     shore_pass.status = "approved"
     shore_pass.is_verified = True
     
-    # In a real scenario, we might look up the agent who added the crew
-    # For now, we'll set a default name if it's auto-matched
-    if not shore_pass.approved_by_name:
-        shore_pass.approved_by_name = "Vikram Patel" # Default as per screenshot
-    
     # Set default times if agent didn't set them
     if not shore_pass.out_time:
-        shore_pass.out_time = datetime.now()
-    if not shore_pass.expires_at:
-        shore_pass.expires_at = _compute_shore_pass_expiry(db, shore_pass.port_name, shore_pass.out_time)
+        shore_pass.out_time = utc_now()
+    shore_pass.expires_at = decision.valid_until
     if not shore_pass.in_time:
         shore_pass.in_time = shore_pass.expires_at
 
@@ -2299,12 +2324,24 @@ def get_pickup_availability(
     )
 
 
+def _require_booking_entitlement(db, assignment, *, refresh=False):
+    from app.services.shore_leave_eligibility import shore_leave_decision, lock_shore_leave_context
+    if refresh and assignment is not None:
+        assignment, _ = lock_shore_leave_context(db, assignment.id)
+    decision = shore_leave_decision(db, assignment, lock_pass=refresh)
+    if not decision.eligible:
+        raise HTTPException(409, decision.reason or "Shore leave is not currently authorized")
+    return decision
+
+
 @router.post("/cab/book", response_model=CabBookingCreateOut)
 def book_cab(
     body: CabBookingCreateIn,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    if current_user.role != "crew":
+        raise HTTPException(403, "Only crew can book cab services")
     profile = db.query(CrewProfile).filter(CrewProfile.user_id == current_user.id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Crew profile not found")
@@ -2395,6 +2432,8 @@ def book_cab(
         from app.services.historical_context import self_selected_assignment
 
         booking_assignment = self_selected_assignment(db, profile, booking_call)
+
+    _require_booking_entitlement(db, booking_assignment)
 
 
     from app.db.models.cab_booking import VehicleType, BookingStatus, RideType
@@ -2633,6 +2672,9 @@ def book_cab(
         status=BookingStatus.PENDING_PROVIDER_RESPONSE,
     )
 
+    # Provider discovery and route calculations can cross expiry/departure.
+    # Refresh and lock authorization sources before the final decision.
+    _require_booking_entitlement(db, booking_assignment, refresh=True)
     db.add(new_booking)
     db.flush()
 

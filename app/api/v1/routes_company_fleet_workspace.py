@@ -621,6 +621,7 @@ def parse_rows(db, company_id, draft, mapping):
         }
         state = "INVALID"
         message = ""
+        field_errors = []
         row = None
         try:
             if any(v.startswith(("=", "+", "@")) for v in values.values()):
@@ -655,19 +656,22 @@ def parse_rows(db, company_id, draft, mapping):
                 "DUPLICATE": "An overlapping role already exists in your fleet or this file.",
             }[state]
         except (ValueError, ValidationError) as exc:
-            text = str(exc)
             state = "INVALID"
-            message = (
-                text.split("\n")[0]
-                if not isinstance(exc, ValidationError)
-                else "; ".join(str(error["msg"]).removeprefix("Value error, ") for error in exc.errors(include_url=False))
-            )
+            if isinstance(exc, ValidationError):
+                for error in exc.errors(include_url=False):
+                    field = str(error["loc"][-1]) if error["loc"] else "row"
+                    detail = str(error["msg"]).removeprefix("Value error, ")
+                    field_errors.append({"field": field, "message": detail})
+                message = "; ".join(f"{FIELD_LABELS.get(item['field'], item['field'])}: {item['message']}" for item in field_errors)
+            else:
+                message = str(exc).split("\n")[0]
         findings.append(
             dict(
                 row=index,
                 imo_number=str(values.get("imo_number", "")),
                 status=state,
                 message=message,
+                field_errors=field_errors,
             )
         )
         parsed.append(row if state in ("ACCEPTED", "CONFLICT", "IDENTITY_REVIEW") else None)

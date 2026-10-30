@@ -11,6 +11,7 @@ back, so it leaves no rows behind.
 
 import unittest
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import app.db.base  # noqa: F401 — registers every model on Base
@@ -23,6 +24,9 @@ from app.api.v1.routes_agents import (
     get_shore_pass_requests,
     reject_shore_pass,
 )
+from app.db.models.agent_profile import AgentProfile
+from app.db.models.crew_assignment import CrewAssignment
+from app.db.models.vessel_call import VesselCall
 from app.db.models.crew_profile import CrewProfile
 from app.db.models.shore_pass import ShorePass
 from app.db.models.user import User
@@ -63,9 +67,20 @@ class ShorePassScopingTests(unittest.TestCase):
                         vessel_type="Bulk Carrier", status="Active")
         self.db.add_all([crew, vessel])
         self.db.flush()
-        self.db.add(VesselCrew(vessel_id=vessel.id, name="Crew", rank="able_seaman", hp_id=hpid))
+        agency = AgentProfile(user_id=agent_user.id, agency_name=_uniq("Agency"), location="Port", assigned_port=self.PORT)
+        self.db.add(agency); self.db.flush()
+        manifest = VesselCrew(vessel_id=vessel.id, name="Crew", rank="able_seaman", hp_id=hpid,
+            shore_pass_eligible=True, shore_pass_valid_upto=datetime.now(timezone.utc)+timedelta(days=1))
+        call = VesselCall(vessel_id=vessel.id, agency_id=agency.id, vessel_name=vessel.name,
+            agency_name=agency.agency_name, started_at=datetime.now(timezone.utc)-timedelta(hours=1))
+        self.db.add_all([manifest, call]); self.db.flush()
+        assignment = CrewAssignment(vessel_call_id=call.id, crew_profile_id=crew.id,
+            vessel_crew_id=manifest.id, crew_name="Crew", shore_pass_eligible=True,
+            started_at=call.started_at)
+        self.db.add(assignment); self.db.flush()
 
-        sp = ShorePass(crew_profile_id=crew.id, shore_pass_id=_uniq("SP"),
+        sp = ShorePass(crew_profile_id=crew.id, crew_assignment_id=assignment.id,
+                       vessel_call_id=call.id, shore_pass_id=_uniq("SP"),
                        port_name=self.PORT, vessel_name=vessel.name, status="pending")
         self.db.add(sp)
         self.db.flush()

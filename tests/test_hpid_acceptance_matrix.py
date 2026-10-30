@@ -43,6 +43,7 @@ from app.db.models.vessel_crew import VesselCrew
 from app.db.session import engine
 from app.services.historical_context import (
     active_assignment_for_profile,
+    active_vessel_call,
     assignment_for_manifest,
     finish_vessel_call,
 )
@@ -191,6 +192,8 @@ class AcceptanceMatrixTests(unittest.TestCase):
         first = self._join(vessel)
         first_reference = first.public_ref
         self._close_call(vessel)
+        # Model an explicit authorized new call, not a manifest-triggered reopen.
+        active_vessel_call(self.db, vessel, allow_new_call=True)
 
         second = self._join(vessel)
         self.assertNotEqual(second.id, first.id)
@@ -295,6 +298,7 @@ class DuplicateManifestRowTests(AcceptanceMatrixTests):
         self._join(vessel)
         self._manifest(vessel)  # the duplicate the agent left behind
         self._close_call(vessel)
+        active_vessel_call(self.db, vessel, allow_new_call=True)
 
         reopened = self._join(vessel)
         self.assertIsNotNone(reopened)
