@@ -24,6 +24,32 @@ def scope_digest(scope):
     return hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
 
 
+def publication_for_report(db, company_id, body):
+    """Call filters must not split a published month/port/vessel cohort.
+
+    The dashboard publishes complete canonical cells. Two calls of one vessel
+    at the same port/month are not separate publication cells. Releasing one
+    of them could expose a small complement through subtraction.
+    """
+    from app.api.v1.routes_welfare import selected_rows, survey_publication_ids
+    publication = survey_publication_ids(db, company_id)
+    if body.call_id is None:
+        return publication
+    cache = db.info.setdefault("company_report_publication", {})
+    key = (company_id, body.start, body.end, body.port_id, body.vessel_id, body.country_code, body.call_id)
+    if key not in cache:
+        rows = list(selected_rows(db, body.start, body.end, company_id, body.port_id,
+                                  body.vessel_id, body.country_code).yield_per(500))
+        cells = {}
+        def cell(row):
+            return (aware(row.experience_at).strftime("%Y-%m"), row.port_id, row.vessel_id)
+        for row in rows:
+            cells.setdefault(cell(row), set()).add(row.vessel_call_id)
+        whole_cells = {row.id for row in rows if cells[cell(row)] == {body.call_id}}
+        cache[key] = {name: ids & whole_cells for name, ids in publication.items()}
+    return cache[key]
+
+
 def safety_payload(db, company_id, body, call_ids):
     from app.api.v1.routes_company_disclosure import escalation_for, case_time, permitted_data, request_out
 
@@ -91,7 +117,8 @@ def enrich(db, company, body, payload, calls):
     for call in payload["calls"]:
         for dimension in groups:
             row = groups[dimension].setdefault(call[dimension + "_id"], {
-                "name": call[dimension + "_name"], "recorded_calls": 0,
+                "name": "Port not recorded" if dimension == "port" and call["port_id"] is None else call[dimension + "_name"],
+                "identity_recorded": call[dimension + "_id"] is not None, "recorded_calls": 0,
                 "booked_rides": 0, "started_passenger_seats": 0,
             })
             row["recorded_calls"] += 1
@@ -148,16 +175,24 @@ def enrich(db, company, body, payload, calls):
     # The same reducers drive welfare pages and report comparisons. No raw
     # feedback or person identifiers are embedded in report snapshots.
     from app.api.v1.routes_welfare import selected_rows, statistics
+    publication_ids = publication_for_report(db, company.id, body)
     from app.services.welfare_analytics import operational
     if set(payload["configuration"]["sections"]) & {"port_comparison","port_details"}:
         for port_id, row in groups["port"].items():
+            if port_id is None:
+                row.update(access_percent=None, satisfaction_percent=None, obstacle_percent=None, respondents=None, average_time_ashore_minutes=None, facilities_visited=None, calls_with_shore_leave=None, coverage="Port identity not recorded")
+                continue
             op = operational(db,body.start,body.end,company.id,port_id,body.vessel_id,body.country_code,call_id=body.call_id)
             surveys = selected_rows(db,body.start,body.end,company.id,port_id,body.vessel_id,body.country_code)
             if body.call_id is not None:
                 surveys = surveys.filter(WelfareFeedback.vessel_call_id==body.call_id)
-            survey = statistics(list(surveys.yield_per(500)),True)
+            survey = statistics(list(surveys.yield_per(500)), True, publication_ids)
             row.update(access_percent=None if (survey.get("unable_to_go_ashore") or {}).get("percent") is None else 100-(survey.get("unable_to_go_ashore") or {}).get("percent"),
                 satisfaction_percent=(survey.get("satisfaction") or {}).get("percent"), obstacle_percent=(survey.get("obstacles") or {}).get("percent"),
+                access_status=(survey.get("unable_to_go_ashore") or {}).get("status", survey["status"]),
+                satisfaction_status=(survey.get("satisfaction") or {}).get("status", survey["status"]),
+                obstacle_status=(survey.get("obstacles") or {}).get("status", survey["status"]),
+                respondent_status=survey["status"],
                 respondents=survey["respondents"], average_time_ashore_minutes=op.get("average_journey_time_ashore_minutes"),
                 facilities_visited=op["facilities_visited"], calls_with_shore_leave=op["calls_with_shore_leave"])
         payload["port_comparison"] = sorted(groups["port"].values(),key=lambda row:row["name"] or "")
@@ -173,16 +208,32 @@ def enrich(db, company, body, payload, calls):
             surveys=selected_rows(db,cursor,stop,company.id,body.port_id,body.vessel_id,body.country_code)
             if body.call_id is not None:
                 surveys=surveys.filter(WelfareFeedback.vessel_call_id==body.call_id)
-            survey=statistics(list(surveys.yield_per(500)),True)
-            monthly.append({"label":cursor.strftime("%b %Y"),"bookings":op["crew_participation"],"satisfaction":(survey.get("satisfaction") or {}).get("percent"),"obstacles":(survey.get("obstacles") or {}).get("percent")})
+            survey=statistics(list(surveys.yield_per(500)), True, publication_ids)
+            monthly.append({"label":cursor.strftime("%b %Y"),"bookings":op["crew_participation"],"satisfaction":(survey.get("satisfaction") or {}).get("percent"),"obstacles":(survey.get("obstacles") or {}).get("percent"),
+                            "satisfaction_status":(survey.get("satisfaction") or {}).get("status",survey["status"]),
+                            "obstacles_status":(survey.get("obstacles") or {}).get("status",survey["status"])})
             cursor=stop
         for section,title,field,unit in [("shore_leave","Crew booking trend","bookings",""),("crew_experience","Satisfaction trend","satisfaction","%"),("obstacles","Reported obstacle trend","obstacles","%")]:
-            payload["charts"].append({"section":section,"kind":"line","title":title,"unit":unit,"items":[{"label":row["label"],"value":row[field]} for row in monthly]})
-    payload["findings"] = [f"The selected scope contains {len(calls)} recorded port calls across {len(groups['vessel'])} vessels and {len(groups['port'])} ports.",
-        "Crew bookings count passenger seats on started rides. Repeat passengers can count again."]
+            payload["charts"].append({"section":section,"kind":"line","title":title,"unit":unit,"items":[{"label":row["label"],"value":row[field],"status":row.get(field+"_status"),"suppressed":row.get(field+"_status")=="insufficient_sample"} for row in monthly]})
+    payload["findings"] = []
+    unknown = payload["summary"].get("calls_without_port", 0)
+    if unknown:
+        payload["findings"].append(f"Port identity is not recorded for {unknown} calls. These calls are listed separately from named ports.")
+    if payload.get("survey", {}).get("status") == "no_responses":
+        payload["findings"].append("No crew survey responses are recorded for the survey coverage period.")
+    if any(welfare_projection(payload).values()):
+        scoped = selected_rows(db, body.start, body.end, company.id, body.port_id, body.vessel_id, body.country_code)
+        if body.call_id is not None:
+            scoped = scoped.filter(WelfareFeedback.vessel_call_id == body.call_id)
+        source_ids = {row[0] for row in scoped.with_entities(WelfareFeedback.id)}
+        # Only a digest leaves the server: never expose source or person IDs.
+        # Counts alone cannot prove that the same people remain publishable.
+        support = {key: sorted(ids & source_ids) for key, ids in publication_ids.items()}
+        payload["survey_publication_fingerprint"] = scope_digest({"policy": 1, "support": support})
 
 
 def revalidate(db, company_id, payload):
+    revalidate_welfare(db, company_id, payload)
     from app.api.v1.routes_company_disclosure import escalation_for, permitted_data, request_out
 
     originals = payload.get("fleet_authorization", [])
@@ -206,3 +257,43 @@ def revalidate(db, company_id, payload):
         scope = dict(grant.approved_scope, fields=original["fields"])
         scope["approved_values"] = {k: v for k, v in scope.get("approved_values", {}).items() if k in original["fields"]}
         permitted_data(db, grant, scope)
+
+
+def welfare_projection(payload):
+    """Publication-bearing values only; exclude operational and presentation changes."""
+    fields = ("access_percent", "satisfaction_percent", "obstacle_percent", "respondents",
+              "access_status", "satisfaction_status", "obstacle_status", "respondent_status")
+    ports = sorted([(row.get("name"), {key: row.get(key) for key in fields})
+                    for row in payload.get("port_comparison", []) if any(key in row for key in fields)], key=lambda r: str(r[0]))
+    survey = dict(payload.get("survey") or {})
+    for key in ("coverage", "coverage_note", "period", "period_note", "field_map"):
+        survey.pop(key, None)
+    comparison = payload.get("comparison") or {}
+    comparison_rows = comparison.get("rows", []) if comparison.get("dimension") == "port" else []
+    port_export = sorted([(row.get("name"), {key: row.get(key) for key in fields})
+                          for row in comparison_rows if any(key in row for key in fields)], key=lambda r: str(r[0]))
+    return {"survey": survey, "ports": ports, "port_export": port_export,
+            "trends": [{"section": chart.get("section"), "items": chart.get("items")}
+                       for chart in payload.get("charts", []) if chart.get("section") in ("crew_experience", "obstacles")]}
+
+
+def revalidate_welfare(db, company_id, payload):
+    """Never rewrite history. Refuse stale releases at all saved-report sinks.
+
+    Recompute the same scope under today's global publication policy. If its
+    welfare release changes, require a new report; an old snapshot cannot be
+    combined with the current dashboard to recover a protected complement.
+    Reports without survey-bearing data do not need this extra query.
+    """
+    original = welfare_projection(payload)
+    if not any(original.values()):
+        return
+    from app.api.v1.routes_company_reports import prepare, ReportIn
+    from app.db.models.shipping_company import ShippingCompany
+    if not payload.get("filters") or not payload.get("survey_publication_fingerprint"):
+        raise HTTPException(403, "Regenerate this report under current survey privacy rules.")
+    company = db.get(ShippingCompany, company_id)
+    body = ReportIn.model_validate(payload["filters"])
+    current = prepare(db, company, body)
+    if payload["survey_publication_fingerprint"] != current.get("survey_publication_fingerprint") or original != welfare_projection(current):
+        raise HTTPException(403, "Survey publication coverage changed. Generate a new report.")
