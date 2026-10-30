@@ -28,7 +28,7 @@ class CompanyPDF(unittest.TestCase):
         self.assertEqual(len(pages), 1)
         text = pages[0].extract_text()
         for value in ("Aster Maritime", "Executive Fleet Intelligence", "FICTIONAL DATA", "Page 1 of 1", "Powered by HeyPorts", "Recorded call activity", "Crew bookings"):
-            self.assertIn(value, text)
+            self.assertIn(value, " ".join(text.split()))
         self.assertNotIn("commenced passenger-seat events", text)
         self.assertGreater(pages[0].get_contents().get_data().count(b" l"), 4)
         self.assertFalse(pages[0].images)
@@ -52,7 +52,7 @@ class CompanyPDF(unittest.TestCase):
             original = copy.deepcopy(data)
             pages = self.pages(render_report(data))
             text = "\n".join(page.extract_text() for page in pages)
-            self.assertIn(REPORT_TYPES[kind], text)
+            self.assertIn(REPORT_TYPES[kind], " ".join(text.split()))
             for n, page in enumerate(pages, 1):
                 self.assertIn(f"Page {n} of {len(pages)}", page.extract_text())
             self.assertEqual(data, original)
@@ -99,6 +99,42 @@ class CompanyPDF(unittest.TestCase):
         page = self.pages(render_report(data))[0]
         self.assertFalse(page.images)
         self.assertIn("Aster Maritime", page.extract_text())
+
+    def test_first_page_has_one_large_title_and_continuations_use_compact_headers(self):
+        data = payload("FLEET", vessels=100)
+        pages = self.pages(render_report(data, {"sections": ["detailed_tables"]}))
+        self.assertGreater(len(pages), 1)
+        first = " ".join(pages[0].extract_text().split())
+        self.assertEqual(first.count("Fleet Operations"), 1)
+        self.assertIn("COMPANY INTELLIGENCE REPORT", first)
+        sizes = []
+        for page in pages[:2]:
+            records = []
+            page.extract_text(visitor_text=lambda value, cm, tm, font, size: records.append((value, size)))
+            sizes.append(max(size for value, size in records if "Fleet" in value or "Operations" in value))
+        self.assertGreaterEqual(sizes[0], 17)
+        self.assertLessEqual(sizes[1], 10)
+        self.assertNotIn("COMPANY INTELLIGENCE REPORT", pages[1].extract_text())
+        self.assertIn("Page 2 of", pages[1].extract_text())
+
+    def test_wide_tall_and_transparent_logos_are_large_proportional_and_bounded(self):
+        from app.services.company_pdf_components import WIDTH
+        for width, height in [(800, 200), (200, 800), (300, 300)]:
+            logo = io.BytesIO()
+            Image.new("RGBA", (width, height), (8, 127, 131, 150)).save(logo, format="PNG")
+            data = payload()
+            data["branding"].update(name="Long Legal Company Name " * 8, logo="data:image/png;base64," + base64.b64encode(logo.getvalue()).decode())
+            page = self.pages(render_report(data))[0]
+            placements = []
+            page.extract_text(visitor_operand_before=lambda op, args, cm, tm: placements.append(cm[:]) if op == b"Do" else None)
+            self.assertEqual(len(placements), 1)
+            matrix = placements[0]
+            drawn_width, drawn_height = abs(matrix[0]), abs(matrix[3])
+            self.assertAlmostEqual(drawn_width / drawn_height, width / height, places=4)
+            self.assertLessEqual(drawn_width, WIDTH / 2 - 38 + .01)
+            self.assertLessEqual(drawn_height, 99.01)
+            self.assertTrue(drawn_width > 64 or drawn_height > 39)
+            self.assertTrue(page.images)
 
     def test_legacy_disclosure_keeps_long_approved_content_and_escapes_markup(self):
         note = "Approved <note> & context " * 450

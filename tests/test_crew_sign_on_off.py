@@ -191,10 +191,12 @@ class SignOnOffTests(unittest.TestCase):
 
         from app.api.v1 import routes_crew
 
-        source = _inspect.getsource(routes_crew)
-        for field in ("signed_on_at", "signed_off_at"):
-            self.assertNotIn(
-                field, source,
-                f"routes_crew must not set {field}: an agent confirms a "
-                "movement, a cab ride does not",
-            )
+        import ast
+        tree = ast.parse(_inspect.getsource(routes_crew))
+        # Reading sign-off is required to deny stale entitlements; only writing
+        # a confirmed movement from the crew/booking flow breaks this invariant.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+                self.assertNotIn(node.attr, {"signed_on_at", "signed_off_at"})
+            if isinstance(node, ast.keyword):
+                self.assertNotIn(node.arg, {"signed_on_at", "signed_off_at"})

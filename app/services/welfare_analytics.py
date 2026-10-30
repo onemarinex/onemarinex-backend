@@ -12,6 +12,7 @@ from app.services.event_origin import resolved_origin
 from app.services.company_aggregates import tenure_scoped
 from app.services.company_access import covering_claim
 from app.services.welfare_scope import filter_country
+from app.services.welfare_disclosure import threshold, month_window, eligible_rows, screened_text, status
 
 
 def aware(dt):
@@ -34,6 +35,8 @@ def merged_minutes(intervals):
 
 
 def operational_query(db,start,end,company_id=None,port_id=None,vessel_id=None,country_code=None,call_id=None):
+    if company_id:
+        start, end = month_window(start, end)
     query = (
         db.query(CabBooking)
         .join(VesselCall, VesselCall.id == CabBooking.vessel_call_id)
@@ -75,6 +78,8 @@ def operational(
     call_limit=25,
     call_id=None,
 ):
+    if company_id:
+        start, end = month_window(start, end)
     query = operational_query(db,start,end,company_id,port_id,vessel_id,country_code,call_id)
     call_groups = query.with_entities(
         VesselCall.id.label("call_id"),
@@ -107,7 +112,18 @@ def operational(
     seats = 0
     people = set()
     complete_people = True
-    completed_journeys = 0
+    # Completion is attributed to completion time, including cross-month journeys.
+    completions = db.query(CabBooking).join(VesselCall, VesselCall.id == CabBooking.vessel_call_id).filter(resolved_origin(CabBooking), CabBooking.status != BookingStatus.CANCELLED, CabBooking.trip_completed_at >= start, CabBooking.trip_completed_at < end)
+    if company_id:
+        completions = tenure_scoped(db, completions, company_id=company_id, vessel_column=CabBooking.vessel_id, occurred_column=CabBooking.trip_completed_at, include_declared=True)
+    if port_id:
+        completions = completions.filter(VesselCall.port_id == port_id)
+    if vessel_id:
+        completions = completions.filter(CabBooking.vessel_id == vessel_id)
+    if call_id is not None:
+        completions = completions.filter(CabBooking.vessel_call_id == call_id)
+    completions = filter_country(completions, VesselCall.port_id, country_code)
+    completed_journeys = completions.count()
     call_ids = set()
     spans = {}
     journey_intervals = []
@@ -121,8 +137,6 @@ def operational(
             complete_people = False
         else:
             people.add(b.crew_id)
-        if b.trip_completed_at and start <= aware(b.trip_completed_at) < end:
-            completed_journeys += 1
         seats += volume
         call_ids.add(call.id)
         link = b.magic_link
@@ -191,8 +205,9 @@ def operational(
         call_query = call_query.filter(VesselCall.id == call_id)
     call_query = filter_country(call_query, VesselCall.port_id, country_code)
     recorded = call_query.count()
-    private_duration = bool(company_id and len(minutes) < 5)
+    private_duration = bool(company_id and 0 < len(minutes) < threshold())
     return {
+        "metric_states": {"average_time_ashore_minutes": status(sum(minutes)/len(minutes) if minutes else None, suppressed=private_duration), "average_journey_time_ashore_minutes": status(sum(journey_intervals)/len(journey_intervals) if journey_intervals else None, suppressed=bool(company_id and journey_intervals and len(duration_people)<threshold())), "welfare_service_bookings": "unavailable", "distinct_crew": status(len(people) if complete_people else None)},
         "recorded_calls": recorded,
         "calls_with_shore_leave_share": (
             len(call_ids) * 100 / recorded if recorded else None
@@ -202,8 +217,8 @@ def operational(
         "completed_journeys": completed_journeys,
         "participation_unit": "Passenger seats on commenced rides. Repeat passengers can count again.",
         "calls_with_shore_leave": len(call_ids),
-        "average_journey_time_ashore_minutes": (sum(journey_intervals)/len(journey_intervals) if journey_intervals and (not company_id or len(duration_people)>=5) else None),
-        "journey_duration_sample_people": len(duration_people) if not company_id or len(duration_people)>=5 else None,
+        "average_journey_time_ashore_minutes": (sum(journey_intervals)/len(journey_intervals) if journey_intervals and (not company_id or len(duration_people)>=threshold()) else None),
+        "journey_duration_sample_people": len(duration_people) if not company_id or len(duration_people)>=threshold() else None,
         "completed_ashore_journeys": len(journey_intervals),
         "journey_duration_coverage": "Mean per completed recorded pickup-to-port journey. Requires five distinct linked people for company statistics. Taxi completion does not prove vessel boarding.",
         "average_time_ashore_minutes": (
@@ -233,16 +248,19 @@ def reviews_query(
     provider_id=None,
     call_id=None,
 ):
+    if company_id and start is not None:
+        start, end = month_window(start, end)
     query = (
         db.query(BookingReview)
         .join(CabBooking, CabBooking.id == BookingReview.booking_id)
         .join(VesselCall, VesselCall.id == CabBooking.vessel_call_id)
         .filter(
             resolved_origin(CabBooking),
-            BookingReview.created_at >= start,
-            BookingReview.created_at < end,
+
         )
     )
+    if start is not None:
+        query = query.filter(BookingReview.created_at >= start, BookingReview.created_at < end)
     if port_id:
         query = query.filter(VesselCall.port_id == port_id)
     if vessel_id:
@@ -297,4 +315,30 @@ def review_summary(
     )
     from app.services.company_review_statistics import summarize_review_rows
 
-    return summarize_review_rows(query.yield_per(500), suppress=bool(company_id))
+    rows = list(query.yield_per(500))
+    if company_id:
+        rows = company_review_publication(db, rows, company_id)
+    return summarize_review_rows(rows, suppress=bool(company_id))
+
+
+def review_variant(row):
+    import json
+    b = row.booking
+    return json.dumps((b.provider_id or b.aggregator_id, row.review_type, row.facility_name, row.rating, screened_text(row.review_text)))
+
+
+def safe_review_rows(rows):
+    from sqlalchemy.orm import object_session
+    def cell(row):
+        b = row.booking
+        call = object_session(row).get(VesselCall, b.vessel_call_id) if b.vessel_call_id else None
+        return row.created_at.strftime("%Y-%m"), call.port_id if call else None, b.vessel_id
+    return eligible_rows(rows, person=lambda r:r.crew_id, cell=cell, variant=review_variant)
+
+
+def company_review_publication(db, rows, company_id):
+    cache = db.info.setdefault("welfare_review_publication", {})
+    if company_id not in cache:
+        universe = reviews_query(db, None, None, company_id).all()
+        cache[company_id] = {r.id for r in safe_review_rows(universe)}
+    return [r for r in rows if r.id in cache[company_id]]

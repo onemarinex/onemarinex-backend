@@ -2,7 +2,7 @@
 
 from typing import Optional, Literal
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -17,6 +17,7 @@ from app.db.models.welfare_feedback import WelfareFeedback
 from app.db.models.incident import Incident
 from app.services.company_aggregates import tenure_scoped
 from app.services.welfare_scope import filter_country
+from app.services.welfare_disclosure import threshold, month_window, eligible_rows, screened_text, safe_answers, FIELD_MAP, QUESTIONS, status, screened_facility
 from app.db.models.port_geography import PortGeography
 from app.db.models.port import Port
 from app.db.models.shipping_company import CompanyAuditEvent
@@ -274,6 +275,8 @@ def selected_rows(
         raise HTTPException(422, "Use a valid time range with time zones.")
     if (end - start).days > 1096:
         raise HTTPException(422, "Choose a range of at most three years.")
+    if company_id:
+        start, end = month_window(start, end)
     query = db.query(WelfareFeedback).filter(
         WelfareFeedback.experience_at >= start, WelfareFeedback.experience_at < end
     )
@@ -290,17 +293,58 @@ def selected_rows(
             occurred_column=WelfareFeedback.experience_at,
             include_declared=True,
         )
-    return filter_country(query, WelfareFeedback.port_id, country_code)
+    query = filter_country(query, WelfareFeedback.port_id, country_code)
+    return query
 
 
-def statistics(rows, suppress=False):
+def survey_publication_ids(db, company_id):
+    """Request-local global eligibility makes port/date/vessel unions composable.
+
+    Population and each question release independently. Rare details never hide
+    an unrelated safe question; the detailed explorer additionally screens the
+    joint signature to prevent recombining fields into an individual profile.
+    """
+    import json
+    cache = db.info.setdefault("welfare_survey_publication", {})
+    if company_id not in cache:
+        query = tenure_scoped(db, db.query(WelfareFeedback).filter(WelfareFeedback.experience_at.isnot(None)), company_id=company_id, vessel_column=WelfareFeedback.vessel_id, occurred_column=WelfareFeedback.experience_at, include_declared=True)
+        universe = query.all()
+        variants = {"population": lambda r:"respondent", "detail": None}
+        for key in QUESTIONS:
+            variants["question:"+key] = lambda r,key=key:json.dumps((r.answers or {}).get(key),sort_keys=True)
+        positives = {"difficulty": {"DELAYED", "PREVENTED"}, "extra_charge": {"REQUESTED_NOT_PAID", "PAID"}, "went_ashore": {"NO"}, "satisfaction": {4,5}}
+        for key, values in positives.items():
+            variants["rate:"+key] = lambda r,key=key,values=values:"missing" if (r.answers or {}).get(key) is None else str((r.answers or {}).get(key) in values)
+        cache[company_id] = {key:{r.id for r in eligible_rows(universe, variant=variant)} for key, variant in variants.items()}
+    return cache[company_id]
+
+
+def statistics(rows, suppress=False, publication_ids=None):
+    # Coverage is deliberately constant for company publication: a conditional
+    # partial/complete flag would itself disclose excluded cohort existence.
+    publication_coverage = {
+        "coverage_status": "partial_withheld" if suppress else "all_recorded",
+        "coverage_note": (
+            "Privacy-protected survey coverage. Figures describe published cohorts only and may exclude restricted responses; they are not totals for all source responses."
+            if suppress else
+            "All recorded survey responses in the authorized source scope. Missing answers are excluded per question."
+        ),
+    }
+    # Canonical publication leaves prevent totals disclosing excluded cells.
+    had_rows = bool(rows)
+    if suppress:
+        rows = [r for r in rows if r.id in publication_ids["population"]] if publication_ids is not None else eligible_rows(rows)
     # One respondent per question. For repeated calls, use the latest answer.
     ordered = sorted(rows, key=lambda r: (aware(r.updated_at), r.id), reverse=True)
     people = {r.user_id for r in rows}
-    if suppress and len(people) < 5:
+    if suppress and len(people) < threshold():
         return {
+            **publication_coverage,
             "suppressed": True,
-            "respondents": None,
+            "status": "insufficient_sample" if had_rows else "no_responses",
+            "respondents": None if had_rows else 0,
+            "field_map": FIELD_MAP,
+            "questions": {key: {"status": "insufficient_sample" if had_rows else "no_responses", "distribution": []} for key in QUESTIONS},
             "obstacles": None,
             "extra_charge_requested": None,
             "unable_to_go_ashore": None,
@@ -315,20 +359,25 @@ def statistics(rows, suppress=False):
             if value is not None and r.user_id not in answers:
                 answers[r.user_id] = value
         # Each question also has its own privacy boundary.
-        if suppress and len(answers) < 5:
+        globally_hidden = suppress and publication_ids is not None and any(r.id not in publication_ids["rate:"+key] for r in rows if (r.answers or {}).get(key) is not None)
+        if suppress and (len(answers) < threshold() or globally_hidden):
             return {
                 "numerator": None,
                 "denominator": None,
                 "percent": None,
                 "suppressed": True,
+                "status": "insufficient_sample" if answers else "no_responses",
             }
         count = sum(v in positive for v in answers.values())
         n = len(answers)
+        if suppress and any(0 < size < threshold() for size in (count, n-count)):
+            return {"numerator": None, "denominator": None, "percent": None, "suppressed": True, "status": "insufficient_sample"}
         return {
             "numerator": count,
             "denominator": n,
             "percent": round(count * 100 / n, 1) if n else None,
             "suppressed": False,
+            "status": status(count, empty=not n),
         }
 
     barriers = []
@@ -336,7 +385,7 @@ def statistics(rows, suppress=False):
         n = len(
             {r.user_id for r in rows if code in (r.answers or {}).get("barriers", [])}
         )
-        if suppress and n < 5:
+        if suppress and ((publication_ids is not None and any(r.id not in publication_ids["question:barriers"] for r in rows)) or 0 < n < threshold() or 0 < len(people)-n < threshold()):
             continue
         barriers.append(
             {
@@ -347,8 +396,25 @@ def statistics(rows, suppress=False):
                 "respondents": n,
             }
         )
+    questions = {}
+    for key in QUESTIONS:
+        latest = {}
+        for r in ordered:
+            value = (r.answers or {}).get(key)
+            if value is not None and r.user_id not in latest:
+                latest[r.user_id] = value
+        counts = {}
+        for value in latest.values():
+            for item in (value if isinstance(value, list) else [value]):
+                counts[str(item)] = counts.get(str(item), 0) + 1
+        hidden = suppress and ((publication_ids is not None and any(r.id not in publication_ids["question:"+key] for r in rows if (r.answers or {}).get(key) is not None)) or len(latest) < threshold() or any(0 < n < threshold() or 0 < len(latest)-n < threshold() for n in counts.values()))
+        questions[key] = {"status": status(len(latest), suppressed=hidden, empty=not latest), "applicable_respondents": None if hidden else len(latest), "distribution": [] if hidden else [{"answer": key, "respondents": n} for key, n in sorted(counts.items())]}
     return {
+        **publication_coverage,
         "suppressed": False,
+        "status": status(len(people), empty=not people),
+        "questions": questions,
+        "field_map": FIELD_MAP,
         "respondents": len(people),
         "responses": len(rows),
         "obstacles": share("difficulty", {"DELAYED", "PREVENTED"}),
@@ -371,12 +437,14 @@ def company_summary(
     context=Depends(current_company_member),
 ):
     company, _ = context
+    selected_rows(db, start, end, company.id, port_id, vessel_id, country_code)
+    start, end = month_window(start, end)
     rows = list(
         selected_rows(
             db, start, end, company.id, port_id, vessel_id, country_code
         ).yield_per(500)
     )
-    result = statistics(rows, True)
+    result = statistics(rows, True, survey_publication_ids(db, company.id))
     result.update(start=start, end=end)
     return result
 
@@ -408,6 +476,7 @@ def admin_feedback(
     end: Optional[datetime] = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(25, ge=1, le=100),
+    search: str = Query("", max_length=120),
     port_id: Optional[int] = None,
     vessel_id: Optional[int] = None,
     country_code: Optional[str] = None,
@@ -427,6 +496,10 @@ def admin_feedback(
     if vessel_id:
         query = query.filter_by(vessel_id=vessel_id)
     query = filter_country(query, WelfareFeedback.port_id, country_code)
+    if search:
+        term="%"+search.replace("%", "\\%").replace("_", "\\_")+"%"
+        from sqlalchemy import cast, String
+        query=query.filter(or_(*(cast(WelfareFeedback.answers[key],String).ilike(term, escape="\\") for key in QUESTIONS)))
     return {
         "items": [
             {
@@ -434,10 +507,14 @@ def admin_feedback(
                 "call_id": r.vessel_call_id,
                 "port_id": r.port_id,
                 "vessel_id": r.vessel_id,
-                "answers": r.answers,
-                "message": r.message,
                 "created_at": r.created_at,
-                "contact_opt_in": r.contact_opt_in,
+                "experience_at": r.experience_at,
+                "updated_at": r.updated_at,
+                "message": "Original text requires audited investigation.",
+                "answers": {k:v for k,v in (r.answers or {}).items() if k not in ("amount_paid", "currency")},
+                "field_map": FIELD_MAP,
+                "port_name": db.get(Port, r.port_id).name if r.port_id and db.get(Port, r.port_id) else None,
+                "vessel_name": db.get(VesselCall, r.vessel_call_id).vessel_name if r.vessel_call_id and db.get(VesselCall, r.vessel_call_id) else None,
             }
             for r in query.order_by(
                 WelfareFeedback.created_at.desc(), WelfareFeedback.id.desc()
@@ -480,7 +557,7 @@ def legacy_feedback(
         "items": [
             {
                 "id": r.id,
-                "message": r.description,
+                "message": "Original text requires audited investigation.",
                 "created_at": r.created_at,
                 "source": "legacy_unstructured",
             }
@@ -658,6 +735,8 @@ def admin_reviews(
     country_code: Optional[str] = None,
     review_type: Optional[Literal["driver", "facility_stop"]] = None,
     provider_id: Optional[int] = Query(None, ge=1),
+    search: str = Query("", max_length=120),
+    rating: Optional[int] = Query(None, ge=1, le=5),
     db: Session = Depends(get_db),
     actor=Depends(get_current_user),
 ):
@@ -684,14 +763,20 @@ def admin_reviews(
             func.coalesce(CabBooking.provider_id, CabBooking.aggregator_id)
             == provider_id
         )
+    if rating is not None:
+        query=query.filter(func.round(BookingReview.rating)==rating)
+    if search:
+        term="%"+search.replace("%", "\\%").replace("_", "\\_")+"%"
+        query=query.filter(or_(BookingReview.review_type.ilike(term, escape="\\"), VesselCall.vessel_name.ilike(term, escape="\\"), VesselCall.port_name.ilike(term, escape="\\")))
     return {
         "items": [
             {
                 "id": r.id,
                 "type": r.review_type,
                 "rating": r.rating,
-                "comment": r.review_text,
-                "facility": r.facility_name,
+                "comment": "Original text requires audited investigation.",
+                "facility": screened_facility(r.facility_name),
+                "call_id": b.vessel_call_id,
                 "provider": (
                     b.provider.company_name
                     if b.provider
@@ -763,6 +848,8 @@ def comparisons(
     from sqlalchemy import or_
 
     selected_rows(db, start, end, company_id, port_id, vessel_id, country_code)
+    if company_id:
+        start, end = month_window(start, end)
     calls = calls_query(db, company_id) if company_id else db.query(VesselCall)
     calls = calls.filter(
         VesselCall.started_at < end,
@@ -792,6 +879,7 @@ def comparisons(
                         ).yield_per(500)
                     ),
                     bool(company_id),
+                    survey_publication_ids(db, company_id) if company_id else None,
                 ),
                 "reviews": review_summary(
                     db, start, end, company_id, port.id, vessel_id, country_code
@@ -842,6 +930,8 @@ def monthly_trends(db, start, end, company_id, port_id, vessel_id, country_code)
     selected_rows(db, start, end, company_id, port_id, vessel_id, country_code)
     if (end - start).days > 366:
         raise HTTPException(422, "Narrow monthly trends to one year.")
+    if company_id:
+        start, end = month_window(start, end)
     cursor = start
     rows = []
     while cursor < end:
@@ -862,6 +952,7 @@ def monthly_trends(db, start, end, company_id, port_id, vessel_id, country_code)
                 ).yield_per(500)
             ),
             bool(company_id),
+            survey_publication_ids(db, company_id) if company_id else None,
         )
         rows.append(
             {
@@ -870,6 +961,8 @@ def monthly_trends(db, start, end, company_id, port_id, vessel_id, country_code)
                 "participation_seats": operations["crew_participation"],
                 "distinct_crew": operations.get("distinct_crew"),
                 "completed_journeys": operations.get("completed_journeys"),
+                "calls_with_shore_leave": operations["calls_with_shore_leave"],
+                "recorded_calls": operations["recorded_calls"],
                 "average_time_ashore_minutes": operations[
                     "average_time_ashore_minutes"
                 ],
@@ -879,7 +972,7 @@ def monthly_trends(db, start, end, company_id, port_id, vessel_id, country_code)
         cursor = stop
     return {
         "items": rows,
-        "coverage": "Calendar-month slices. Each slice applies its own source coverage and privacy threshold.",
+        "coverage": "UTC calendar-month slices. Seats and completed journeys are additive. People, survey respondents and calls are distinct across the whole period and must not be summed from monthly values.",
     }
 
 
@@ -979,4 +1072,110 @@ def company_vessel_comparison(start: datetime, end: datetime, port_id: Optional[
         query=query.filter(or_(Vessel.name.ilike(term,escape="\\"),Vessel.imo_number.ilike(term,escape="\\")))
     activity=operational_query(db,start,end,context[0].id,port_id,vessel_id,country_code).with_entities(CabBooking.vessel_id.label("vessel_id"),func.sum(CabBooking.num_passengers).label("activity")).group_by(CabBooking.vessel_id).subquery()
     query=query.outerjoin(activity,activity.c.vessel_id==Vessel.id)
-    return {"items":[{"vessel_id":v.id,"vessel_name":v.name,"imo_number":v.imo_number,"operations":operational(db,start,end,context[0].id,port_id,v.id,country_code),"survey":statistics(list(selected_rows(db,start,end,context[0].id,port_id,v.id,country_code).yield_per(500)),True)} for v in query.order_by(func.coalesce(activity.c.activity,0).desc(),Vessel.name,Vessel.id).offset(offset).limit(limit)],"total":query.count(),"offset":offset,"limit":limit}
+    return {"items":[{"vessel_id":v.id,"vessel_name":v.name,"imo_number":v.imo_number,"operations":operational(db,start,end,context[0].id,port_id,v.id,country_code),"survey":statistics(list(selected_rows(db,start,end,context[0].id,port_id,v.id,country_code).yield_per(500)),True,survey_publication_ids(db,context[0].id))} for v in query.order_by(func.coalesce(activity.c.activity,0).desc(),Vessel.name,Vessel.id).offset(offset).limit(limit)],"total":query.count(),"offset":offset,"limit":limit}
+
+
+@company_router.get("/feedback")
+def company_feedback(start: datetime, end: datetime, port_id: Optional[int] = None, vessel_id: Optional[int] = None, country_code: Optional[str] = None, offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100), search: str = Query("", max_length=120), db: Session = Depends(get_db), context=Depends(current_company_member)):
+    from collections import defaultdict
+    source = selected_rows(db, start, end, context[0].id, port_id, vessel_id, country_code).all()
+    ids = survey_publication_ids(db, context[0].id)
+    safe = [r for r in source if r.id in ids["detail"]]
+    groups = defaultdict(list)
+    from app.services.welfare_disclosure import signature
+    for row in safe:
+        groups[(row.experience_at.strftime("%Y-%m"), row.port_id, row.vessel_id, signature(row))].append(row)
+    items = []
+    for (month, port, vessel, _), rows in sorted(groups.items(), key=lambda item: str(item[0])):
+        call = db.get(VesselCall, rows[0].vessel_call_id)
+        record = {"month": month, "port_name": db.get(Port, port).name if port and db.get(Port, port) else "Not recorded", "vessel_name": call.vessel_name if call else "Not recorded", "respondents": len({r.user_id for r in rows}), "answers": safe_answers(rows[0]), "message": screened_text(rows[0].message), "text_status": "available" if screened_text(rows[0].message) else "withheld"}
+        if not search or search.casefold() in str(record).casefold():
+            items.append(record)
+    return {"items": items[offset:offset+limit], "total": len(items), "offset": offset, "limit": limit, "status": "available" if items else "insufficient_sample" if source else "no_responses", "field_map": FIELD_MAP, "coverage": "Grouped screened responses, not individual records. Each entire month/port/vessel publication cell and answer signature requires the minimum distinct respondents. Reported allegations are unverified; identifying and unreviewed text is withheld."}
+
+
+@company_router.get("/reviews")
+def company_reviews(start: datetime, end: datetime, port_id: Optional[int] = None, vessel_id: Optional[int] = None, country_code: Optional[str] = None, review_type: Optional[Literal["driver", "facility_stop"]] = None, provider_id: Optional[int] = Query(None, ge=1), offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100), search: str = Query("", max_length=120), db: Session = Depends(get_db), context=Depends(current_company_member)):
+    from app.services.welfare_analytics import reviews_query, company_review_publication, review_variant
+    from collections import defaultdict
+    selected_rows(db, start, end, context[0].id)
+    start, end = month_window(start, end)
+    source = reviews_query(db, start, end, context[0].id, port_id, vessel_id, country_code).all()
+    safe = company_review_publication(db, source, context[0].id)
+    groups = defaultdict(list)
+    for row in safe:
+        if review_type and row.review_type != review_type:
+            continue
+        booking = row.booking
+        provider = booking.provider_id or booking.aggregator_id
+        if provider_id is not None and provider != provider_id:
+            continue
+        groups[(row.created_at.strftime("%Y-%m"), booking.vessel_call_id and db.get(VesselCall, booking.vessel_call_id).port_id, booking.vessel_id, review_variant(row))].append(row)
+    items = []
+    for (month, port, vessel, _), rows in sorted(groups.items(), key=lambda item: str(item[0])):
+        row = rows[0]; booking = row.booking; call = db.get(VesselCall, booking.vessel_call_id)
+        record = {"month": month, "port_name": db.get(Port, port).name if port and db.get(Port, port) else "Not recorded", "vessel_name": call.vessel_name if call else "Not recorded", "provider": booking.provider.company_name if booking.provider else booking.aggregator.company_name if booking.aggregator else "Not recorded", "type": row.review_type, "facility": screened_facility(row.facility_name) if row.review_type == "facility_stop" else None, "rating": row.rating, "review": screened_text(row.review_text), "text_status": "available" if screened_text(row.review_text) else "withheld", "respondents": len({r.crew_id for r in rows})}
+        if not search or search.casefold() in str(record).casefold():
+            items.append(record)
+    return {"items": items[offset:offset+limit], "total": len(items), "offset": offset, "limit": limit, "status": "available" if items else "insufficient_sample" if source else "no_responses", "coverage": "Grouped screened service reviews. Drivers' personal names, precise dates, identifiers and unreviewed prose remain restricted. Ratings measure service, not overall shore-leave satisfaction."}
+
+
+class InvestigationIn(BaseModel):
+    purpose: str = Field(min_length=15, max_length=1000)
+    evidence_reference: str = Field(min_length=5, max_length=250)
+
+
+@admin_router.post("/investigation/{kind}/{record_id}")
+def investigate(kind: Literal["feedback", "review", "legacy"], record_id: int, body: InvestigationIn, response: Response, db: Session = Depends(get_db), actor=Depends(get_current_user)):
+    """Purpose-bound reveal; never put original text or identity into a GET list/export."""
+    from app.db.models.booking_review import BookingReview
+    model = WelfareFeedback if kind == "feedback" else BookingReview if kind == "review" else Incident
+    require_admin(actor)
+    row = db.get(model, record_id)
+    if row is None or (kind == "legacy" and row.title != "Crew Feedback"):
+        raise HTTPException(404, "Evidence record not found.")
+    if not body.purpose.strip() or not body.evidence_reference.strip():
+        raise HTTPException(422, "Record an investigation purpose and case reference.")
+    payload = {"id": row.id, "kind": kind, "message": row.message, "answers": row.answers, "contact_opt_in": row.contact_opt_in, "user_id": row.user_id, "experience_at": row.experience_at, "created_at": row.created_at, "call_id": row.vessel_call_id} if kind == "feedback" else {"id": row.id, "kind": kind, "message": row.review_text, "crew_id": row.crew_id, "booking_id": row.booking_id, "driver_id": row.driver_id, "facility": row.facility_name} if kind == "review" else {"id": row.id, "kind": kind, "message": row.description}
+    if kind == "feedback":
+        user = db.get(User, row.user_id)
+        payload["identity"] = {"name": user.name, "email": user.email} if user else None
+        payload["updated_at"] = row.updated_at
+    elif kind == "review":
+        payload.update(rating=row.rating, type=row.review_type, created_at=row.created_at, facility_stop_id=row.facility_stop_id)
+        payload["driver"] = {"name": row.driver.name, "phone": row.driver.phone} if row.driver else None
+    db.add(CompanyAuditEvent(actor_user_id=actor.id, target_type="welfare_"+kind, target_id=row.id, action="welfare_sensitive_evidence_revealed", after_state={"purpose": body.purpose.strip(), "fields": list(payload)}, evidence_reference=body.evidence_reference.strip()))
+    db.commit()
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Authorization"
+    return {"evidence": payload, "notice": "Reported account; not proven misconduct. Use only for the recorded investigation purpose."}
+
+
+@admin_router.get("/vessels")
+def admin_vessels(start: datetime, end: datetime, port_id: Optional[int] = None, vessel_id: Optional[int] = None, country_code: Optional[str] = None, search: str = Query("", max_length=120), offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100), db: Session = Depends(get_db), actor=Depends(get_current_user)):
+    from app.db.models.vessel import Vessel
+    from app.services.welfare_analytics import operational
+    require_admin(actor)
+    selected_rows(db, start, end)
+    query = db.query(Vessel)
+    if vessel_id:
+        query = query.filter(Vessel.id == vessel_id)
+    if search:
+        query = query.filter(Vessel.name.ilike("%"+search.replace("%", "\\%").replace("_", "\\_")+"%", escape="\\"))
+    return {"items": [{"vessel_id": v.id, "vessel_name": v.name, "imo_number": v.imo_number, "operations": operational(db, start, end, None, port_id, v.id, country_code), "survey": statistics(selected_rows(db, start, end, None, port_id, v.id, country_code).all())} for v in query.order_by(Vessel.name, Vessel.id).offset(offset).limit(limit)], "total": query.count(), "offset": offset, "limit": limit}
+
+
+@company_router.get("/monthly-ports")
+def company_monthly_ports(start: datetime, end: datetime, port_id: Optional[int] = None, vessel_id: Optional[int] = None, country_code: Optional[str] = None, offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=50), db: Session = Depends(get_db), context=Depends(current_company_member)):
+    return monthly_ports(db, start, end, context[0].id, port_id, vessel_id, country_code, offset, limit)
+
+
+@admin_router.get("/monthly-ports")
+def admin_monthly_ports(start: datetime, end: datetime, port_id: Optional[int] = None, vessel_id: Optional[int] = None, country_code: Optional[str] = None, offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=50), db: Session = Depends(get_db), actor=Depends(get_current_user)):
+    require_admin(actor)
+    return monthly_ports(db, start, end, None, port_id, vessel_id, country_code, offset, limit)
+
+
+def monthly_ports(db, start, end, company_id, port_id, vessel_id, country_code, offset, limit):
+    page = comparisons(db, start, end, company_id, port_id, vessel_id, country_code, offset, limit)
+    return {**page, "items": [{**row, "months": monthly_trends(db, start, end, company_id, row["port_id"], vessel_id, country_code)["items"]} for row in page["items"]], "coverage": "Monthly seats and completed journeys sum to period totals. Distinct participants, calls, survey respondents and satisfaction denominators are recalculated for the period; never sum distinct monthly counts."}

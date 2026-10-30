@@ -30,6 +30,7 @@ from app.db.models.incident import Incident, IncidentStatus, IncidentType
 from app.db.models.report_snapshot import ReportSnapshot
 from app.db.models.user import User
 from app.db.models.vessel import Vessel
+from app.db.models.vessel_call import VesselCall
 from app.db.session import engine
 from app.services.historical_context import active_vessel_call, finish_vessel_call
 from app.services.report_snapshots import canonical_payload, create_report_snapshot
@@ -75,6 +76,14 @@ def _agent_and_vessel(db, *, etd=None):
     db.add_all([agency, vessel])
     db.flush()
     call = active_vessel_call(db, vessel)
+    if call is None and etd is not None and etd <= datetime.now(timezone.utc):
+        # Represent an existing stale row, rather than asking the operational
+        # resolver to manufacture an already departed call.
+        call = VesselCall(vessel_id=vessel.id, agency_id=agency.id,
+            vessel_name=vessel.name, agency_name=agency.agency_name,
+            started_at=etd-timedelta(days=1), etd=etd, status="ACTIVE")
+        db.add(call)
+        db.flush()
     return user, agency, vessel, call
 
 
@@ -168,7 +177,7 @@ def test_agent_history_is_bounded_and_paginated(db):
     first_end = datetime(2026, 8, 12, 10, tzinfo=timezone.utc)
     second_end = first_end + timedelta(hours=1)
     finish_vessel_call(db, vessel, status="DEPARTED", ended_at=first_end)
-    second_call = active_vessel_call(db, vessel)
+    second_call = active_vessel_call(db, vessel, allow_new_call=True)
     finish_vessel_call(db, vessel, status="DEPARTED", ended_at=second_end)
     db.flush()
 

@@ -6,12 +6,45 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from sqlalchemy.orm import Session
+from sqlalchemy import and_, func, or_, select
 
 from app.db.models.vessel import Vessel
 from app.db.models.vessel_call import VesselCall
 
 
 DEPARTING_WINDOW = timedelta(hours=5)
+CURRENT_CALL_STATUSES = ("ACTIVE", "IN_PORT", "DEPARTING")
+
+
+def current_call_predicate(now=None):
+    """Read-only SQL boundary shared by current lists and crew operations."""
+    current = _aware_utc(now) or datetime.now(timezone.utc)
+    vessel_current = select(Vessel.id).where(
+        Vessel.id == VesselCall.vessel_id,
+        func.lower(func.trim(func.coalesce(Vessel.status, ""))) != "archived",
+        or_(Vessel.etd > current, and_(Vessel.etd.is_(None),
+            func.lower(func.trim(func.coalesce(Vessel.status, ""))) != "departed")),
+    ).correlate(VesselCall).exists()
+    return and_(
+        VesselCall.ended_at.is_(None),
+        func.upper(func.trim(VesselCall.status)).in_(CURRENT_CALL_STATUSES),
+        VesselCall.started_at <= current,
+        or_(VesselCall.etd.is_(None), VesselCall.etd > current),
+        vessel_current,
+    )
+
+
+def call_is_current(call, *, now=None):
+    current = _aware_utc(now) or datetime.now(timezone.utc)
+    if call is None or call.ended_at is not None:
+        return False
+    if str(call.status or "").strip().upper() not in CURRENT_CALL_STATUSES:
+        return False
+    if _aware_utc(call.started_at) and _aware_utc(call.started_at) > current:
+        return False
+    if _aware_utc(call.etd) and _aware_utc(call.etd) <= current:
+        return False
+    return call.vessel is not None and effective_vessel_status(call.vessel, now=current) in {"Active", "Departing"}
 
 
 def _aware_utc(value: Optional[datetime]) -> Optional[datetime]:
@@ -107,7 +140,7 @@ def synchronize_vessel_lifecycle(
     now: Optional[datetime] = None,
 ) -> int:
     """Persist derived states and finish calls without deleting history."""
-    from app.services.historical_context import active_vessel_call, finish_vessel_call
+    from app.services.historical_context import active_vessel_call, finish_vessel_call, raw_open_vessel_call
 
     changed = 0
     current = _aware_utc(now) or datetime.now(timezone.utc)
@@ -117,7 +150,7 @@ def synchronize_vessel_lifecycle(
             vessel.status = status
             changed += 1
 
-        call = active_vessel_call(db, vessel, create=False)
+        call = raw_open_vessel_call(db, vessel)
         if status == "Departed":
             if call is not None:
                 changed += 1

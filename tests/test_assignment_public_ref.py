@@ -140,6 +140,8 @@ class IssuedOnAssignmentTests(unittest.TestCase):
         )
         first_ref, first_hpid = first.public_ref, first.hpid
         self._end_the_current_call()
+        from app.services.historical_context import active_vessel_call
+        active_vessel_call(self.db, self.vessel, allow_new_call=True)
         second = assignment_for_manifest(
             self.db, self.vessel, manifest, create=True,
         )

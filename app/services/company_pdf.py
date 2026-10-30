@@ -236,10 +236,9 @@ def render_report(payload, options=None):
     company = branding.get("name") or payload.get("company_name")
     if not isinstance(company, str) or not company.strip():
         raise ValueError("The report requires the authorized company name.")
-    story = [p(title, "title"), p(company, "subtitle")]
+    story = []
     if payload.get("data_mode") == "DEMO":
         story.append(p("FICTIONAL DATA - Read-only demonstration. Do not use for operational decisions.", "small"))
-    story.append(p("Company-authorized activity | " + period(payload), "subtitle"))
     for section in config["sections"]:
         content = report_section(payload, section, config)
         title_row = heading(SECTIONS[section], content[0] if content else None)
@@ -255,7 +254,7 @@ def render(title, company, rows, metadata, logo=None):
     """Compatible protected-disclosure renderer. Long approved notes can flow
     across pages without an unbreakable oversized table cell.
     """
-    story = [p(title, "title"), p(metadata, "subtitle")]
+    story = [p(metadata, "subtitle")]
     for label, value in rows:
         story += [heading(label), p(value)]
     generated = re.search(r"Generated\s+(\d{4}-\d{2}-\d{2}T[\d:.Z+\-]+)", str(metadata))
