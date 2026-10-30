@@ -1670,11 +1670,30 @@ from app.api.v1.routes_vessels import VesselOut, is_partnered_agency, vessel_out
 @router.get("/vessels", response_model=List[VesselOut])
 def list_all_vessels_superadmin(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    response: Response = None,
+    search: str = "",
+    vessel_type: Optional[str] = None,
+    lifecycle: Optional[Literal["Active", "Departing", "History"]] = None,
 ):
     verify_superadmin(current_user)
+    from app.services.superadmin_vessel_search import display_status_expression, searchable_agency_expression
+    if len(search) > 120 or (vessel_type is not None and len(vessel_type) > 100):
+        raise HTTPException(422, "Narrow the vessel search or type filter.")
+    query = db.query(Vessel)
+    term = search.strip()
+    if term:
+        escaped = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        query = query.filter(or_(Vessel.name.ilike(escaped, escape="\\"), Vessel.imo_number.ilike(escaped, escape="\\"), searchable_agency_expression().ilike(escaped, escape="\\")))
+    if vessel_type:
+        query = query.filter(Vessel.vessel_type == vessel_type)
+    if lifecycle:
+        expected = ("Departed", "Archived") if lifecycle == "History" else (lifecycle,)
+        query = query.filter(display_status_expression().in_(expected))
+    if response is not None:
+        response.headers["X-Result-Count"] = str(query.count())
     vessels = page_all(
-        db.query(Vessel).order_by(Vessel.id.desc()),
+        query.order_by(Vessel.id.desc()),
         collection="routes_superadmin.list_all_vessels_superadmin.0",
         label="All vessels superadmin",
     )
