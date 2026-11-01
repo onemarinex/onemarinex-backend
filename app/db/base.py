@@ -75,3 +75,5 @@ from app.db.models import company_disclosure  # noqa: F401
 from app.db.models import port_geography  # noqa: F401
 from app.db.models import company_fleet_change  # noqa: F401
 from app.db.models import company_fleet_import  # noqa: F401
+
+from app.db.models import welfare_organization  # noqa: F401
