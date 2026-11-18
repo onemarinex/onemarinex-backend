@@ -115,6 +115,9 @@ class OperationsHTTP(unittest.TestCase):
         self.driver = Driver(
             aggregator_id=self.provider.id,
             name="Driver",
+            email="driver@example.com",
+            hashed_password=FIXTURE_PASSWORD_HASH,
+            is_temp_password=0,
             phone="0000000000",
             vehicle_number="FIXTURE",
         )
