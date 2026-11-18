@@ -40,6 +40,7 @@ from app.api.v1 import (
     routes_crew,
     registration,
     routes_ports,
+    routes_sos,
 )
 from app.db.models.agent_profile import AgentProfile
 from app.db.models.agent_roster_event import AgentRosterEvent
@@ -47,6 +48,8 @@ from app.db.models.port import Port
 from app.db.models.shipping_company import CompanyAuditEvent
 from app.db.models.user import User
 from app.db.models.vessel_call import VesselCall
+from app.db.models.crew_sos import CrewSos, CrewSosTimelineEvent
+from app.db.models.cab_booking import CabBooking
 from app.services import email
 
 fixture = OperationsHTTP()
@@ -161,7 +164,12 @@ fixture.db.add(
     )
 )
 fixture.db.add(Port(name="Mumbai Fixture"))
+# QA prerequisites only: no SOS creation service or notification is invoked.
+fixture.db.add(CrewSos(agency_id=fixture.agency2.id, status="ACTIVE",
+                       port_name="G03 synthetic port", vessel="G03 synthetic SOS vessel",
+                       context_resolution="CONFIRMED_AGENCY"))
 fixture.db.commit()
+fixture.booking(port_id=fixture.port.id)
 fixture.db.close()
 app.add_middleware(
     CORSMiddleware,
@@ -173,6 +181,7 @@ app.add_middleware(
 )
 
 outbox = []
+app.include_router(routes_sos.router, prefix="/api/v1/sos")
 
 
 def capture(to, subject, body, **kwargs):
@@ -234,6 +243,7 @@ def g03_snapshot():
             "vessel_calls": [
                 {
                     "id": call.id,
+                    "vessel_id": call.vessel_id,
                     "vessel_name": call.vessel_name,
                     "agency_name": call.agency_name,
                     "port_id": call.port_id,
@@ -265,6 +275,15 @@ def g03_snapshot():
                 for event in agent_roster_events
             ],
             "audit_tables": audit_tables,
+            "vessels": [{"id": v.id, "name": v.name, "imo_number": v.imo_number,
+                          "vessel_type": v.vessel_type, "berth_assignment": v.berth_assignment}
+                         for v in db.query(Vessel).order_by(Vessel.id).all()],
+            "bookings": [{"id": b.id, "port_id": b.port_id, "agency_id": b.agency_id}
+                         for b in db.query(CabBooking).order_by(CabBooking.id).all()],
+            "sos": [{"id": s.id, "agency_id": s.agency_id, "status": s.status}
+                    for s in db.query(CrewSos).order_by(CrewSos.id).all()],
+            "sos_events": [{"id": e.id, "sos_id": e.sos_id, "event_type": e.event_type}
+                           for e in db.query(CrewSosTimelineEvent).order_by(CrewSosTimelineEvent.id).all()],
         }
     finally:
         db.close()
