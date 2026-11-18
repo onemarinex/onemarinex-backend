@@ -6,8 +6,11 @@ Run with the isolation sitecustomize documented in the completion report.
 """
 
 import os
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from app.db.session import engine
+from pydantic import BaseModel
+from sqlalchemy import inspect
+from app.db.session import SessionLocal, engine
 
 if (
     os.environ.get("COMPANY_OPS_BROWSER_FIXTURE") != "1"
@@ -35,7 +38,15 @@ from app.api.v1 import (
     routes_company_fleet,
     routes_welfare,
     routes_crew,
+    registration,
+    routes_ports,
 )
+from app.db.models.agent_profile import AgentProfile
+from app.db.models.agent_roster_event import AgentRosterEvent
+from app.db.models.port import Port
+from app.db.models.shipping_company import CompanyAuditEvent
+from app.db.models.user import User
+from app.db.models.vessel_call import VesselCall
 from app.services import email
 
 fixture = OperationsHTTP()
@@ -60,6 +71,8 @@ for router, prefix in [
     (routes_welfare.crew_router, "/api/v1/crew"),
     (routes_welfare.company_router, "/api/v1/shipping-company/welfare-intelligence"),
     (routes_welfare.admin_router, "/api/v1/superadmin/welfare-intelligence"),
+    (registration.router, "/api/v1/registration"),
+    (routes_ports.router, "/api/v1/ports"),
 ]:
     app.include_router(router, prefix=prefix)
 # Separate synthetic survey identities. Their names do not collide with the
@@ -147,6 +160,7 @@ fixture.db.add(
         evidence_reference="Private competitor proof",
     )
 )
+fixture.db.add(Port(name="Mumbai Fixture"))
 fixture.db.commit()
 fixture.db.close()
 app.add_middleware(
@@ -173,3 +187,113 @@ email.send_email = capture
 @app.get("/__fixture/outbox")
 def fixture_outbox():
     return outbox
+
+
+class G03AgentStatusIn(BaseModel):
+    email: str
+    status: str
+
+
+@app.get("/__fixture/g03/snapshot")
+def g03_snapshot():
+    db = SessionLocal()
+    try:
+        users = db.query(User).order_by(User.id).all()
+        profiles = db.query(AgentProfile).order_by(AgentProfile.id).all()
+        calls = db.query(VesselCall).order_by(VesselCall.id).all()
+        company_audit_events = (
+            db.query(CompanyAuditEvent).order_by(CompanyAuditEvent.id).all()
+        )
+        agent_roster_events = (
+            db.query(AgentRosterEvent).order_by(AgentRosterEvent.id).all()
+        )
+        users_by_id = {user.id: user for user in users}
+        audit_tables = sorted(
+            table
+            for table in inspect(db.get_bind()).get_table_names()
+            if "audit" in table.lower()
+        )
+        return {
+            "users": [
+                {"id": user.id, "email": user.email, "role": user.role}
+                for user in users
+            ],
+            "agent_profiles": [
+                {
+                    "id": profile.id,
+                    "user_id": profile.user_id,
+                    "email": users_by_id.get(profile.user_id).email
+                    if users_by_id.get(profile.user_id)
+                    else None,
+                    "agency_name": profile.agency_name,
+                    "status": profile.status,
+                    "assigned_port": profile.assigned_port,
+                }
+                for profile in profiles
+            ],
+            "vessel_calls": [
+                {
+                    "id": call.id,
+                    "vessel_name": call.vessel_name,
+                    "agency_name": call.agency_name,
+                    "port_id": call.port_id,
+                }
+                for call in calls
+            ],
+            "company_audit_events": [
+                {
+                    "id": event.id,
+                    "actor_user_id": event.actor_user_id,
+                    "company_id": event.company_id,
+                    "target_type": event.target_type,
+                    "target_id": event.target_id,
+                    "action": event.action,
+                    "before_state": event.before_state,
+                    "after_state": event.after_state,
+                }
+                for event in company_audit_events
+            ],
+            "agent_roster_events": [
+                {
+                    "id": event.id,
+                    "actor_user_id": event.actor_user_id,
+                    "vessel_id": event.vessel_id,
+                    "action": event.action,
+                    "subject_name": event.subject_name,
+                    "subject_hpid": event.subject_hpid,
+                }
+                for event in agent_roster_events
+            ],
+            "audit_tables": audit_tables,
+        }
+    finally:
+        db.close()
+
+
+@app.post("/__fixture/g03/agent-status")
+def g03_agent_status(body: G03AgentStatusIn):
+    if body.status not in {"Active", "Inactive", "Suspended"}:
+        raise HTTPException(status_code=400, detail="Unsupported fixture status")
+    db = SessionLocal()
+    try:
+        user = (
+            db.query(User)
+            .filter(User.email == body.email.lower().strip(), User.role == "agent")
+            .first()
+        )
+        if not user:
+            raise HTTPException(status_code=404, detail="Fixture agent not found")
+        profile = (
+            db.query(AgentProfile).filter(AgentProfile.user_id == user.id).first()
+        )
+        if not profile:
+            raise HTTPException(status_code=404, detail="Fixture agent profile not found")
+        profile.status = body.status
+        db.commit()
+        return {
+            "user_id": user.id,
+            "email": user.email,
+            "status": profile.status,
+        }
+    finally:
+        db.close()
