@@ -104,6 +104,7 @@ class OperationsHTTP(unittest.TestCase):
             company_name="Provider",
             operating_port_id=self.port.id,
             status="Active",
+            provider_type="partnered_driver",
         )
         self.provider2 = AggregatorProfile(
             user_id=self.other_provider_user.id,
@@ -121,6 +122,8 @@ class OperationsHTTP(unittest.TestCase):
             is_temp_password=0,
             phone="0000000000",
             vehicle_number="FIXTURE",
+            vehicle_type="ac",
+            vehicle_name="Cab AC",
         )
         self.vessel = Vessel(
             name="Fixture MV",
