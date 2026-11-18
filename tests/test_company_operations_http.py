@@ -91,7 +91,8 @@ class OperationsHTTP(unittest.TestCase):
         self.db.add(self.port)
         self.db.flush()
         self.agency = AgentProfile(
-            user_id=self.agent.id, agency_name="Agency", location="Fixture"
+            user_id=self.agent.id, agency_name="Agency", location="Fixture",
+            assigned_port="fixture",
         )
         self.agency2 = AgentProfile(
             user_id=self.other_agent.id, agency_name="Other", location="Fixture"
