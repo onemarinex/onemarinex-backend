@@ -68,3 +68,14 @@ payment_service._client = SimpleNamespace(order=SyntheticGatewayOrders())
 @app.get('/__fixture/batchb/payment-boundary')
 def payment_boundary():
     return {"adapter": "synthetic_gateway_orders", "configured_signature_mode": payment_service.payments_enabled(), "external_egress": False, "calls": PAYMENT_CALLS}
+
+@app.get('/__fixture/batchb/model-contracts')
+def model_contracts():
+    from sqlalchemy import inspect
+    from pathlib import Path
+    import hashlib
+    selected = ('aggregator_profiles', 'drivers', 'cab_bookings', 'agency_transfers', 'booking_provider_rejections')
+    inspector = inspect(engine)
+    root = Path(__file__).resolve().parents[1]
+    paths = ('app/db/models/aggregator_profile.py', 'app/db/models/cab_booking.py', 'app/api/v1/registration.py', 'app/services/booking_service.py', 'app/api/v1/routes_agency_transfers.py')
+    return {"database_columns": {name:[c['name'] for c in inspector.get_columns(name)] for name in selected if inspector.has_table(name)}, "mounted_routes":[{"path": r.path, "methods": sorted(r.methods or [])} for r in app.routes if hasattr(r,'methods')], "source_sha256": {name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in paths}, "assessment_boundary": "Observed genuine pinned schema and mounted routes; absence of guessed field names alone does not establish missing functionality."}
