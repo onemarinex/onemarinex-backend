@@ -1,0 +1,51 @@
+﻿"""Batch B synthetic actors and metadata. No business handlers are replaced."""
+from company_operations_browser_fixture import app, fixture
+from pydantic import BaseModel
+from fastapi import HTTPException
+from sqlalchemy import select
+from app.db.session import SessionLocal, engine
+from app.db.base import Base
+from app.db.models.user import User
+from app.db.models.driver import Driver
+from app.db.models.crew_profile import CrewProfile
+from app.db.models.aggregator_profile import AggregatorProfile
+from app.services.auth import get_password_hash
+from app.api.v1 import routes_reviews, routes_files, routes_expenses, routes_facilities, routes_hotels, routes_restaurants, routes_sightseeing, routes_pubs, routes_payments
+import batcha_observer as observer
+
+assert engine.url.database == 'company_ops_fixture' and engine.url.host == '127.0.0.1' and engine.url.port == 55957
+for router,prefix in [(routes_reviews.router,'/api/v1/reviews'),(routes_files.router,'/api/v1/files'),(routes_expenses.router,'/api/v1/crew/expense-bills'),(routes_facilities.router,'/api/v1/facilities'),(routes_hotels.router,'/api/v1/hotels'),(routes_restaurants.router,'/api/v1/restaurants'),(routes_sightseeing.router,'/api/v1/sightseeing'),(routes_pubs.router,'/api/v1/pubs'),(routes_payments.router,'/api/v1/crew/payments')]:
+    app.include_router(router,prefix=prefix)
+observer.SEED_TABLES.update({'drivers','venue_reviews','booking_invitations','driver_magic_links','driver_magic_link_reach_events','port_service_requests','pricing_vehicle_categories','pricing_ride_types','pricing_rules','restaurants','hotels','sightseeing','pubs'})
+
+class Actor(BaseModel):
+    label: str
+    role: str='crew'
+    email: str|None=None
+    provider_id: int|None=None
+    port_id: int|None=None
+    status: str='Active'
+
+@app.post('/__fixture/batchb/actor')
+def actor(body:Actor):
+    if not body.label.startswith(('M05-','M06-','M07-','M08-','X02-')) or body.role not in {'crew','aggregator','driver'}:raise HTTPException(400,'Synthetic Batch B actor only')
+    email=body.email or body.label.lower()+'@example.com'
+    if not email.endswith('@example.com'):raise HTTPException(400,'Synthetic domain required')
+    with SessionLocal() as db:
+        if body.role=='driver':
+            d=Driver(aggregator_id=body.provider_id or fixture.provider.id,name=body.label,email=email,phone='0000000000',vehicle_number='QA-'+body.label,vehicle_type='ac',status='Available',hashed_password=get_password_hash('QA-Driver-Only-2027!'),is_temp_password=0)
+            db.add(d);db.commit();return {'driver_id':d.id,'email':email,'fixture_only':True}
+        u=User(email=email,name=body.label,role=body.role,hashed_password=get_password_hash('fixture-only-secret'));db.add(u);db.flush();result={'user_id':u.id,'email':email,'fixture_only':True}
+        if body.role=='crew':
+            profile=CrewProfile(user_id=u.id,full_name=body.label,rank='AB',nationality='IN',passport_number='QA'+body.label.replace('-',''));db.add(profile);db.flush();result['crew_profile_id']=profile.id
+        else:
+            profile=AggregatorProfile(user_id=u.id,company_name=body.label,operating_port_id=body.port_id or fixture.port.id,provider_type='partnered_driver',status=body.status);db.add(profile);db.flush();result['provider_id']=profile.id
+        db.commit();return result
+
+@app.get('/__fixture/batchb/challenges')
+def challenges(email:str):
+    from app.db.models.email_verification import EmailVerification
+    from app.db.models.password_reset import PasswordReset
+    with SessionLocal() as db:
+        user=db.query(User).filter(User.email==email).first()
+        return {'email':email,'registration':[{'id':r.id,'attempts':r.attempts,'verified':r.verified,'expires_at':r.expires_at.isoformat()} for r in db.query(EmailVerification).filter(EmailVerification.email==email).all()], 'reset':[{'id':r.id,'expires_at':r.expires_at.isoformat()} for r in db.query(PasswordReset).filter(PasswordReset.user_id==user.id).all()] if user else []}
