@@ -231,7 +231,7 @@ def synthetic_whatsapp_post(url, **kwargs):
               "provider_id": None if failed else "qa-message-" + str(len(SINK["attempts"]))}
     SINK["attempts"].append(record)
     log("synthetic-whatsapp-attempt", accepted=not failed)
-    return httpx.Response(503 if failed else 200, json={"error": {"message": "synthetic retryable failure"}} if failed else {"messages": [{"id": record["provider_id"]}]})
+    return httpx.Response(503 if failed else 200, request=httpx.Request("POST", url), json={"error": {"message": "synthetic retryable failure"}} if failed else {"messages": [{"id": record["provider_id"]}]})
 
 whatsapp.httpx.post = synthetic_whatsapp_post
 settings.WHATSAPP_ENABLED = True
