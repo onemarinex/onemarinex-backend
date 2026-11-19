@@ -56,6 +56,8 @@ from app.services import email
 fixture = OperationsHTTP()
 fixture.setUp()
 app = fixture.client.app
+from batcha_observer import install as install_qa_observer
+install_qa_observer(app)
 for router, prefix in [
     (routes_agents.router, "/api/v1/agents"),
     (routes_aggregators.router, "/api/v1/aggregators"),
