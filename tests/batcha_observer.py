@@ -117,8 +117,9 @@ def install(app):
             indexes = [dict(r) for r in conn.execute(text("SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname='public' ORDER BY tablename,indexname")).mappings()]
             version_table = conn.execute(text("SELECT to_regclass('public.alembic_version')")).scalar()
             versions = list(conn.execute(text("SELECT version_num FROM alembic_version")).scalars()) if version_table else []
-            identity = dict(conn.execute(text("select current_database() db, inet_server_addr()::text host, inet_server_port() port, pg_backend_pid() observer_pid")).mappings().one())
-            return {"database_identity":identity, "external_adapters":{"email":email.send_email.__name__, "whatsapp_http":whatsapp.httpx.post.__name__, "manifest_pdf_processor":os.getenv("MANIFEST_PDF_PROCESSOR", "anthropic")}, "fixture_schema_method":"Base.metadata.create_all + existing isolated fleet schema/exclusion initializer", "alembic_versions":versions, "migration_parity_verified":False, "constraints":constraints, "indexes":indexes}
+            triggers = [dict(r) for r in conn.execute(text("SELECT c.relname table_name,t.tgname,pg_get_triggerdef(t.oid) definition FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid WHERE NOT t.tgisinternal AND c.relnamespace='public'::regnamespace ORDER BY c.relname,t.tgname")).mappings()]
+            identity = dict(conn.execute(text("select current_database() db, current_user db_user, inet_server_addr()::text host, inet_server_port() port, pg_backend_pid() observer_pid, clock_timestamp() database_clock")).mappings().one())
+            return jsonable_encoder({"database_identity":identity, "external_adapters":{"email":email.send_email.__name__, "whatsapp_http":whatsapp.httpx.post.__name__, "manifest_pdf_processor":os.getenv("MANIFEST_PDF_PROCESSOR", "anthropic")}, "fixture_schema_method":"Base.metadata.create_all + existing isolated fleet schema/exclusion initializer", "alembic_versions":versions, "migration_parity_verified":False, "constraints":constraints, "indexes":indexes,"triggers":triggers})
 
     class Seed(BaseModel):
         table: str
