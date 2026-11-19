@@ -22,6 +22,7 @@ SEED_TABLES = {
     "shore_passes", "crew_profiles", "port_rules",
     "cab_bookings", "crew_sos_requests", "crew_sos_timeline_events", "incidents", "agent_profiles",
     "users",
+    "company_user_memberships", "vessel_role_claims", "aggregator_profiles",
 }
 HIDDEN = {"hashed_password", "password", "code_hash", "ride_otp", "token",
           "access_token", "refresh_token", "secret", "magic_token"}
