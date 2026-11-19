@@ -17,7 +17,7 @@ import batcha_observer as observer
 assert engine.url.database == 'company_ops_fixture' and engine.url.host == '127.0.0.1' and engine.url.port == 55957
 for router,prefix in [(routes_reviews.router,'/api/v1/reviews'),(routes_files.router,'/api/v1/files'),(routes_expenses.router,'/api/v1/crew/expense-bills'),(routes_facilities.router,'/api/v1/facilities'),(routes_hotels.router,'/api/v1/hotels'),(routes_restaurants.router,'/api/v1/restaurants'),(routes_sightseeing.router,'/api/v1/sightseeing'),(routes_pubs.router,'/api/v1/pubs'),(routes_payments.router,'/api/v1/crew/payments')]:
     app.include_router(router,prefix=prefix)
-observer.SEED_TABLES.update({'drivers','venue_reviews','booking_invitations','driver_magic_links','driver_magic_link_reach_events','port_service_requests','pricing_vehicle_categories','pricing_ride_types','pricing_rules','restaurants','hotels','sightseeing','pubs','vendors','facility_scans'})
+observer.SEED_TABLES.update({'drivers','venue_reviews','booking_invitations','driver_magic_links','driver_magic_link_reach_events','port_service_requests','pricing_vehicle_categories','pricing_ride_types','pricing_rules','restaurants','hotels','sightseeing','pubs','vendors','facility_scans','pricing_durations','pricing_provider_settings','payments','booking_reviews'})
 
 class Actor(BaseModel):
     label: str
@@ -50,3 +50,21 @@ def challenges(email:str):
     with SessionLocal() as db:
         user=db.query(User).filter(User.email==email).first()
         return {'email':email,'registration':[{'id':r.id,'attempts':r.attempts,'verified':r.verified,'expires_at':r.expires_at.isoformat()} for r in db.query(EmailVerification).filter(EmailVerification.email==email).all()], 'reset':[{'id':r.id,'expires_at':r.expires_at.isoformat()} for r in db.query(PasswordReset).filter(PasswordReset.user_id==user.id).all()] if user else []}
+
+# External gateway boundary only. Genuine create/verify handlers and HMAC remain.
+from app.services import payments as payment_service
+from types import SimpleNamespace
+import uuid
+PAYMENT_CALLS = []
+class SyntheticGatewayOrders:
+    def create(self, payload):
+        result = {"id": "order_qa_" + uuid.uuid4().hex[:16]}
+        PAYMENT_CALLS.append({"operation": "order.create", "payload": payload, "result": result, "external_egress": False})
+        return result
+payment_service.RAZORPAY_KEY_ID = "qa_synthetic_key"
+payment_service.RAZORPAY_KEY_SECRET = "QA-Payment-Only-2027!"
+payment_service._client = SimpleNamespace(order=SyntheticGatewayOrders())
+
+@app.get('/__fixture/batchb/payment-boundary')
+def payment_boundary():
+    return {"adapter": "synthetic_gateway_orders", "configured_signature_mode": payment_service.payments_enabled(), "external_egress": False, "calls": PAYMENT_CALLS}
