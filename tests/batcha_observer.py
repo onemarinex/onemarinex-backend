@@ -21,6 +21,7 @@ SEED_TABLES = {
     "ports", "vessels", "vessel_calls", "vessel_crew", "crew_assignments",
     "shore_passes", "crew_profiles", "port_rules",
     "cab_bookings", "crew_sos_requests", "crew_sos_timeline_events", "incidents", "agent_profiles",
+    "users",
 }
 HIDDEN = {"hashed_password", "password", "code_hash", "ride_otp", "token",
           "access_token", "refresh_token", "secret", "magic_token"}
@@ -112,7 +113,7 @@ def install(app):
 
     @app.post("/__fixture/batch/seed")
     def seed(body: Seed):
-        if body.table not in SEED_TABLES or not 1 <= len(body.rows) <= 30:
+        if body.table not in SEED_TABLES or body.table == "users" or not 1 <= len(body.rows) <= 30:
             raise HTTPException(400, "Unsupported QA fixture builder")
         table = Base.metadata.tables[body.table]
         ids = []
@@ -141,6 +142,8 @@ def install(app):
     def update(body: Update):
         if body.table not in SEED_TABLES or not body.values or "id" in body.values:
             raise HTTPException(400, "Unsupported QA fixture update")
+        if body.table == "users" and set(body.values) != {"mobile_number"}:
+            raise HTTPException(400, "Synthetic actor phone fixture only")
         table = Base.metadata.tables[body.table]
         row = dict(body.values)
         if set(row) - set(table.columns.keys()):
@@ -163,7 +166,7 @@ def install(app):
     @app.post("/__fixture/batch/barrier")
     def barrier(body: Gate):
         global GATE
-        if body.match not in {"from crew_assignments", "from vessel_crew", "from vessel_calls", "from vessels"}:
+        if body.match not in {"from crew_assignments", "from vessel_crew", "from vessel_calls", "from vessels", "from crew_sos_requests"}:
             raise HTTPException(400, "Unsupported observation barrier")
         GATE = {"match": body.match, "seen": set(), "barrier": threading.Barrier(2)}
         return {"armed": True, "participants": 2, "timeout_seconds": 12, "match": body.match}
