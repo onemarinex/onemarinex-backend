@@ -99,7 +99,7 @@ def install(app):
     @app.get("/__fixture/batch/snapshot")
     def snapshot():
         with engine.connect() as conn:
-            identity = dict(conn.execute(text("select current_database() db, inet_server_addr()::text host, inet_server_port() port, pg_backend_pid() observer_pid, current_setting('transaction_isolation') isolation")).mappings().one())
+            identity = dict(conn.execute(text("select current_database() db, host(inet_server_addr()) host, inet_server_port() port, pg_backend_pid() observer_pid, current_setting('transaction_isolation') isolation")).mappings().one())
             tables = {}
             for table in Base.metadata.sorted_tables:
                 if table.name in {"email_verifications", "refresh_tokens"}:
@@ -118,7 +118,7 @@ def install(app):
             version_table = conn.execute(text("SELECT to_regclass('public.alembic_version')")).scalar()
             versions = list(conn.execute(text("SELECT version_num FROM alembic_version")).scalars()) if version_table else []
             triggers = [dict(r) for r in conn.execute(text("SELECT c.relname table_name,t.tgname,pg_get_triggerdef(t.oid) definition FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid WHERE NOT t.tgisinternal AND c.relnamespace='public'::regnamespace ORDER BY c.relname,t.tgname")).mappings()]
-            identity = dict(conn.execute(text("select current_database() db, current_user db_user, inet_server_addr()::text host, inet_server_port() port, pg_backend_pid() observer_pid, clock_timestamp() database_clock")).mappings().one())
+            identity = dict(conn.execute(text("select current_database() db, current_user db_user, host(inet_server_addr()) host, inet_server_port() port, pg_backend_pid() observer_pid, clock_timestamp() database_clock")).mappings().one())
             return jsonable_encoder({"database_identity":identity, "external_adapters":{"email":email.send_email.__name__, "whatsapp_http":whatsapp.httpx.post.__name__, "manifest_pdf_processor":os.getenv("MANIFEST_PDF_PROCESSOR", "anthropic")}, "fixture_schema_method":"Base.metadata.create_all + existing isolated fleet schema/exclusion initializer", "alembic_versions":versions, "migration_parity_verified":False, "constraints":constraints, "indexes":indexes,"triggers":triggers})
 
     class Seed(BaseModel):
