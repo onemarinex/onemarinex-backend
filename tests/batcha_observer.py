@@ -28,6 +28,7 @@ LOG = []
 LOCK = threading.Lock()
 GATE = None
 SINK = {"email_failures": 0, "whatsapp_failures": 0, "attempts": []}
+FAULT = {"match": None, "remaining": 0, "events": []}
 
 
 def log(kind, **values):
@@ -60,6 +61,13 @@ def install(app):
         global GATE
         pid = conn.connection.driver_connection.get_backend_pid()
         sql = statement.lower()
+        if FAULT["remaining"] and sql.lstrip().startswith(FAULT["match"]):
+            FAULT["remaining"] -= 1
+            log("one-shot-database-fault", pid=pid, match=FAULT["match"])
+            FAULT["events"].append({"pid": pid, "match": FAULT["match"], "sequence": len(LOG)})
+            # A real Postgres statement error aborts only this transaction.
+            # No business handler, return value or commit method is mocked.
+            cursor.execute("SELECT 1 / 0")
         if sql.lstrip().startswith(("insert", "update", "delete")):
             # SQL values are deliberately not collected.
             log("statement", pid=pid, sql=statement[:600])
@@ -163,3 +171,17 @@ def install(app):
     @app.get("/__fixture/batch/barrier")
     def barrier_result():
         return {"pids": sorted(GATE["seen"]) if GATE else [], "events": list(LOG)}
+
+    class Fault(BaseModel):
+        match: str
+
+    @app.post("/__fixture/batch/fault")
+    def fault(body: Fault):
+        if body.match not in {"insert into crew_sos_requests", "update crew_assignments"}:
+            raise HTTPException(400, "Unsupported isolated fault boundary")
+        FAULT.update(match=body.match, remaining=1, events=[])
+        return {"armed": True, "match": body.match, "remaining": 1}
+
+    @app.get("/__fixture/batch/fault")
+    def fault_result():
+        return FAULT
