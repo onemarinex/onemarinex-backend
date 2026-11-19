@@ -195,12 +195,48 @@ app.include_router(routes_sos.router, prefix="/api/v1/sos")
 
 
 def capture(to, subject, body, **kwargs):
-    outbox.append({"to": to, "subject": subject, "body": body})
-    return True
+    from batcha_observer import SINK, log
+    from sqlalchemy import select
+    with engine.connect() as observer:
+        committed = list(observer.execute(select(CrewSos.id)).scalars())
+    failed = SINK["email_failures"] > 0
+    if failed:
+        SINK["email_failures"] -= 1
+    record = {"channel": "email", "to": to, "subject": subject,
+              "body": body, "accepted": not failed, "committed_sos_ids": committed}
+    outbox.append(record)
+    SINK["attempts"].append(record)
+    log("synthetic-email-attempt", accepted=not failed, committed_sos_ids=committed)
+    return not failed
 
 
 email.is_configured = lambda: True
 email.send_email = capture
+
+# Mock only the external HTTP transport. Template building, number validation
+# and all application recipient selection continue to run unchanged.
+from app.services import whatsapp
+from app.core.config import settings
+import httpx
+
+def synthetic_whatsapp_post(url, **kwargs):
+    from batcha_observer import SINK, log
+    if not str(url).startswith("https://graph.facebook.com/"):
+        raise RuntimeError("QA WhatsApp transport refuses other providers")
+    failed = SINK["whatsapp_failures"] > 0
+    if failed:
+        SINK["whatsapp_failures"] -= 1
+    payload = kwargs.get("json", {})
+    record = {"channel": "whatsapp", "payload": payload, "accepted": not failed,
+              "provider_id": None if failed else "qa-message-" + str(len(SINK["attempts"]))}
+    SINK["attempts"].append(record)
+    log("synthetic-whatsapp-attempt", accepted=not failed)
+    return httpx.Response(503 if failed else 200, json={"error": {"message": "synthetic retryable failure"}} if failed else {"messages": [{"id": record["provider_id"]}]})
+
+whatsapp.httpx.post = synthetic_whatsapp_post
+settings.WHATSAPP_ENABLED = True
+settings.WHATSAPP_ACCESS_TOKEN = "QA_SYNTHETIC_TRANSPORT_ONLY"
+settings.WHATSAPP_PHONE_NUMBER_ID = "QA_SYNTHETIC_PHONE_ONLY"
 
 
 @app.get("/__fixture/outbox")

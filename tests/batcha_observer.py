@@ -20,13 +20,14 @@ from app.db.session import SessionLocal, engine
 SEED_TABLES = {
     "ports", "vessels", "vessel_calls", "vessel_crew", "crew_assignments",
     "shore_passes", "crew_profiles", "port_rules",
-    "cab_bookings", "crew_sos", "crew_sos_timeline_events",
+    "cab_bookings", "crew_sos_requests", "crew_sos_timeline_events", "incidents", "agent_profiles",
 }
 HIDDEN = {"hashed_password", "password", "code_hash", "ride_otp", "token",
           "access_token", "refresh_token", "secret", "magic_token"}
 LOG = []
 LOCK = threading.Lock()
 GATE = None
+SINK = {"email_failures": 0, "whatsapp_failures": 0, "attempts": []}
 
 
 def log(kind, **values):
@@ -38,6 +39,21 @@ def log(kind, **values):
 def install(app):
     if engine.url.database != "company_ops_fixture" or engine.url.host != "127.0.0.1" or engine.url.port != 55957:
         raise RuntimeError("QA observer refuses any non-disposable database")
+
+    class SinkMode(BaseModel):
+        email_failures: int = 0
+        whatsapp_failures: int = 0
+
+    @app.post("/__fixture/batch/sinks")
+    def sink_mode(body: SinkMode):
+        if not 0 <= body.email_failures <= 3 or not 0 <= body.whatsapp_failures <= 3:
+            raise HTTPException(400, "Bounded synthetic sink failures only")
+        SINK.update(email_failures=body.email_failures, whatsapp_failures=body.whatsapp_failures)
+        return {"fixture_only": True, "mode": body.model_dump()}
+
+    @app.get("/__fixture/batch/sinks")
+    def sink_evidence():
+        return SINK
 
     @event.listens_for(engine, "before_cursor_execute")
     def observe(conn, cursor, statement, parameters, context, executemany):
