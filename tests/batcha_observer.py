@@ -104,6 +104,28 @@ def install(app):
                 ids.append(conn.execute(table.insert().values(**row).returning(table.c.id)).scalar_one())
         return {"table": body.table, "ids": ids, "fixture_only": True}
 
+    class Update(BaseModel):
+        table: str
+        id: int
+        values: dict
+
+    @app.patch("/__fixture/batch/seed")
+    def update(body: Update):
+        if body.table not in SEED_TABLES or not body.values or "id" in body.values:
+            raise HTTPException(400, "Unsupported QA fixture update")
+        table = Base.metadata.tables[body.table]
+        row = dict(body.values)
+        if set(row) - set(table.columns.keys()):
+            raise HTTPException(400, "Unknown fixture column")
+        for key, value in row.items():
+            if isinstance(value, str) and isinstance(table.c[key].type, DateTime):
+                row[key] = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            elif isinstance(value, str) and isinstance(table.c[key].type, Date):
+                row[key] = dt.date.fromisoformat(value)
+        with engine.begin() as conn:
+            result = conn.execute(table.update().where(table.c.id == body.id).values(**row))
+        return {"updated": result.rowcount, "fixture_only": True}
+
     class Gate(BaseModel):
         match: str
 
