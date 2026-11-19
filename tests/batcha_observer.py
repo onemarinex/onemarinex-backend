@@ -4,6 +4,7 @@ No application handler, dependency, model or schema is replaced. The optional
 SQL barrier delays real DB statements; it never changes their contents/results.
 """
 import datetime as dt
+import os
 import threading
 import time
 from decimal import Decimal
@@ -110,12 +111,14 @@ def install(app):
 
     @app.get("/__fixture/batch/schema")
     def schema():
+        from app.services import email, whatsapp
         with engine.connect() as conn:
             constraints = [dict(r) for r in conn.execute(text("SELECT conname, conrelid::regclass::text table_name, pg_get_constraintdef(oid) definition FROM pg_constraint WHERE connamespace='public'::regnamespace ORDER BY conrelid,conname")).mappings()]
             indexes = [dict(r) for r in conn.execute(text("SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname='public' ORDER BY tablename,indexname")).mappings()]
             version_table = conn.execute(text("SELECT to_regclass('public.alembic_version')")).scalar()
             versions = list(conn.execute(text("SELECT version_num FROM alembic_version")).scalars()) if version_table else []
-            return {"fixture_schema_method":"Base.metadata.create_all + existing isolated fleet schema/exclusion initializer", "alembic_versions":versions, "migration_parity_verified":False, "constraints":constraints, "indexes":indexes}
+            identity = dict(conn.execute(text("select current_database() db, inet_server_addr()::text host, inet_server_port() port, pg_backend_pid() observer_pid")).mappings().one())
+            return {"database_identity":identity, "external_adapters":{"email":email.send_email.__name__, "whatsapp_http":whatsapp.httpx.post.__name__, "manifest_pdf_processor":os.getenv("MANIFEST_PDF_PROCESSOR", "anthropic")}, "fixture_schema_method":"Base.metadata.create_all + existing isolated fleet schema/exclusion initializer", "alembic_versions":versions, "migration_parity_verified":False, "constraints":constraints, "indexes":indexes}
 
     class Seed(BaseModel):
         table: str
