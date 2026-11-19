@@ -107,6 +107,15 @@ def install(app):
                 tables[table.name] = [dict(r) for r in rows]
             return jsonable_encoder({"identity": identity, "tables": tables, "transaction_events": list(LOG)})
 
+    @app.get("/__fixture/batch/schema")
+    def schema():
+        with engine.connect() as conn:
+            constraints = [dict(r) for r in conn.execute(text("SELECT conname, conrelid::regclass::text table_name, pg_get_constraintdef(oid) definition FROM pg_constraint WHERE connamespace='public'::regnamespace ORDER BY conrelid,conname")).mappings()]
+            indexes = [dict(r) for r in conn.execute(text("SELECT tablename,indexname,indexdef FROM pg_indexes WHERE schemaname='public' ORDER BY tablename,indexname")).mappings()]
+            version_table = conn.execute(text("SELECT to_regclass('public.alembic_version')")).scalar()
+            versions = list(conn.execute(text("SELECT version_num FROM alembic_version")).scalars()) if version_table else []
+            return {"fixture_schema_method":"Base.metadata.create_all + existing isolated fleet schema/exclusion initializer", "alembic_versions":versions, "migration_parity_verified":False, "constraints":constraints, "indexes":indexes}
+
     class Seed(BaseModel):
         table: str
         rows: list[dict]

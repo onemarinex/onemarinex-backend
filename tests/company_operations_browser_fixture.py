@@ -45,6 +45,7 @@ from app.api.v1 import (
     routes_pricing_controls,
     routes_notifications,
     routes_itinerary,
+    routes_trips,
 )
 from app.db.models.agent_profile import AgentProfile
 from app.db.models.agent_roster_event import AgentRosterEvent
@@ -86,6 +87,7 @@ for router, prefix in [
     (routes_pricing_controls.router, "/api/v1/superadmin"),
     (routes_notifications.router, "/api/v1/notifications"),
     (routes_itinerary.router, "/api/v1/itinerary"),
+    (routes_trips.router, "/api/v1/trips"),
 ]:
     app.include_router(router, prefix=prefix)
 # Separate synthetic survey identities. Their names do not collide with the
