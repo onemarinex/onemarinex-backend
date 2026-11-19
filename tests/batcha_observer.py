@@ -11,7 +11,7 @@ from decimal import Decimal
 from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
-from sqlalchemy import Date, DateTime, event, select, text
+from sqlalchemy import Date, DateTime, Enum, event, select, text
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
@@ -20,6 +20,7 @@ from app.db.session import SessionLocal, engine
 SEED_TABLES = {
     "ports", "vessels", "vessel_calls", "vessel_crew", "crew_assignments",
     "shore_passes", "crew_profiles", "port_rules",
+    "cab_bookings", "crew_sos", "crew_sos_timeline_events",
 }
 HIDDEN = {"hashed_password", "password", "code_hash", "ride_otp", "token",
           "access_token", "refresh_token", "secret", "magic_token"}
@@ -97,7 +98,10 @@ def install(app):
                 if set(row) - set(table.columns.keys()):
                     raise HTTPException(400, "Unknown fixture column")
                 for key, value in row.items():
-                    if isinstance(value, str) and isinstance(table.c[key].type, DateTime):
+                    kind = table.c[key].type
+                    if isinstance(value, str) and isinstance(kind, Enum) and kind.enum_class:
+                        row[key] = kind.enum_class(value)
+                    elif isinstance(value, str) and (isinstance(kind, DateTime) or isinstance(getattr(kind, "impl", None), DateTime)):
                         row[key] = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
                     elif isinstance(value, str) and isinstance(table.c[key].type, Date):
                         row[key] = dt.date.fromisoformat(value)
@@ -118,7 +122,10 @@ def install(app):
         if set(row) - set(table.columns.keys()):
             raise HTTPException(400, "Unknown fixture column")
         for key, value in row.items():
-            if isinstance(value, str) and isinstance(table.c[key].type, DateTime):
+            kind = table.c[key].type
+            if isinstance(value, str) and isinstance(kind, Enum) and kind.enum_class:
+                row[key] = kind.enum_class(value)
+            elif isinstance(value, str) and (isinstance(kind, DateTime) or isinstance(getattr(kind, "impl", None), DateTime)):
                 row[key] = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
             elif isinstance(value, str) and isinstance(table.c[key].type, Date):
                 row[key] = dt.date.fromisoformat(value)
