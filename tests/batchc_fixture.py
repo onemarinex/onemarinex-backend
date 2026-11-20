@@ -93,3 +93,63 @@ def private_storage_observer():
               'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
              for p in folder.rglob('*') if p.is_file()] if folder.exists() else []
     return {'fixture_only': True, 'backend': 'local-private', 'files': files}
+
+# QA-only deterministic observation gates for routine own-notification concurrency and SOS rollback.
+import threading
+from sqlalchemy import event
+_C_READ_GATE = None
+_C_SOS_FAULT = {'armed': False, 'fired': False, 'proof': []}
+
+@app.post('/__fixture/batchc/notification-read-barrier')
+def arm_own_read_gate():
+    global _C_READ_GATE
+    _C_READ_GATE = {'barrier': threading.Barrier(2), 'pids': set(), 'events': []}
+    return {'fixture_only': True, 'stage': 'after real negative NotificationRead SELECT', 'participants': 2}
+
+@app.get('/__fixture/batchc/notification-read-barrier')
+def own_read_gate_result():
+    g = _C_READ_GATE
+    return {'pids': sorted(g['pids']) if g else [], 'events': g['events'] if g else []}
+
+@app.post('/__fixture/batchc/sos-commit-fault')
+def arm_sos_commit_fault():
+    _C_SOS_FAULT.update(armed=True, fired=False, proof=[])
+    return {'fixture_only': True, 'stage': 'real DB fault after SOS and timeline flush, before COMMIT'}
+
+@app.get('/__fixture/batchc/sos-commit-fault')
+def sos_commit_fault_result():
+    return _C_SOS_FAULT
+
+@event.listens_for(engine, 'after_cursor_execute')
+def batchc_after_real_statement(conn, cursor, statement, parameters, context, executemany):
+    sql = statement.lower().strip()
+    if sql.startswith('insert into crew_sos_requests'):
+        conn.info['batchc_sos_insert'] = True
+    if sql.startswith('insert into crew_sos_timeline_events'):
+        conn.info['batchc_sos_timeline_insert'] = True
+    g = _C_READ_GATE
+    if g and sql.startswith('select') and 'from notification_reads' in sql and 'where notification_reads.notification_id =' in sql:
+        pid = conn.connection.driver_connection.get_backend_pid()
+        with observer.LOCK:
+            first = pid not in g['pids'] and len(g['pids']) < 2
+            if first:
+                g['pids'].add(pid)
+                g['events'].append({'stage': 'after-negative-select', 'pid': pid, 'row_count': cursor.rowcount})
+        if first:
+            try:
+                g['barrier'].wait(timeout=12)
+                g['events'].append({'stage': 'released', 'pid': pid})
+            except threading.BrokenBarrierError:
+                g['events'].append({'stage': 'timeout', 'pid': pid})
+
+@event.listens_for(engine, 'commit')
+def batchc_before_real_commit(conn):
+    case_insert = conn.info.pop('batchc_sos_insert', False)
+    timeline_insert = conn.info.pop('batchc_sos_timeline_insert', False)
+    if _C_SOS_FAULT['armed'] and case_insert and timeline_insert:
+        _C_SOS_FAULT.update(armed=False, fired=True)
+        _C_SOS_FAULT['proof'].append({'case_insert_flushed': True, 'timeline_insert_flushed': True,
+                                    'stage': 'before real COMMIT', 'pid': conn.connection.driver_connection.get_backend_pid()})
+        conn.exec_driver_sql('SELECT 1 / 0')
+
+observer.SEED_TABLES.update({'notifications'})
