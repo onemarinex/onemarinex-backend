@@ -175,3 +175,34 @@ def batchc_complete_qa_snapshot():
             tables[table.name] = [dict(row) for row in values]
             completeness[table.name] = {'total_rows': total, 'returned_rows': len(values), 'truncated': len(values) < total}
         return jsonable_encoder({'identity': identity, 'tables': tables, 'table_completeness': completeness, 'transaction_events': list(observer.LOG), 'fixture_only': True})
+_C_MAGIC_GATE = None
+
+@app.post('/__fixture/batchc/magic-append-barrier')
+def arm_magic_append_gate():
+    global _C_MAGIC_GATE
+    _C_MAGIC_GATE = {'barrier': threading.Barrier(2), 'pids': set(), 'events': []}
+    return {'fixture_only': True, 'stage': 'after genuine scoped itinerary read', 'participants': 2}
+
+@app.get('/__fixture/batchc/magic-append-barrier')
+def magic_append_gate_result():
+    g = _C_MAGIC_GATE
+    return {'pids': sorted(g['pids']) if g else [], 'events': g['events'] if g else []}
+
+@event.listens_for(engine, 'after_cursor_execute')
+def batchc_hold_itinerary_reads(conn, cursor, statement, parameters, context, executemany):
+    sql = statement.lower().strip()
+    g = _C_MAGIC_GATE
+    if not g or not sql.startswith('select') or 'from driver_magic_links' not in sql or 'where driver_magic_links.token =' not in sql:
+        return
+    pid = conn.connection.driver_connection.get_backend_pid()
+    with observer.LOCK:
+        first = pid not in g['pids'] and len(g['pids']) < 2
+        if first:
+            g['pids'].add(pid)
+            g['events'].append({'stage': 'after-itinerary-select', 'pid': pid, 'row_count': cursor.rowcount})
+    if first:
+        try:
+            g['barrier'].wait(timeout=12)
+            g['events'].append({'stage': 'released', 'pid': pid})
+        except threading.BrokenBarrierError:
+            g['events'].append({'stage': 'timeout', 'pid': pid})
