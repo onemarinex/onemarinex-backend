@@ -24,7 +24,7 @@ CHAT_PROVIDER_CALLS = []
 class SyntheticChatClassifier:
     async def create(self, **payload):
         text = str(payload.get('messages', [{}])[0].get('content', ''))
-        if not text.startswith(('qa ', 'evaluate this text')):
+        if not text.lower().startswith(('qa ', 'evaluate this text')):
             raise RuntimeError('Only plain synthetic QA moderation payloads allowed')
         language = 'language classifier' in payload.get('system', '').lower()
         result = 'ENGLISH' if language else 'CLEAN'
