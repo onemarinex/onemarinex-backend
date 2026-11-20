@@ -153,3 +153,25 @@ def batchc_before_real_commit(conn):
         conn.exec_driver_sql('SELECT 1 / 0')
 
 observer.SEED_TABLES.update({'notifications'})
+# Replace only the inherited QA snapshot endpoint in this Batch C fixture, never an application route.
+# The old 300-row sampling limit is unsuitable for approved 501-row inventory tests.
+from sqlalchemy import select, func
+from fastapi.encoders import jsonable_encoder
+app.router.routes[:] = [r for r in app.router.routes if getattr(r, 'path', None) != '/__fixture/batch/snapshot']
+
+@app.get('/__fixture/batch/snapshot')
+def batchc_complete_qa_snapshot():
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        identity = dict(conn.execute(text("select current_database() db, host(inet_server_addr()) host, inet_server_port() port, pg_backend_pid() observer_pid, current_setting('transaction_isolation') isolation")).mappings().one())
+        tables = {}
+        completeness = {}
+        for table in Base.metadata.sorted_tables:
+            if table.name in {'email_verifications', 'refresh_tokens'}:
+                continue
+            columns = [c for c in table.columns if c.name not in observer.HIDDEN and not any(k in c.name.lower() for k in ('password', 'token', 'secret', 'otp', 'hash'))]
+            total = conn.execute(select(func.count()).select_from(table)).scalar_one()
+            values = conn.execute(select(*columns).limit(2000)).mappings().all()
+            tables[table.name] = [dict(row) for row in values]
+            completeness[table.name] = {'total_rows': total, 'returned_rows': len(values), 'truncated': len(values) < total}
+        return jsonable_encoder({'identity': identity, 'tables': tables, 'table_completeness': completeness, 'transaction_events': list(observer.LOG), 'fixture_only': True})
