@@ -79,3 +79,17 @@ def model_contracts():
     root = Path(__file__).resolve().parents[1]
     paths = ('app/db/models/aggregator_profile.py', 'app/db/models/cab_booking.py', 'app/api/v1/registration.py', 'app/services/booking_service.py', 'app/api/v1/routes_agency_transfers.py')
     return {"database_columns": {name:[c['name'] for c in inspector.get_columns(name)] for name in selected if inspector.has_table(name)}, "mounted_routes":[{"path": r.path, "methods": sorted(r.methods or [])} for r in app.routes if hasattr(r,'methods')], "source_sha256": {name:hashlib.sha256((root/name).read_bytes()).hexdigest() for name in paths}, "assessment_boundary": "Observed genuine pinned schema and mounted routes; absence of guessed field names alone does not establish missing functionality."}
+# Read-only observer of the isolated QA private-upload directory. No storage handler is replaced.
+@app.get('/__fixture/batchc/private-storage')
+def private_storage_observer():
+    from app.services import storage
+    from pathlib import Path
+    import hashlib
+    folder = Path(storage.PRIVATE_UPLOAD_DIR).resolve()
+    workspace = Path.cwd().resolve()
+    if not folder.is_relative_to(workspace):
+        raise HTTPException(400, 'QA observer requires workspace-private storage')
+    files = [{'relative_path': p.relative_to(folder).as_posix(), 'bytes': p.stat().st_size,
+              'sha256': hashlib.sha256(p.read_bytes()).hexdigest()}
+             for p in folder.rglob('*') if p.is_file()] if folder.exists() else []
+    return {'fixture_only': True, 'backend': 'local-private', 'files': files}
