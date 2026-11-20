@@ -13,6 +13,29 @@ from app.db.models.aggregator_profile import AggregatorProfile
 from app.services.auth import get_password_hash
 from app.api.v1 import routes_reviews, routes_files, routes_expenses, routes_facilities, routes_hotels, routes_restaurants, routes_sightseeing, routes_pubs, routes_payments
 import batcha_observer as observer
+from app.api.v1 import routes_chat, routes_chat_moderation
+app.include_router(routes_chat.router, prefix='/api/v1/chat')
+app.include_router(routes_chat_moderation.router, prefix='/api/v1/superadmin')
+# Safe external classifier boundary for plain synthetic chat text. Genuine
+# moderation orchestration, settings, authorization, writes and fanout remain.
+from app.services import moderation_ai
+from types import SimpleNamespace as ChatProviderResponse
+CHAT_PROVIDER_CALLS = []
+class SyntheticChatClassifier:
+    async def create(self, **payload):
+        text = str(payload.get('messages', [{}])[0].get('content', ''))
+        if not text.startswith(('qa ', 'evaluate this text')):
+            raise RuntimeError('Only plain synthetic QA moderation payloads allowed')
+        language = 'language classifier' in payload.get('system', '').lower()
+        result = 'ENGLISH' if language else 'CLEAN'
+        CHAT_PROVIDER_CALLS.append({'boundary': 'external classifier', 'result': result, 'external_egress': False})
+        return ChatProviderResponse(content=[ChatProviderResponse(text=result)])
+moderation_ai.ANTHROPIC_API_KEY = 'qa-external-classifier-only'
+moderation_ai._client = ChatProviderResponse(messages=SyntheticChatClassifier())
+@app.get('/__fixture/batchc/chat-provider')
+def chat_provider_observer():
+    return {'attempts': list(CHAT_PROVIDER_CALLS), 'external_egress': False}
+observer.SEED_TABLES.update({'chat_messages'})
 
 assert engine.url.database == 'company_ops_fixture' and engine.url.host == '127.0.0.1' and engine.url.port == 55957
 for router,prefix in [(routes_reviews.router,'/api/v1/reviews'),(routes_files.router,'/api/v1/files'),(routes_expenses.router,'/api/v1/crew/expense-bills'),(routes_facilities.router,'/api/v1/facilities'),(routes_hotels.router,'/api/v1/hotels'),(routes_restaurants.router,'/api/v1/restaurants'),(routes_sightseeing.router,'/api/v1/sightseeing'),(routes_pubs.router,'/api/v1/pubs'),(routes_payments.router,'/api/v1/crew/payments')]:
