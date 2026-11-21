@@ -23,6 +23,10 @@ def company_scope(body: Scope):
     if not body.case_id.startswith(('M13-','M14-','M16-','X04-')):
         raise HTTPException(400, 'Synthetic Batch D scope only')
     with SessionLocal() as db:
+        agent=db.query(User).filter_by(email='agent@example.com').one()
+        agency=agent.agent_profile
+        from app.db.models.port import Port
+        port=db.query(Port).order_by(Port.id).first()
         result={'case_id':body.case_id,'users':{},'companies':{},'memberships':{}}
         for k in ['A','B']:
             co=ShippingCompany(legal_name='QA '+body.case_id+' '+k,normalized_name='QA '+body.case_id+' '+k,status='VERIFIED')
@@ -35,13 +39,13 @@ def company_scope(body: Scope):
                 m=CompanyUserMembership(company_id=result['companies'][tenant],user_id=u.id,role=member,enabled=True);db.add(m);db.flush();result['memberships'][name]=m.id
             if name in ['moving','returning']:
                 m=CompanyUserMembership(company_id=result['companies']['A'],user_id=u.id,role='VIEWER',enabled=False);db.add(m);db.flush();result['memberships'][name+'_A']=m.id
-        vessel=Vessel(name='QA '+body.case_id+' vessel',imo_number='QA-'+body.case_id,vessel_type='Bulk Carrier',status='Active',agent_id=fixture.agent.id)
+        vessel=Vessel(name='QA '+body.case_id+' vessel',imo_number='QA-'+body.case_id,vessel_type='Bulk Carrier',status='Active',agent_id=agent.id)
         db.add(vessel);db.flush()
-        call=VesselCall(vessel_id=vessel.id,agency_id=fixture.agency.id,port_id=fixture.port.id,vessel_name=vessel.name,agency_name='Agency',started_at=datetime(2026,6,1,tzinfo=timezone.utc),port_name=fixture.port.name,imo_number=vessel.imo_number)
+        call=VesselCall(vessel_id=vessel.id,agency_id=agency.id,port_id=port.id,vessel_name=vessel.name,agency_name='Agency',started_at=datetime(2026,6,1,tzinfo=timezone.utc),port_name=port.name,imo_number=vessel.imo_number)
         db.add(call);db.flush()
         claim=VesselRoleClaim(company_id=result['companies']['A'],vessel_id=vessel.id,role='ISM_MANAGER',effective_start=datetime(2026,1,1,tzinfo=timezone.utc),status='APPROVED')
         db.add(claim);db.commit()
-        result.update(vessel_id=vessel.id,call_id=call.id,claim_id=claim.id,port_id=fixture.port.id)
+        result.update(vessel_id=vessel.id,call_id=call.id,claim_id=claim.id,port_id=port.id)
         return result
 
 from sqlalchemy import event
@@ -93,7 +97,7 @@ def port_scope(body:Scope):
             port=Port(name='QA '+body.case_id+' '+key,is_active=True)
             db.add(port);db.flush();result[key]={'id':port.id,'code':port.code}
             db.add(PortRule(port_name=port.code,timezone='Europe/London' if key=='London' else 'Asia/Kolkata',opening_time='00:00',closing_time='23:59',working_days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun']))
-        agent=db.get(User,fixture.agent.id);agent.agent_profile.assigned_port=result['Vizag']['code']
+        agent=db.query(User).filter_by(email='agent@example.com').one();agent.agent_profile.assigned_port=result['Vizag']['code']
         u=User(email=body.case_id.lower()+'.crew@example.com',name='QA port crew',role='crew',hashed_password=get_password_hash('fixture-only-secret'))
         db.add(u);db.flush();db.add(CrewProfile(user_id=u.id,full_name='QA port crew',rank='AB',nationality='IN',passport_number='QA-'+body.case_id,current_port=result['London']['code']))
         db.commit();result['crew_email']=u.email
