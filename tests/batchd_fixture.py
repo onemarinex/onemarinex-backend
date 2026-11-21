@@ -113,3 +113,43 @@ def clock(body:Clock):
         port_time.utc_now=lambda:instant
     else:port_time.utc_now=real_utc_now
     return {'clock_dependency_only':True,'instant':body.instant}
+
+@app.get('/__fixture/batchd/schema-readiness')
+def schema_readiness():
+    from app.db.schema_verification import missing_guarded_columns,verify_critical_schema
+    missing=missing_guarded_columns()
+    error=None
+    try:verify_critical_schema()
+    except RuntimeError as exc:error=str(exc)
+    return {'actual_guard':'app.db.schema_verification.verify_critical_schema','missing_guarded_columns':missing,'guard_exception':error,'fixture_startup_is_not_full_app_startup':True}
+
+@app.get('/__fixture/batchd/migration-graph')
+def migration_graph():
+    from alembic.script import ScriptDirectory
+    from app.db.migrate import _alembic_config,current_revision
+    try:
+        scripts=ScriptDirectory.from_config(_alembic_config())
+        return {'heads':list(scripts.get_heads()),'revisions':[{'revision':r.revision,'down_revision':r.down_revision} for r in scripts.walk_revisions()],'current_revision':current_revision(),'graph_error':None,'no_ddl_executed':True}
+    except Exception as exc:
+        return {'graph_error':type(exc).__name__+': '+str(exc),'no_ddl_executed':True}
+
+class PerformanceFixture(BaseModel):
+    case_id:str
+    company_id:int
+    count:int
+@app.post('/__fixture/batchd/performance-cohort')
+def performance_scope(body:PerformanceFixture):
+    if body.case_id not in ['M16-10'] or body.count not in [1,25,100]:raise HTTPException(400,'Bounded approved cohort only')
+    with SessionLocal() as db:
+        company=db.get(ShippingCompany,body.company_id)
+        if company is None or not company.legal_name.startswith('QA '+body.case_id):raise HTTPException(400,'Own QA company only')
+        agent=db.query(User).filter_by(email='agent@example.com').one()
+        agency=agent.agent_profile
+        port=db.query(Port).order_by(Port.id).first()
+        existing=db.query(VesselRoleClaim).filter_by(company_id=company.id).count()
+        for i in range(existing,body.count):
+            v=Vessel(name='QA '+body.case_id+' '+str(i),imo_number='QA-PERF-'+str(i),vessel_type='Bulk Carrier',status='Active',agent_id=agent.id);db.add(v);db.flush()
+            db.add(VesselCall(vessel_id=v.id,agency_id=agency.id,port_id=port.id,vessel_name=v.name,imo_number=v.imo_number,agency_name='Agency',started_at=datetime(2026,6,1,tzinfo=timezone.utc)))
+            db.add(VesselRoleClaim(company_id=company.id,vessel_id=v.id,role='ISM_MANAGER',effective_start=datetime(2026,1,1,tzinfo=timezone.utc),status='APPROVED'))
+        db.commit()
+        return {'eligible_vessels':db.query(VesselRoleClaim).filter_by(company_id=company.id,status='APPROVED').count(),'synthetic_only':True}
