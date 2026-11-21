@@ -229,3 +229,26 @@ def batchc_hold_itinerary_reads(conn, cursor, statement, parameters, context, ex
             g['events'].append({'stage': 'released', 'pid': pid})
         except threading.BrokenBarrierError:
             g['events'].append({'stage': 'timeout', 'pid': pid})
+
+# Exercise the genuine scheduled job with only its wall-clock dependency frozen.
+class ReminderClock(BaseModel):
+    instant: str
+@app.post('/__fixture/batchc/reminders/run')
+def run_synthetic_reminder_poll(body: ReminderClock):
+    from datetime import datetime, timezone
+    from app.services import shore_pass_reminders as job
+    value = datetime.fromisoformat(body.instant.replace('Z', '+00:00'))
+    if value.tzinfo is None:
+        raise HTTPException(400, 'Explicit UTC offset required')
+    frozen = value.astimezone(timezone.utc).replace(tzinfo=None)
+    original = job.datetime
+    class FrozenClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen if tz is None else frozen.replace(tzinfo=timezone.utc).astimezone(tz)
+    try:
+        job.datetime = FrozenClock
+        job.run_shore_pass_reminders()
+        return {'invoked': 'app.services.shore_pass_reminders.run_shore_pass_reminders', 'frozen_utc': value.isoformat(), 'topology': 'single actual application worker; no concurrent scheduler claim'}
+    finally:
+        job.datetime = original
