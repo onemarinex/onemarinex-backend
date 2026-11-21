@@ -77,3 +77,35 @@ def arm_fault(body:Fault):
     else:
         raise HTTPException(400,'Only specified disposable fault boundaries allowed')
     return {'armed':body.kind,'fixture_only':True}
+
+from app.db.models.port import Port
+from app.db.models.port_rule import PortRule
+from app.db.models.crew_profile import CrewProfile
+from app.services import port_time
+real_utc_now=port_time.utc_now
+
+@app.post('/__fixture/batchd/ports')
+def port_scope(body:Scope):
+    if not body.case_id.startswith(('M14-','X04-')):raise HTTPException(400,'Batch D ports only')
+    with SessionLocal() as db:
+        result={}
+        for key in ['Vizag','Mumbai','London']:
+            port=Port(name='QA '+body.case_id+' '+key,is_active=True)
+            db.add(port);db.flush();result[key]={'id':port.id,'code':port.code}
+            db.add(PortRule(port_name=port.code,timezone='Europe/London' if key=='London' else 'Asia/Kolkata',opening_time='00:00',closing_time='23:59',working_days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun']))
+        agent=db.get(User,fixture.agent.id);agent.agent_profile.assigned_port=result['Vizag']['code']
+        u=User(email=body.case_id.lower()+'.crew@example.com',name='QA port crew',role='crew',hashed_password=get_password_hash('fixture-only-secret'))
+        db.add(u);db.flush();db.add(CrewProfile(user_id=u.id,full_name='QA port crew',rank='AB',nationality='IN',passport_number='QA-'+body.case_id,current_port=result['London']['code']))
+        db.commit();result['crew_email']=u.email
+        return result
+
+class Clock(BaseModel):
+    instant:str|None=None
+@app.post('/__fixture/batchd/clock')
+def clock(body:Clock):
+    if body.instant:
+        instant=datetime.fromisoformat(body.instant.replace('Z','+00:00'))
+        if instant.tzinfo is None:raise HTTPException(400,'Offset required')
+        port_time.utc_now=lambda:instant
+    else:port_time.utc_now=real_utc_now
+    return {'clock_dependency_only':True,'instant':body.instant}
